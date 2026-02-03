@@ -15,7 +15,11 @@ type SnakeVisual = {
 
 type WebGLScene = {
   resize: (width: number, height: number, dpr: number) => void
-  render: (snapshot: GameStateSnapshot | null, camera: Camera, localPlayerId: string | null) => void
+  render: (
+    snapshot: GameStateSnapshot | null,
+    camera: Camera,
+    localPlayerId: string | null,
+  ) => { x: number; y: number } | null
   dispose: () => void
 }
 
@@ -118,11 +122,16 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   })
   let pelletMesh: THREE.InstancedMesh | null = null
   let pelletCapacity = 0
+  let viewportWidth = 1
+  let viewportHeight = 1
 
   const snakes = new Map<string, SnakeVisual>()
+  const lastHeadPositions = new Map<string, THREE.Vector3>()
+  const lastForwardDirections = new Map<string, THREE.Vector3>()
   const tempMatrix = new THREE.Matrix4()
   const tempVector = new THREE.Vector3()
   const tempVectorB = new THREE.Vector3()
+  const tempVectorC = new THREE.Vector3()
 
   const createSnakeVisual = (color: string): SnakeVisual => {
     const group = new THREE.Group()
@@ -215,6 +224,8 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       visual.eyeRight.visible = false
       visual.pupilLeft.visible = false
       visual.pupilRight.visible = false
+      lastHeadPositions.delete(player.id)
+      lastForwardDirections.delete(player.id)
       return
     }
 
@@ -230,16 +241,47 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     visual.head.position.copy(headPosition)
 
     let forward = tempVectorB
-    if (nodes.length > 1) {
-      const nextPoint = pointToVector(nodes[1], centerlineRadius)
-      forward = headPosition.clone().sub(nextPoint)
+    let hasForward = false
+    const lastHead = lastHeadPositions.get(player.id)
+    const lastForward = lastForwardDirections.get(player.id)
+
+    if (lastHead) {
+      const delta = headPosition.clone().sub(lastHead)
+      delta.addScaledVector(headNormal, -delta.dot(headNormal))
+      if (delta.lengthSq() > 1e-8) {
+        delta.normalize()
+        forward.copy(delta)
+        hasForward = true
+        if (lastForward) {
+          lastForward.copy(forward)
+        } else {
+          lastForwardDirections.set(player.id, forward.clone())
+        }
+      } else if (lastForward) {
+        forward.copy(lastForward)
+        hasForward = true
+      }
+    }
+
+    if (!hasForward) {
+      if (nodes.length > 1) {
+        const nextPoint = pointToVector(nodes[1], centerlineRadius)
+        forward = headPosition.clone().sub(nextPoint)
+      } else {
+        forward = new THREE.Vector3().crossVectors(headNormal, new THREE.Vector3(0, 1, 0))
+      }
+      if (forward.lengthSq() < 0.00001) {
+        forward = new THREE.Vector3().crossVectors(headNormal, new THREE.Vector3(1, 0, 0))
+      }
+      forward.normalize()
+    }
+
+    const cachedHead = lastHeadPositions.get(player.id)
+    if (cachedHead) {
+      cachedHead.copy(headPosition)
     } else {
-      forward = new THREE.Vector3().crossVectors(headNormal, new THREE.Vector3(0, 1, 0))
+      lastHeadPositions.set(player.id, headPosition.clone())
     }
-    if (forward.lengthSq() < 0.00001) {
-      forward = new THREE.Vector3().crossVectors(headNormal, new THREE.Vector3(1, 0, 0))
-    }
-    forward.normalize()
 
     const right = new THREE.Vector3().crossVectors(forward, headNormal)
     if (right.lengthSq() < 0.00001) {
@@ -302,6 +344,8 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       if (!activeIds.has(id)) {
         removeSnake(visual)
         snakes.delete(id)
+        lastHeadPositions.delete(id)
+        lastForwardDirections.delete(id)
       }
     }
   }
@@ -336,19 +380,44 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     } else {
       world.quaternion.identity()
     }
+    camera.updateMatrixWorld()
+
+    let localHeadScreen: { x: number; y: number } | null = null
 
     if (snapshot) {
       updateSnakes(snapshot.players, localPlayerId)
       updatePellets(snapshot.pellets)
+
+      if (localPlayerId) {
+        const localPlayer = snapshot.players.find((player) => player.id === localPlayerId)
+        const head = localPlayer?.snake[0]
+        if (head) {
+          const headNormal = tempVectorC.set(head.x, head.y, head.z).normalize()
+          const headPosition = headNormal
+            .clone()
+            .multiplyScalar(PLANET_RADIUS + HEAD_RADIUS * HEAD_LIFT_FACTOR)
+          headPosition.applyQuaternion(world.quaternion)
+          headPosition.project(camera)
+
+          const screenX = (headPosition.x * 0.5 + 0.5) * viewportWidth
+          const screenY = (-headPosition.y * 0.5 + 0.5) * viewportHeight
+          if (Number.isFinite(screenX) && Number.isFinite(screenY)) {
+            localHeadScreen = { x: screenX, y: screenY }
+          }
+        }
+      }
     } else {
       updateSnakes([], localPlayerId)
       updatePellets([])
     }
 
     renderer.render(scene, camera)
+    return localHeadScreen
   }
 
   const resize = (width: number, height: number, dpr: number) => {
+    viewportWidth = width
+    viewportHeight = height
     renderer.setPixelRatio(dpr)
     renderer.setSize(width, height, false)
     camera.aspect = width / height

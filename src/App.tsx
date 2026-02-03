@@ -211,16 +211,19 @@ function drawHud(
   ctx: CanvasRenderingContext2D,
   config: RenderConfig,
   pointerAngle: number | null,
+  origin: { x: number; y: number } | null,
 ) {
   ctx.clearRect(0, 0, config.width, config.height)
   if (pointerAngle === null) return
 
+  const originX = origin?.x ?? config.centerX
+  const originY = origin?.y ?? config.centerY
   const radius = Math.min(config.width, config.height) * 0.22
   ctx.beginPath()
-  ctx.moveTo(config.centerX, config.centerY)
+  ctx.moveTo(originX, originY)
   ctx.lineTo(
-    config.centerX + Math.cos(pointerAngle) * radius,
-    config.centerY + Math.sin(pointerAngle) * radius,
+    originX + Math.cos(pointerAngle) * radius,
+    originY + Math.sin(pointerAngle) * radius,
   )
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)'
   ctx.lineWidth = Math.max(2, config.width * 0.004)
@@ -229,7 +232,7 @@ function drawHud(
 
   ctx.beginPath()
   ctx.fillStyle = 'rgba(255, 255, 255, 0.7)'
-  ctx.arc(config.centerX, config.centerY, Math.max(2, config.width * 0.006), 0, Math.PI * 2)
+  ctx.arc(originX, originY, Math.max(2, config.width * 0.006), 0, Math.PI * 2)
   ctx.fill()
 }
 
@@ -365,8 +368,13 @@ export default function App() {
           snapshot?.players.find((player) => player.id === localId)?.snake[0] ?? null
         const camera = updateCamera(localHead, cameraRef.current, cameraUpRef)
         cameraRef.current = camera
-        webgl.render(snapshot, camera, localId)
-        drawHud(hudCtx, config, pointerRef.current.active ? pointerRef.current.angle : null)
+        const headScreen = webgl.render(snapshot, camera, localId)
+        drawHud(
+          hudCtx,
+          config,
+          pointerRef.current.active ? pointerRef.current.angle : null,
+          headScreen,
+        )
       }
       frameId = window.requestAnimationFrame(renderLoop)
     }
