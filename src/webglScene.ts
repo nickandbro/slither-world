@@ -22,8 +22,8 @@ const PLANET_RADIUS = 1
 const SURFACE_OFFSET = 0.02
 const SNAKE_RADIUS = 0.045
 const HEAD_RADIUS = SNAKE_RADIUS * 1.35
-const SNAKE_SURFACE_RADIUS = PLANET_RADIUS + SURFACE_OFFSET + SNAKE_RADIUS * 1.35
-const HEAD_SURFACE_RADIUS = PLANET_RADIUS + SURFACE_OFFSET + SNAKE_RADIUS * 1.65
+const SNAKE_LIFT_FACTOR = 0.85
+const HEAD_LIFT_FACTOR = 0.92
 const EYE_RADIUS = SNAKE_RADIUS * 0.45
 const PUPIL_RADIUS = EYE_RADIUS * 0.5
 const PELLET_RADIUS = SNAKE_RADIUS * 0.75
@@ -187,15 +187,16 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     updateSnakeMaterial(visual.head.material, visual.color, isLocal)
 
     const nodes = player.snake
+    const radius = isLocal ? SNAKE_RADIUS * 1.1 : SNAKE_RADIUS
+    const centerlineRadius = PLANET_RADIUS + radius * SNAKE_LIFT_FACTOR
     if (nodes.length < 2) {
       visual.tube.visible = false
     } else {
       visual.tube.visible = true
-      const curvePoints = nodes.map((node) => pointToVector(node, SNAKE_SURFACE_RADIUS))
+      const curvePoints = nodes.map((node) => pointToVector(node, centerlineRadius))
       const baseCurve = new THREE.CatmullRomCurve3(curvePoints, false, 'centripetal')
-      const curve = new SphericalCurve(baseCurve, SNAKE_SURFACE_RADIUS)
+      const curve = new SphericalCurve(baseCurve, centerlineRadius)
       const tubularSegments = Math.max(8, curvePoints.length * 4)
-      const radius = isLocal ? SNAKE_RADIUS * 1.1 : SNAKE_RADIUS
       const tubeGeometry = new THREE.TubeGeometry(curve, tubularSegments, radius, 10, false)
       visual.tube.geometry.dispose()
       visual.tube.geometry = tubeGeometry
@@ -218,12 +219,12 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
 
     const headPoint = nodes[0]
     const headNormal = tempVector.set(headPoint.x, headPoint.y, headPoint.z).normalize()
-    const headPosition = headNormal.clone().multiplyScalar(HEAD_SURFACE_RADIUS)
+    const headPosition = headNormal.clone().multiplyScalar(PLANET_RADIUS + HEAD_RADIUS * HEAD_LIFT_FACTOR)
     visual.head.position.copy(headPosition)
 
     let forward = tempVectorB
     if (nodes.length > 1) {
-      const nextPoint = pointToVector(nodes[1], SNAKE_SURFACE_RADIUS)
+      const nextPoint = pointToVector(nodes[1], centerlineRadius)
       forward = headPosition.clone().sub(nextPoint)
     } else {
       forward = new THREE.Vector3().crossVectors(headNormal, new THREE.Vector3(0, 1, 0))
