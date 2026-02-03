@@ -27,7 +27,6 @@ const PLANET_RADIUS = 1
 const SNAKE_RADIUS = 0.045
 const HEAD_RADIUS = SNAKE_RADIUS * 1.35
 const SNAKE_LIFT_FACTOR = 0.85
-const HEAD_LIFT_FACTOR = 0.92
 const EYE_RADIUS = SNAKE_RADIUS * 0.45
 const PUPIL_RADIUS = EYE_RADIUS * 0.5
 const PELLET_RADIUS = SNAKE_RADIUS * 0.75
@@ -237,7 +236,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
 
     const headPoint = nodes[0]
     const headNormal = tempVector.set(headPoint.x, headPoint.y, headPoint.z).normalize()
-    const headPosition = headNormal.clone().multiplyScalar(PLANET_RADIUS + HEAD_RADIUS * HEAD_LIFT_FACTOR)
+    const headPosition = headNormal.clone().multiplyScalar(centerlineRadius)
     visual.head.position.copy(headPosition)
 
     let forward = tempVectorB
@@ -392,10 +391,10 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
         const localPlayer = snapshot.players.find((player) => player.id === localPlayerId)
         const head = localPlayer?.snake[0]
         if (head) {
+          const radius = SNAKE_RADIUS * 1.1
+          const centerlineRadius = PLANET_RADIUS + radius * SNAKE_LIFT_FACTOR
           const headNormal = tempVectorC.set(head.x, head.y, head.z).normalize()
-          const headPosition = headNormal
-            .clone()
-            .multiplyScalar(PLANET_RADIUS + HEAD_RADIUS * HEAD_LIFT_FACTOR)
+          const headPosition = headNormal.clone().multiplyScalar(centerlineRadius)
           headPosition.applyQuaternion(world.quaternion)
           headPosition.project(camera)
 
