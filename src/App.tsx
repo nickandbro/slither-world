@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import { createWebGLScene } from './webglScene'
-import type { Camera, GameStateSnapshot, Point, Quaternion } from './gameTypes'
+import type { Camera, GameStateSnapshot, PlayerSnapshot, Point, Quaternion } from './gameTypes'
 
 type LeaderboardEntry = {
   name: string
@@ -16,20 +16,25 @@ type RenderConfig = {
   centerY: number
 }
 
+type TimedSnapshot = GameStateSnapshot & {
+  receivedAt: number
+}
+
 const LOCAL_STORAGE_ID = 'spherical_snake_player_id'
 const LOCAL_STORAGE_NAME = 'spherical_snake_player_name'
 const LOCAL_STORAGE_BEST = 'spherical_snake_best_score'
 const LOCAL_STORAGE_ROOM = 'spherical_snake_room'
 const DEFAULT_ROOM = 'main'
 
+const MAX_SNAPSHOT_BUFFER = 20
+const MIN_INTERP_DELAY_MS = 60
+const MAX_EXTRAPOLATION_MS = 70
+const OFFSET_SMOOTHING = 0.12
+
 function normalize(point: Point) {
   const len = Math.sqrt(point.x * point.x + point.y * point.y + point.z * point.z)
   if (!Number.isFinite(len) || len === 0) return { x: 0, y: 0, z: 0 }
   return { x: point.x / len, y: point.y / len, z: point.z / len }
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value))
 }
 
 function cross(a: Point, b: Point): Point {
@@ -50,42 +55,6 @@ function normalizeQuat(q: Quaternion) {
   const len = Math.sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w)
   if (!Number.isFinite(len) || len === 0) return { ...IDENTITY_QUAT }
   return { x: q.x / len, y: q.y / len, z: q.z / len, w: q.w / len }
-}
-
-function quatSlerp(a: Quaternion, b: Quaternion, t: number) {
-  let cosOmega = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w
-  let bx = b.x
-  let by = b.y
-  let bz = b.z
-  let bw = b.w
-
-  if (cosOmega < 0) {
-    cosOmega = -cosOmega
-    bx = -bx
-    by = -by
-    bz = -bz
-    bw = -bw
-  }
-
-  if (cosOmega > 0.9995) {
-    return normalizeQuat({
-      x: a.x + t * (bx - a.x),
-      y: a.y + t * (by - a.y),
-      z: a.z + t * (bz - a.z),
-      w: a.w + t * (bw - a.w),
-    })
-  }
-
-  const omega = Math.acos(cosOmega)
-  const sinOmega = Math.sin(omega)
-  const scaleA = Math.sin((1 - t) * omega) / sinOmega
-  const scaleB = Math.sin(t * omega) / sinOmega
-  return {
-    x: a.x * scaleA + bx * scaleB,
-    y: a.y * scaleA + by * scaleB,
-    z: a.z * scaleA + bz * scaleB,
-    w: a.w * scaleA + bw * scaleB,
-  }
 }
 
 function quatFromBasis(right: Point, up: Point, forward: Point): Quaternion {
@@ -188,16 +157,7 @@ function updateCamera(head: Point | null, current: Camera, upRef: { current: Poi
   upOrtho = normalize(upOrtho)
 
   const desired = normalizeQuat(quatFromBasis(right, upOrtho, headNorm))
-  if (!current.active) return { q: desired, active: true }
-  const dotQuat =
-    current.q.x * desired.x +
-    current.q.y * desired.y +
-    current.q.z * desired.z +
-    current.q.w * desired.w
-  const angleDiff = 2 * Math.acos(clamp(Math.abs(dotQuat), 0, 1))
-  const blend = clamp(angleDiff * 0.08, 0.03, 0.1)
-  const blended = quatSlerp(current.q, desired, blend)
-  return { q: blended, active: true }
+  return { q: desired, active: true }
 }
 
 function axisFromPointer(angle: number, camera: Camera) {
@@ -205,6 +165,118 @@ function axisFromPointer(angle: number, camera: Camera) {
   if (!camera.active) return normalize(axis)
   const inverse = { x: -camera.q.x, y: -camera.q.y, z: -camera.q.z, w: camera.q.w }
   return normalize(rotateVectorByQuat(axis, inverse))
+}
+
+function lerp(a: number, b: number, t: number) {
+  return a + (b - a) * t
+}
+
+function lerpPoint(a: Point, b: Point, t: number): Point {
+  return {
+    x: lerp(a.x, b.x, t),
+    y: lerp(a.y, b.y, t),
+    z: lerp(a.z, b.z, t),
+  }
+}
+
+function blendPlayers(a: PlayerSnapshot, b: PlayerSnapshot, t: number): PlayerSnapshot {
+  const maxLength = Math.max(a.snake.length, b.snake.length)
+  const snake: Point[] = []
+
+  for (let i = 0; i < maxLength; i += 1) {
+    const nodeA = a.snake[i]
+    const nodeB = b.snake[i]
+    if (nodeA && nodeB) {
+      snake.push(lerpPoint(nodeA, nodeB, t))
+    } else if (nodeB) {
+      snake.push({ ...nodeB })
+    } else if (nodeA) {
+      snake.push({ ...nodeA })
+    }
+  }
+
+  return {
+    id: b.id,
+    name: b.name,
+    color: b.color,
+    score: b.score,
+    alive: b.alive,
+    snake,
+  }
+}
+
+function blendSnapshots(a: GameStateSnapshot, b: GameStateSnapshot, t: number): GameStateSnapshot {
+  const playersA = new Map(a.players.map((player) => [player.id, player]))
+  const playersB = new Map(b.players.map((player) => [player.id, player]))
+  const orderedIds: string[] = []
+
+  for (const player of b.players) orderedIds.push(player.id)
+  for (const player of a.players) {
+    if (!playersB.has(player.id)) orderedIds.push(player.id)
+  }
+
+  const players: PlayerSnapshot[] = []
+  for (const id of orderedIds) {
+    const playerA = playersA.get(id)
+    const playerB = playersB.get(id)
+    if (playerA && playerB) {
+      players.push(blendPlayers(playerA, playerB, t))
+    } else if (playerB) {
+      players.push(playerB)
+    } else if (playerA && t < 0.95) {
+      players.push(playerA)
+    }
+  }
+
+  return {
+    now: lerp(a.now, b.now, t),
+    pellets: t < 0.5 ? a.pellets : b.pellets,
+    players,
+  }
+}
+
+function buildInterpolatedSnapshot(
+  buffer: TimedSnapshot[],
+  renderTime: number,
+  maxExtrapolationMs: number,
+): GameStateSnapshot | null {
+  if (buffer.length === 0) return null
+
+  while (buffer.length > 2 && buffer[1].now <= renderTime - maxExtrapolationMs) {
+    buffer.shift()
+  }
+
+  let before = buffer[0]
+  let after: TimedSnapshot | undefined
+
+  for (let i = 1; i < buffer.length; i += 1) {
+    if (buffer[i].now >= renderTime) {
+      before = buffer[i - 1]
+      after = buffer[i]
+      break
+    }
+  }
+
+  if (!after) {
+    const latest = buffer[buffer.length - 1]
+    const previous = buffer.length > 1 ? buffer[buffer.length - 2] : null
+    const extra = renderTime - latest.now
+    if (previous && extra > 0 && extra <= maxExtrapolationMs) {
+      const dt = latest.now - previous.now
+      if (dt > 0) {
+        const t = 1 + extra / dt
+        return blendSnapshots(previous, latest, t)
+      }
+    }
+    return latest
+  }
+
+  if (renderTime <= before.now) return before
+
+  const span = after.now - before.now
+  if (span <= 0) return before
+  const t = (renderTime - before.now) / span
+  return blendSnapshots(before, after, t)
 }
 
 function drawHud(
@@ -275,7 +347,10 @@ export default function App() {
   const renderConfigRef = useRef<RenderConfig | null>(null)
   const pointerRef = useRef({ angle: 0, boost: false, active: false })
   const sendIntervalRef = useRef<number | null>(null)
-  const snapshotRef = useRef<GameStateSnapshot | null>(null)
+  const snapshotBufferRef = useRef<TimedSnapshot[]>([])
+  const serverOffsetRef = useRef<number | null>(null)
+  const tickIntervalRef = useRef(50)
+  const lastSnapshotTimeRef = useRef<number | null>(null)
   const cameraRef = useRef<Camera>({ q: { ...IDENTITY_QUAT }, active: false })
   const cameraUpRef = useRef<Point>({ x: 0, y: 1, z: 0 })
 
@@ -298,9 +373,41 @@ export default function App() {
   const score = localPlayer?.score ?? 0
   const playersOnline = gameState?.players.length ?? 0
 
-  useEffect(() => {
-    snapshotRef.current = gameState
-  }, [gameState])
+  const pushSnapshot = (state: GameStateSnapshot) => {
+    const now = Date.now()
+    const sampleOffset = state.now - now
+    const currentOffset = serverOffsetRef.current
+    serverOffsetRef.current =
+      currentOffset === null ? sampleOffset : currentOffset + (sampleOffset - currentOffset) * OFFSET_SMOOTHING
+
+    const lastSnapshotTime = lastSnapshotTimeRef.current
+    if (lastSnapshotTime !== null) {
+      const delta = state.now - lastSnapshotTime
+      if (delta > 0 && delta < 1000) {
+        tickIntervalRef.current = tickIntervalRef.current * 0.9 + delta * 0.1
+      }
+    }
+    lastSnapshotTimeRef.current = state.now
+
+    const buffer = snapshotBufferRef.current
+    buffer.push({ ...state, receivedAt: now })
+    buffer.sort((a, b) => a.now - b.now)
+    if (buffer.length > MAX_SNAPSHOT_BUFFER) {
+      buffer.splice(0, buffer.length - MAX_SNAPSHOT_BUFFER)
+    }
+  }
+
+  const getRenderSnapshot = () => {
+    const buffer = snapshotBufferRef.current
+    if (buffer.length === 0) return null
+    const offset = serverOffsetRef.current
+    if (offset === null) return buffer[buffer.length - 1]
+
+    const delay = Math.max(MIN_INTERP_DELAY_MS, tickIntervalRef.current * 1.5)
+    const renderTime = Date.now() + offset - delay
+    const snapshot = buildInterpolatedSnapshot(buffer, renderTime, MAX_EXTRAPOLATION_MS)
+    return snapshot
+  }
 
   useEffect(() => {
     playerIdRef.current = playerId
@@ -362,7 +469,7 @@ export default function App() {
     const renderLoop = () => {
       const config = renderConfigRef.current
       if (config) {
-        const snapshot = snapshotRef.current
+        const snapshot = getRenderSnapshot()
         const localId = playerIdRef.current
         const localHead =
           snapshot?.players.find((player) => player.id === localId)?.snake[0] ?? null
@@ -400,6 +507,10 @@ export default function App() {
         `${protocol}://${window.location.host}/api/room/${encodeURIComponent(roomName)}`,
       )
       socketRef.current = socket
+      snapshotBufferRef.current = []
+      serverOffsetRef.current = null
+      lastSnapshotTimeRef.current = null
+      tickIntervalRef.current = 50
       setConnectionStatus('Connecting')
       setGameState(null)
 
@@ -428,11 +539,17 @@ export default function App() {
             setPlayerId(message.playerId)
             localStorage.setItem(LOCAL_STORAGE_ID, message.playerId)
           }
-          if (message.state) setGameState(message.state)
+          if (message.state) {
+            pushSnapshot(message.state)
+            setGameState(message.state)
+          }
           return
         }
         if (message.type === 'state') {
-          if (message.state) setGameState(message.state)
+          if (message.state) {
+            pushSnapshot(message.state)
+            setGameState(message.state)
+          }
         }
       })
 
