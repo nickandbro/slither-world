@@ -5,6 +5,7 @@ type SnakeVisual = {
   group: THREE.Group
   tube: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
   head: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
+  tail: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
   eyeLeft: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
   eyeRight: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
   pupilLeft: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
@@ -19,7 +20,6 @@ type WebGLScene = {
 }
 
 const PLANET_RADIUS = 1
-const SURFACE_OFFSET = 0.02
 const SNAKE_RADIUS = 0.045
 const HEAD_RADIUS = SNAKE_RADIUS * 1.35
 const SNAKE_LIFT_FACTOR = 0.85
@@ -103,6 +103,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   world.add(pelletsGroup)
 
   const headGeometry = new THREE.SphereGeometry(HEAD_RADIUS, 18, 18)
+  const tailGeometry = new THREE.SphereGeometry(1, 18, 12, 0, Math.PI * 2, 0, Math.PI / 2)
   const eyeGeometry = new THREE.SphereGeometry(EYE_RADIUS, 12, 12)
   const pupilGeometry = new THREE.SphereGeometry(PUPIL_RADIUS, 10, 10)
   const eyeMaterial = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.2 })
@@ -143,6 +144,9 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     const head = new THREE.Mesh(headGeometry, headMaterial)
     group.add(head)
 
+    const tail = new THREE.Mesh(tailGeometry, tubeMaterial)
+    group.add(tail)
+
     const eyeLeft = new THREE.Mesh(eyeGeometry, eyeMaterial)
     const eyeRight = new THREE.Mesh(eyeGeometry, eyeMaterial)
     const pupilLeft = new THREE.Mesh(pupilGeometry, pupilMaterial)
@@ -156,6 +160,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       group,
       tube,
       head,
+      tail,
       eyeLeft,
       eyeRight,
       pupilLeft,
@@ -191,8 +196,10 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     const centerlineRadius = PLANET_RADIUS + radius * SNAKE_LIFT_FACTOR
     if (nodes.length < 2) {
       visual.tube.visible = false
+      visual.tail.visible = false
     } else {
       visual.tube.visible = true
+      visual.tail.visible = true
       const curvePoints = nodes.map((node) => pointToVector(node, centerlineRadius))
       const baseCurve = new THREE.CatmullRomCurve3(curvePoints, false, 'centripetal')
       const curve = new SphericalCurve(baseCurve, centerlineRadius)
@@ -261,6 +268,20 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     const pupilForward = HEAD_RADIUS * 0.18
     visual.pupilLeft.position.copy(leftEyePosition).addScaledVector(forward, pupilForward)
     visual.pupilRight.position.copy(rightEyePosition).addScaledVector(forward, pupilForward)
+
+    if (nodes.length > 1) {
+      const tailIndex = nodes.length - 1
+      const tailPos = pointToVector(nodes[tailIndex], centerlineRadius)
+      const prevPos = pointToVector(nodes[tailIndex - 1], centerlineRadius)
+      const tailDir = tailPos.clone().sub(prevPos)
+      if (tailDir.lengthSq() < 1e-6) {
+        tailDir.copy(tailPos)
+      }
+      tailDir.normalize()
+      visual.tail.position.copy(tailPos)
+      visual.tail.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), tailDir)
+      visual.tail.scale.setScalar(radius)
+    }
   }
 
   const removeSnake = (visual: SnakeVisual) => {
@@ -341,6 +362,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     gridGeometry.dispose()
     gridMaterial.dispose()
     headGeometry.dispose()
+    tailGeometry.dispose()
     eyeGeometry.dispose()
     pupilGeometry.dispose()
     eyeMaterial.dispose()
