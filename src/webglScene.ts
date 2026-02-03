@@ -23,6 +23,7 @@ type TailAddState = {
   duration: number
   carryDistance: number
   carryExtra: number | null
+  startPos: THREE.Vector3 | null
 }
 
 type TailExtraState = {
@@ -217,6 +218,8 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   const lastSnakeLengths = new Map<string, number>()
   const tailAddStates = new Map<string, TailAddState>()
   const tailExtraStates = new Map<string, TailExtraState>()
+  const lastTailBasePositions = new Map<string, THREE.Vector3>()
+  const lastTailExtensionDistances = new Map<string, number>()
   const lastTailTotalLengths = new Map<string, number>()
   const tailDebugStates = new Map<string, TailDebugState>()
   const tempMatrix = new THREE.Matrix4()
@@ -608,7 +611,8 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
           progress: 0,
           duration: Math.max(0.05, TAIL_ADD_SMOOTH_MS / 1000),
           carryDistance: lastTailTotalLengths.get(player.id) ?? 0,
-          carryExtra: null,
+          carryExtra: lastTailExtensionDistances.get(player.id) ?? null,
+          startPos: null,
         })
         if (debug) {
           console.log(
@@ -660,21 +664,48 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
           1,
         )
         tailAddProgress = tailAddState.progress
-        const start = curvePoints[curvePoints.length - 2]
+        const fallbackStart = curvePoints[curvePoints.length - 2]
         const end = curvePoints[curvePoints.length - 1]
-        const baseDistance = start.distanceTo(end)
         let referenceDir: THREE.Vector3 | null = null
-        let referenceDistance = baseDistance
+        let referenceDistance = fallbackStart.distanceTo(end)
         if (curvePoints.length >= 3) {
           const prev = curvePoints[curvePoints.length - 3]
-          const startNormal = start.clone().normalize()
-          const rawDir = start.clone().sub(prev)
+          const startNormal = fallbackStart.clone().normalize()
+          const rawDir = fallbackStart.clone().sub(prev)
           rawDir.addScaledVector(startNormal, -rawDir.dot(startNormal))
           if (rawDir.lengthSq() > 1e-8) {
             referenceDistance = rawDir.length()
             referenceDir = rawDir.multiplyScalar(1 / referenceDistance)
           }
         }
+        if (!tailAddState.startPos) {
+          let seededStart = end.clone()
+          const prevExtension = lastTailExtensionDistances.get(player.id) ?? 0
+          if (prevExtension > 1e-6) {
+            const dirSource = referenceDir ?? lastTailDirection
+            if (dirSource) {
+              const tailNormal = end.clone().normalize()
+              const projected = dirSource
+                .clone()
+                .addScaledVector(tailNormal, -dirSource.dot(tailNormal))
+              if (projected.lengthSq() > 1e-8) {
+                projected.normalize()
+                seededStart = advanceOnSphere(
+                  end,
+                  projected,
+                  prevExtension,
+                  centerlineRadius,
+                )
+              }
+            }
+          }
+          tailAddState.startPos = seededStart.clone()
+        }
+        let start = tailAddState.startPos
+        if (!start) {
+          start = end
+        }
+        start = start.clone().normalize().multiplyScalar(centerlineRadius)
 
         let blendedEnd = end
         if (referenceDir && referenceDistance > 1e-6) {
@@ -730,17 +761,23 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       let extraLengthTarget = growthExtra
       if (tailAddState) {
         if (tailAddState.carryExtra === null) {
-          tailAddState.carryExtra = Math.max(0, tailAddState.carryDistance - baseLength)
+          tailAddState.carryExtra = Math.max(
+            0,
+            lastTailExtensionDistances.get(player.id) ?? 0,
+          )
         }
         const initialExtra = tailAddState.carryExtra
         extraLengthTarget = initialExtra * (1 - tailAddProgress) + growthExtra * tailAddProgress
       }
       const extraTargetClamped = Math.max(0, extraLengthTarget)
       let extensionDistance = extraTargetClamped
+      const previousExtension = lastTailExtensionDistances.get(player.id)
       const extraState = tailExtraStates.get(player.id)
       if (extraState) {
+        const seed = previousExtension ?? extraState.value ?? extraTargetClamped
+        extraState.value = seed
         const rateUp = tailAddState ? 18 : 14
-        const rateDown = tailAddState ? 12 : 7
+        const rateDown = tailAddState ? 4 : 7
         extensionDistance = smoothValue(
           extraState.value,
           extraTargetClamped,
@@ -753,10 +790,18 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
         }
         extraState.value = extensionDistance
       } else {
-        tailExtraStates.set(player.id, { value: extraTargetClamped })
+        const seed = previousExtension ?? extraTargetClamped
+        const rateUp = tailAddState ? 18 : 14
+        const rateDown = tailAddState ? 4 : 7
+        extensionDistance = smoothValue(seed, extraTargetClamped, deltaSeconds, rateUp, rateDown)
+        if (!Number.isFinite(extensionDistance)) {
+          extensionDistance = extraTargetClamped
+        }
+        tailExtraStates.set(player.id, { value: extensionDistance })
       }
       tailExtraTarget = extraTargetClamped
       tailExtensionDistance = extensionDistance
+      lastTailExtensionDistances.set(player.id, extensionDistance)
       if (tailSegmentDir) {
         tailExtendOverride = tailSegmentDir.clone()
       }
@@ -808,6 +853,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
         tailCurveTail = curvePoints[curvePoints.length - 1]
         tailExtendDistance = tailCurveTail.distanceTo(tailCurvePrev)
         lastTailTotalLengths.set(player.id, baseLength + extensionDistance)
+        lastTailBasePositions.set(player.id, tailCurveTail.clone())
       }
       const baseCurve = new THREE.CatmullRomCurve3(curvePoints, false, 'centripetal')
       const curve = new SphericalCurve(baseCurve, centerlineRadius)
@@ -832,6 +878,8 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       lastSnakeLengths.delete(player.id)
       tailAddStates.delete(player.id)
       tailExtraStates.delete(player.id)
+      lastTailBasePositions.delete(player.id)
+      lastTailExtensionDistances.delete(player.id)
       lastTailTotalLengths.delete(player.id)
       tailDebugStates.delete(player.id)
       return
@@ -1012,6 +1060,8 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     lastTailDirections.delete(id)
     tailAddStates.delete(id)
     tailExtraStates.delete(id)
+    lastTailBasePositions.delete(id)
+    lastTailExtensionDistances.delete(id)
     lastTailTotalLengths.delete(id)
     tailDebugStates.delete(id)
   }
