@@ -31,6 +31,7 @@ const EYE_RADIUS = SNAKE_RADIUS * 0.45
 const PUPIL_RADIUS = EYE_RADIUS * 0.5
 const PELLET_RADIUS = SNAKE_RADIUS * 0.75
 const PELLET_OFFSET = 0.035
+const TAIL_CAP_SEGMENTS = 5
 
 function pointToVector(point: Point, radius: number) {
   return new THREE.Vector3(point.x, point.y, point.z).normalize().multiplyScalar(radius)
@@ -184,6 +185,113 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     material.emissiveIntensity = isLocal ? 0.3 : 0.12
   }
 
+  const buildTailCapGeometry = (
+    tubeGeometry: THREE.TubeGeometry,
+    tailDirection: THREE.Vector3,
+  ): THREE.BufferGeometry | null => {
+    const params = tubeGeometry.parameters as { radialSegments?: number; tubularSegments?: number }
+    const radialSegments = params.radialSegments ?? 8
+    const tubularSegments = params.tubularSegments ?? 1
+    const ringVertexCount = radialSegments + 1
+    const ringStart = tubularSegments * ringVertexCount
+    const positions = tubeGeometry.attributes.position
+    if (!positions || positions.count < ringStart + radialSegments) return null
+
+    const ringPoints: THREE.Vector3[] = []
+    const ringVectors: THREE.Vector3[] = []
+    const center = new THREE.Vector3()
+
+    for (let i = 0; i < radialSegments; i += 1) {
+      const index = ringStart + i
+      const point = new THREE.Vector3(
+        positions.getX(index),
+        positions.getY(index),
+        positions.getZ(index),
+      )
+      ringPoints.push(point)
+      center.add(point)
+    }
+
+    if (ringPoints.length === 0) return null
+    center.multiplyScalar(1 / ringPoints.length)
+
+    let radius = 0
+    for (const point of ringPoints) {
+      const vector = point.clone().sub(center)
+      ringVectors.push(vector)
+      radius += vector.length()
+    }
+    radius = radius / ringVectors.length
+    if (!Number.isFinite(radius) || radius <= 0) return null
+
+    const ringNormal = ringVectors[1 % radialSegments].clone().cross(ringVectors[0]).normalize()
+    const flip = ringNormal.dot(tailDirection) < 0
+
+    const rings = Math.max(2, TAIL_CAP_SEGMENTS)
+    const vertexCount = rings * radialSegments + 1
+    const capPositions = new Float32Array(vertexCount * 3)
+
+    for (let s = 0; s < rings; s += 1) {
+      const theta = (s / rings) * (Math.PI / 2)
+      const scale = Math.cos(theta)
+      const offset = Math.sin(theta) * radius
+      for (let i = 0; i < radialSegments; i += 1) {
+        const vector = ringVectors[i]
+        const point = center
+          .clone()
+          .addScaledVector(vector, scale)
+          .addScaledVector(tailDirection, offset)
+        const index = (s * radialSegments + i) * 3
+        capPositions[index] = point.x
+        capPositions[index + 1] = point.y
+        capPositions[index + 2] = point.z
+      }
+    }
+
+    const tip = center.clone().addScaledVector(tailDirection, radius)
+    const tipOffset = rings * radialSegments * 3
+    capPositions[tipOffset] = tip.x
+    capPositions[tipOffset + 1] = tip.y
+    capPositions[tipOffset + 2] = tip.z
+
+    const indices: number[] = []
+    const pushTri = (a: number, b: number, c: number) => {
+      if (flip) {
+        indices.push(a, c, b)
+      } else {
+        indices.push(a, b, c)
+      }
+    }
+
+    for (let s = 0; s < rings - 1; s += 1) {
+      for (let i = 0; i < radialSegments; i += 1) {
+        const next = (i + 1) % radialSegments
+        const a = s * radialSegments + i
+        const b = s * radialSegments + next
+        const c = (s + 1) * radialSegments + i
+        const d = (s + 1) * radialSegments + next
+        pushTri(a, c, b)
+        pushTri(b, c, d)
+      }
+    }
+
+    const tipIndex = rings * radialSegments
+    const lastRingStart = (rings - 1) * radialSegments
+    for (let i = 0; i < radialSegments; i += 1) {
+      const next = (i + 1) % radialSegments
+      const a = lastRingStart + i
+      const b = lastRingStart + next
+      pushTri(a, tipIndex, b)
+    }
+
+    const capGeometry = new THREE.BufferGeometry()
+    capGeometry.setAttribute('position', new THREE.BufferAttribute(capPositions, 3))
+    capGeometry.setIndex(indices)
+    capGeometry.computeVertexNormals()
+    capGeometry.computeBoundingSphere()
+    return capGeometry
+  }
+
   const updateSnake = (player: PlayerSnapshot, isLocal: boolean) => {
     let visual = snakes.get(player.id)
     if (!visual) {
@@ -324,15 +432,27 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
         }
       }
       tailDir.normalize()
-      visual.tail.position.copy(tailPos)
-      visual.tail.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), tailDir)
-      visual.tail.scale.setScalar(radius)
+      if (visual.tube.geometry instanceof THREE.TubeGeometry) {
+        const capGeometry = buildTailCapGeometry(visual.tube.geometry, tailDir)
+        if (capGeometry) {
+          if (visual.tail.geometry !== tailGeometry) {
+            visual.tail.geometry.dispose()
+          }
+          visual.tail.geometry = capGeometry
+        }
+      }
+      visual.tail.position.set(0, 0, 0)
+      visual.tail.quaternion.identity()
+      visual.tail.scale.setScalar(1)
     }
   }
 
   const removeSnake = (visual: SnakeVisual) => {
     snakesGroup.remove(visual.group)
     visual.tube.geometry.dispose()
+    if (visual.tail.geometry !== tailGeometry) {
+      visual.tail.geometry.dispose()
+    }
     visual.tube.material.dispose()
     visual.head.material.dispose()
   }
