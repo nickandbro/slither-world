@@ -28,6 +28,10 @@ function normalize(point: Point) {
   return { x: point.x / len, y: point.y / len, z: point.z / len }
 }
 
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value))
+}
+
 function cross(a: Point, b: Point): Point {
   return {
     x: a.y * b.z - a.z * b.y,
@@ -46,20 +50,6 @@ function normalizeQuat(q: Quaternion) {
   const len = Math.sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w)
   if (!Number.isFinite(len) || len === 0) return { ...IDENTITY_QUAT }
   return { x: q.x / len, y: q.y / len, z: q.z / len, w: q.w / len }
-}
-
-function quatFromTo(from: Point, to: Point): Quaternion {
-  const f = normalize(from)
-  const t = normalize(to)
-  const d = dot(f, t)
-  if (d > 0.9999) return { ...IDENTITY_QUAT }
-  if (d < -0.9999) {
-    const axis = Math.abs(f.x) < 0.9 ? cross(f, { x: 1, y: 0, z: 0 }) : cross(f, { x: 0, y: 1, z: 0 })
-    const normAxis = normalize(axis)
-    return normalizeQuat({ x: normAxis.x, y: normAxis.y, z: normAxis.z, w: 0 })
-  }
-  const axis = cross(f, t)
-  return normalizeQuat({ x: axis.x, y: axis.y, z: axis.z, w: 1 + d })
 }
 
 function quatSlerp(a: Quaternion, b: Quaternion, t: number) {
@@ -98,6 +88,57 @@ function quatSlerp(a: Quaternion, b: Quaternion, t: number) {
   }
 }
 
+function quatFromBasis(right: Point, up: Point, forward: Point): Quaternion {
+  const m00 = right.x
+  const m01 = right.y
+  const m02 = right.z
+  const m10 = up.x
+  const m11 = up.y
+  const m12 = up.z
+  const m20 = forward.x
+  const m21 = forward.y
+  const m22 = forward.z
+
+  const trace = m00 + m11 + m22
+  let x = 0
+  let y = 0
+  let z = 0
+  let w = 1
+
+  if (trace > 0) {
+    const s = 0.5 / Math.sqrt(trace + 1)
+    w = 0.25 / s
+    x = (m21 - m12) * s
+    y = (m02 - m20) * s
+    z = (m10 - m01) * s
+  } else if (m00 > m11 && m00 > m22) {
+    const s = 2 * Math.sqrt(1 + m00 - m11 - m22)
+    w = (m21 - m12) / s
+    x = 0.25 * s
+    y = (m01 + m10) / s
+    z = (m02 + m20) / s
+  } else if (m11 > m22) {
+    const s = 2 * Math.sqrt(1 + m11 - m00 - m22)
+    w = (m02 - m20) / s
+    x = (m01 + m10) / s
+    y = 0.25 * s
+    z = (m12 + m21) / s
+  } else {
+    const s = 2 * Math.sqrt(1 + m22 - m00 - m11)
+    w = (m10 - m01) / s
+    x = (m02 + m20) / s
+    y = (m12 + m21) / s
+    z = 0.25 * s
+  }
+
+  return {
+    x,
+    y,
+    z,
+    w,
+  }
+}
+
 function rotateVectorByQuat(vector: Point, q: Quaternion) {
   const qv = { x: q.x, y: q.y, z: q.z }
   const uv = cross(qv, vector)
@@ -109,11 +150,53 @@ function rotateVectorByQuat(vector: Point, q: Quaternion) {
   }
 }
 
-function updateCamera(head: Point | null, current: Camera): Camera {
+function updateCamera(head: Point | null, current: Camera, upRef: { current: Point }): Camera {
   if (!head) return { q: { ...IDENTITY_QUAT }, active: false }
-  const desired = quatFromTo(head, { x: 0, y: 0, z: 1 })
+  const headNorm = normalize(head)
+  const currentUp = upRef.current
+  const upDot = dot(currentUp, headNorm)
+  let projectedUp = {
+    x: currentUp.x - headNorm.x * upDot,
+    y: currentUp.y - headNorm.y * upDot,
+    z: currentUp.z - headNorm.z * upDot,
+  }
+  let projectedLen = Math.sqrt(
+    projectedUp.x * projectedUp.x +
+      projectedUp.y * projectedUp.y +
+      projectedUp.z * projectedUp.z,
+  )
+  if (!Number.isFinite(projectedLen) || projectedLen < 1e-3) {
+    const fallback = Math.abs(headNorm.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 }
+    const fallbackDot = dot(fallback, headNorm)
+    projectedUp = {
+      x: fallback.x - headNorm.x * fallbackDot,
+      y: fallback.y - headNorm.y * fallbackDot,
+      z: fallback.z - headNorm.z * fallbackDot,
+    }
+    projectedLen = Math.sqrt(
+      projectedUp.x * projectedUp.x +
+        projectedUp.y * projectedUp.y +
+        projectedUp.z * projectedUp.z,
+    )
+  }
+  projectedUp = normalize(projectedUp)
+  upRef.current = projectedUp
+
+  let right = cross(projectedUp, headNorm)
+  right = normalize(right)
+  let upOrtho = cross(headNorm, right)
+  upOrtho = normalize(upOrtho)
+
+  const desired = normalizeQuat(quatFromBasis(right, upOrtho, headNorm))
   if (!current.active) return { q: desired, active: true }
-  const blended = quatSlerp(current.q, desired, 0.2)
+  const dotQuat =
+    current.q.x * desired.x +
+    current.q.y * desired.y +
+    current.q.z * desired.z +
+    current.q.w * desired.w
+  const angleDiff = 2 * Math.acos(clamp(Math.abs(dotQuat), 0, 1))
+  const blend = clamp(angleDiff * 0.08, 0.03, 0.1)
+  const blended = quatSlerp(current.q, desired, blend)
   return { q: blended, active: true }
 }
 
@@ -191,6 +274,7 @@ export default function App() {
   const sendIntervalRef = useRef<number | null>(null)
   const snapshotRef = useRef<GameStateSnapshot | null>(null)
   const cameraRef = useRef<Camera>({ q: { ...IDENTITY_QUAT }, active: false })
+  const cameraUpRef = useRef<Point>({ x: 0, y: 1, z: 0 })
 
   const [gameState, setGameState] = useState<GameStateSnapshot | null>(null)
   const [playerId, setPlayerId] = useState<string | null>(getStoredPlayerId())
@@ -279,7 +363,7 @@ export default function App() {
         const localId = playerIdRef.current
         const localHead =
           snapshot?.players.find((player) => player.id === localId)?.snake[0] ?? null
-        const camera = updateCamera(localHead, cameraRef.current)
+        const camera = updateCamera(localHead, cameraRef.current, cameraUpRef)
         cameraRef.current = camera
         webgl.render(snapshot, camera, localId)
         drawHud(hudCtx, config, pointerRef.current.active ? pointerRef.current.angle : null)
