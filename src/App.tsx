@@ -36,9 +36,15 @@ type RenderConfig = {
   focalLength: number
 }
 
+type Quaternion = {
+  x: number
+  y: number
+  z: number
+  w: number
+}
+
 type Camera = {
-  yaw: number
-  pitch: number
+  q: Quaternion
   active: boolean
 }
 
@@ -73,52 +79,111 @@ function pointFromSpherical(theta: number, phi: number): Point {
   }
 }
 
-function rotatePointZ(point: Point, angle: number) {
-  const cosA = Math.cos(angle)
-  const sinA = Math.sin(angle)
-  const x = point.x
-  const y = point.y
-  point.x = cosA * x - sinA * y
-  point.y = sinA * x + cosA * y
-}
-
-function rotatePointY(point: Point, angle: number) {
-  const cosA = Math.cos(angle)
-  const sinA = Math.sin(angle)
-  const x = point.x
-  const z = point.z
-  point.x = cosA * x + sinA * z
-  point.z = -sinA * x + cosA * z
-}
-
 function normalize(point: Point) {
   const len = Math.sqrt(point.x * point.x + point.y * point.y + point.z * point.z)
   if (!Number.isFinite(len) || len === 0) return { x: 0, y: 0, z: 0 }
   return { x: point.x / len, y: point.y / len, z: point.z / len }
 }
 
-function applyCamera(point: Point, camera: Camera) {
-  if (!camera.active) return point
-  const transformed = { x: point.x, y: point.y, z: point.z }
-  rotatePointZ(transformed, -camera.yaw)
-  rotatePointY(transformed, camera.pitch)
-  return transformed
+function cross(a: Point, b: Point): Point {
+  return {
+    x: a.y * b.z - a.z * b.y,
+    y: a.z * b.x - a.x * b.z,
+    z: a.x * b.y - a.y * b.x,
+  }
 }
 
-function computeCamera(head: Point | null): Camera {
-  if (!head) return { yaw: 0, pitch: 0, active: false }
-  const yaw = Math.atan2(head.y, head.x)
-  const r = Math.sqrt(head.x * head.x + head.y * head.y)
-  const pitch = Math.atan2(r, -head.z)
-  return { yaw, pitch, active: true }
+function dot(a: Point, b: Point) {
+  return a.x * b.x + a.y * b.y + a.z * b.z
+}
+
+const IDENTITY_QUAT: Quaternion = { x: 0, y: 0, z: 0, w: 1 }
+
+function normalizeQuat(q: Quaternion) {
+  const len = Math.sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w)
+  if (!Number.isFinite(len) || len === 0) return { ...IDENTITY_QUAT }
+  return { x: q.x / len, y: q.y / len, z: q.z / len, w: q.w / len }
+}
+
+function quatFromTo(from: Point, to: Point): Quaternion {
+  const f = normalize(from)
+  const t = normalize(to)
+  const d = dot(f, t)
+  if (d > 0.9999) return { ...IDENTITY_QUAT }
+  if (d < -0.9999) {
+    const axis = Math.abs(f.x) < 0.9 ? cross(f, { x: 1, y: 0, z: 0 }) : cross(f, { x: 0, y: 1, z: 0 })
+    const normAxis = normalize(axis)
+    return normalizeQuat({ x: normAxis.x, y: normAxis.y, z: normAxis.z, w: 0 })
+  }
+  const axis = cross(f, t)
+  return normalizeQuat({ x: axis.x, y: axis.y, z: axis.z, w: 1 + d })
+}
+
+function quatSlerp(a: Quaternion, b: Quaternion, t: number) {
+  let cosOmega = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w
+  let bx = b.x
+  let by = b.y
+  let bz = b.z
+  let bw = b.w
+
+  if (cosOmega < 0) {
+    cosOmega = -cosOmega
+    bx = -bx
+    by = -by
+    bz = -bz
+    bw = -bw
+  }
+
+  if (cosOmega > 0.9995) {
+    return normalizeQuat({
+      x: a.x + t * (bx - a.x),
+      y: a.y + t * (by - a.y),
+      z: a.z + t * (bz - a.z),
+      w: a.w + t * (bw - a.w),
+    })
+  }
+
+  const omega = Math.acos(cosOmega)
+  const sinOmega = Math.sin(omega)
+  const scaleA = Math.sin((1 - t) * omega) / sinOmega
+  const scaleB = Math.sin(t * omega) / sinOmega
+  return {
+    x: a.x * scaleA + bx * scaleB,
+    y: a.y * scaleA + by * scaleB,
+    z: a.z * scaleA + bz * scaleB,
+    w: a.w * scaleA + bw * scaleB,
+  }
+}
+
+function rotateVectorByQuat(vector: Point, q: Quaternion) {
+  const qv = { x: q.x, y: q.y, z: q.z }
+  const uv = cross(qv, vector)
+  const uuv = cross(qv, uv)
+  return {
+    x: vector.x + (uv.x * q.w + uuv.x) * 2,
+    y: vector.y + (uv.y * q.w + uuv.y) * 2,
+    z: vector.z + (uv.z * q.w + uuv.z) * 2,
+  }
+}
+
+function applyCamera(point: Point, camera: Camera) {
+  if (!camera.active) return point
+  return rotateVectorByQuat(point, camera.q)
+}
+
+function updateCamera(head: Point | null, current: Camera): Camera {
+  if (!head) return { q: { ...IDENTITY_QUAT }, active: false }
+  const desired = quatFromTo(head, { x: 0, y: 0, z: -1 })
+  if (!current.active) return { q: desired, active: true }
+  const blended = quatSlerp(current.q, desired, 0.2)
+  return { q: blended, active: true }
 }
 
 function axisFromPointer(angle: number, camera: Camera) {
   const axis = { x: -Math.sin(angle), y: Math.cos(angle), z: 0 }
   if (!camera.active) return normalize(axis)
-  rotatePointY(axis, -camera.pitch)
-  rotatePointZ(axis, camera.yaw)
-  return normalize(axis)
+  const inverse = { x: -camera.q.x, y: -camera.q.y, z: -camera.q.z, w: camera.q.w }
+  return normalize(rotateVectorByQuat(axis, inverse))
 }
 
 const colorCache = new Map<string, { r: number; g: number; b: number }>()
@@ -255,7 +320,7 @@ export default function App() {
   const pointerRef = useRef({ angle: 0, boost: false, active: false })
   const sendIntervalRef = useRef<number | null>(null)
   const snapshotRef = useRef<GameStateSnapshot | null>(null)
-  const cameraRef = useRef<Camera>({ yaw: 0, pitch: 0, active: false })
+  const cameraRef = useRef<Camera>({ q: { ...IDENTITY_QUAT }, active: false })
 
   const [gameState, setGameState] = useState<GameStateSnapshot | null>(null)
   const [playerId, setPlayerId] = useState<string | null>(getStoredPlayerId())
@@ -339,7 +404,7 @@ export default function App() {
         const snapshot = snapshotRef.current
         const localHead =
           snapshot?.players.find((player) => player.id === playerId)?.snake[0] ?? null
-        const camera = computeCamera(localHead)
+        const camera = updateCamera(localHead, cameraRef.current)
         cameraRef.current = camera
         drawScene(
           ctx,
