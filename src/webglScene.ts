@@ -62,6 +62,12 @@ const DIGESTION_MAX_BULGE = 0.7
 const DIGESTION_START_RINGS = 3
 const DIGESTION_START_MAX = 0.18
 const TAIL_ADD_SMOOTH_MS = 180
+const TAIL_EXTEND_RATE_UP = 12
+const TAIL_EXTEND_RATE_DOWN = 2.6
+const TAIL_EXTEND_RATE_UP_ADD = 10
+const TAIL_EXTEND_RATE_DOWN_ADD = 1.6
+const TAIL_GROWTH_RATE_UP = 0.6
+const TAIL_GROWTH_RATE_DOWN = 1.2
 const DEBUG_TAIL = false
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
@@ -221,6 +227,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   const lastTailBasePositions = new Map<string, THREE.Vector3>()
   const lastTailExtensionDistances = new Map<string, number>()
   const lastTailTotalLengths = new Map<string, number>()
+  const tailGrowthStates = new Map<string, number>()
   const tailDebugStates = new Map<string, TailDebugState>()
   const tempMatrix = new THREE.Matrix4()
   const tempVector = new THREE.Vector3()
@@ -604,14 +611,16 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     const maxDigestion =
       player.digestions.length > 0 ? Math.max(...player.digestions) : 0
     const lastTailDirection = lastTailDirections.get(player.id) ?? null
+    let lengthIncreased = false
     const prevLength = lastSnakeLengths.get(player.id)
     if (prevLength !== undefined) {
       if (nodes.length > prevLength && nodes.length >= 2) {
+        lengthIncreased = true
         tailAddStates.set(player.id, {
           progress: 0,
           duration: Math.max(0.05, TAIL_ADD_SMOOTH_MS / 1000),
           carryDistance: lastTailTotalLengths.get(player.id) ?? 0,
-          carryExtra: lastTailExtensionDistances.get(player.id) ?? null,
+          carryExtra: lastTailExtensionDistances.get(player.id) ?? 0,
           startPos: null,
         })
         if (debug) {
@@ -623,6 +632,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
         }
       } else if (nodes.length < prevLength) {
         tailAddStates.delete(player.id)
+        tailGrowthStates.delete(player.id)
         if (debug) {
           console.log(
             `[TAIL_DEBUG] ${player.id} length_decrease ${prevLength} -> ${nodes.length}`,
@@ -632,6 +642,16 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     }
     lastSnakeLengths.set(player.id, nodes.length)
     const digestionState = buildDigestionVisuals(player.digestions)
+    const previousGrowth = tailGrowthStates.get(player.id)
+    const growthSeed = previousGrowth ?? digestionState.tailGrowth
+    const smoothedTailGrowth = smoothValue(
+      growthSeed,
+      digestionState.tailGrowth,
+      deltaSeconds,
+      TAIL_GROWTH_RATE_UP,
+      TAIL_GROWTH_RATE_DOWN,
+    )
+    tailGrowthStates.set(player.id, smoothedTailGrowth)
     const radius = isLocal ? SNAKE_RADIUS * 1.1 : SNAKE_RADIUS
     const centerlineRadius = PLANET_RADIUS + radius * SNAKE_LIFT_FACTOR
     let tailCurveTail: THREE.Vector3 | null = null
@@ -679,27 +699,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
           }
         }
         if (!tailAddState.startPos) {
-          let seededStart = end.clone()
-          const prevExtension = lastTailExtensionDistances.get(player.id) ?? 0
-          if (prevExtension > 1e-6) {
-            const dirSource = referenceDir ?? lastTailDirection
-            if (dirSource) {
-              const tailNormal = end.clone().normalize()
-              const projected = dirSource
-                .clone()
-                .addScaledVector(tailNormal, -dirSource.dot(tailNormal))
-              if (projected.lengthSq() > 1e-8) {
-                projected.normalize()
-                seededStart = advanceOnSphere(
-                  end,
-                  projected,
-                  prevExtension,
-                  centerlineRadius,
-                )
-              }
-            }
-          }
-          tailAddState.startPos = seededStart.clone()
+          tailAddState.startPos = fallbackStart.clone()
         }
         let start = tailAddState.startPos
         if (!start) {
@@ -757,14 +757,11 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
         : 0
       const baseLength =
         tailAddState && tailBasisPrev && tailBasisTail ? referenceLength : tailSegmentLength
-      const growthExtra = referenceLength * digestionState.tailGrowth
+      const growthExtra = referenceLength * smoothedTailGrowth
       let extraLengthTarget = growthExtra
       if (tailAddState) {
         if (tailAddState.carryExtra === null) {
-          tailAddState.carryExtra = Math.max(
-            0,
-            lastTailExtensionDistances.get(player.id) ?? 0,
-          )
+          tailAddState.carryExtra = lastTailExtensionDistances.get(player.id) ?? 0
         }
         const initialExtra = tailAddState.carryExtra
         extraLengthTarget = initialExtra * (1 - tailAddProgress) + growthExtra * tailAddProgress
@@ -772,12 +769,13 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       const extraTargetClamped = Math.max(0, extraLengthTarget)
       let extensionDistance = extraTargetClamped
       const previousExtension = lastTailExtensionDistances.get(player.id)
+      const seedOverride = lengthIncreased ? extraTargetClamped : null
       const extraState = tailExtraStates.get(player.id)
       if (extraState) {
-        const seed = previousExtension ?? extraState.value ?? extraTargetClamped
+        const seed = seedOverride ?? previousExtension ?? extraState.value ?? extraTargetClamped
         extraState.value = seed
-        const rateUp = tailAddState ? 18 : 14
-        const rateDown = tailAddState ? 4 : 7
+        const rateUp = tailAddState ? TAIL_EXTEND_RATE_UP_ADD : TAIL_EXTEND_RATE_UP
+        const rateDown = tailAddState ? TAIL_EXTEND_RATE_DOWN_ADD : TAIL_EXTEND_RATE_DOWN
         extensionDistance = smoothValue(
           extraState.value,
           extraTargetClamped,
@@ -790,14 +788,24 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
         }
         extraState.value = extensionDistance
       } else {
-        const seed = previousExtension ?? extraTargetClamped
-        const rateUp = tailAddState ? 18 : 14
-        const rateDown = tailAddState ? 4 : 7
+        const seed = seedOverride ?? previousExtension ?? extraTargetClamped
+        const rateUp = tailAddState ? TAIL_EXTEND_RATE_UP_ADD : TAIL_EXTEND_RATE_UP
+        const rateDown = tailAddState ? TAIL_EXTEND_RATE_DOWN_ADD : TAIL_EXTEND_RATE_DOWN
         extensionDistance = smoothValue(seed, extraTargetClamped, deltaSeconds, rateUp, rateDown)
         if (!Number.isFinite(extensionDistance)) {
           extensionDistance = extraTargetClamped
         }
         tailExtraStates.set(player.id, { value: extensionDistance })
+      }
+      if (tailAddState) {
+        extensionDistance = Math.min(extensionDistance, extraTargetClamped)
+        const clampState = tailExtraStates.get(player.id)
+        if (clampState) {
+          clampState.value = extensionDistance
+        }
+      }
+      if (seedOverride !== null) {
+        lastTailExtensionDistances.set(player.id, extensionDistance)
       }
       tailExtraTarget = extraTargetClamped
       tailExtensionDistance = extensionDistance
@@ -881,6 +889,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       lastTailBasePositions.delete(player.id)
       lastTailExtensionDistances.delete(player.id)
       lastTailTotalLengths.delete(player.id)
+      tailGrowthStates.delete(player.id)
       tailDebugStates.delete(player.id)
       return
     }
@@ -1063,6 +1072,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     lastTailBasePositions.delete(id)
     lastTailExtensionDistances.delete(id)
     lastTailTotalLengths.delete(id)
+    tailGrowthStates.delete(id)
     tailDebugStates.delete(id)
   }
 
