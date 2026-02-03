@@ -315,8 +315,13 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       const tailPos = pointToVector(nodes[tailIndex], centerlineRadius)
       const prevPos = pointToVector(nodes[tailIndex - 1], centerlineRadius)
       const tailDir = tailPos.clone().sub(prevPos)
+      const tailNormal = tailPos.clone().normalize()
+      tailDir.addScaledVector(tailNormal, -tailDir.dot(tailNormal))
       if (tailDir.lengthSq() < 1e-6) {
-        tailDir.copy(tailPos)
+        tailDir.crossVectors(tailNormal, new THREE.Vector3(0, 1, 0))
+        if (tailDir.lengthSq() < 1e-6) {
+          tailDir.crossVectors(tailNormal, new THREE.Vector3(1, 0, 0))
+        }
       }
       tailDir.normalize()
       visual.tail.position.copy(tailPos)
