@@ -32,6 +32,9 @@ const PUPIL_RADIUS = EYE_RADIUS * 0.5
 const PELLET_RADIUS = SNAKE_RADIUS * 0.75
 const PELLET_OFFSET = 0.035
 const TAIL_CAP_SEGMENTS = 5
+const DIGESTION_BULGE = 0.45
+const DIGESTION_WIDTH = 2.5
+const DIGESTION_MAX_BULGE = 0.7
 
 function pointToVector(point: Point, radius: number) {
   return new THREE.Vector3(point.x, point.y, point.z).normalize().multiplyScalar(radius)
@@ -292,6 +295,60 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     return capGeometry
   }
 
+  const applyDigestionBulges = (tubeGeometry: THREE.TubeGeometry, digestions: number[]) => {
+    if (!digestions.length) return
+    const params = tubeGeometry.parameters as { radialSegments?: number; tubularSegments?: number }
+    const radialSegments = params.radialSegments ?? 8
+    const tubularSegments = params.tubularSegments ?? 1
+    const ringVertexCount = radialSegments + 1
+    const ringCount = tubularSegments + 1
+    const positions = tubeGeometry.attributes.position
+    if (!positions) return
+
+    const bulgeByRing = new Array(ringCount).fill(0)
+    for (const digestion of digestions) {
+      const t = Math.max(0, Math.min(1, digestion))
+      const center = t * (ringCount - 1)
+      const start = Math.max(0, Math.floor(center - DIGESTION_WIDTH * 2))
+      const end = Math.min(ringCount - 1, Math.ceil(center + DIGESTION_WIDTH * 2))
+      for (let ring = start; ring <= end; ring += 1) {
+        const dist = ring - center
+        const weight = Math.exp(-(dist * dist) / (2 * DIGESTION_WIDTH * DIGESTION_WIDTH))
+        bulgeByRing[ring] = Math.min(
+          DIGESTION_MAX_BULGE,
+          bulgeByRing[ring] + weight * DIGESTION_BULGE,
+        )
+      }
+    }
+
+    const center = new THREE.Vector3()
+    const vertex = new THREE.Vector3()
+    for (let ring = 0; ring < ringCount; ring += 1) {
+      const bulge = bulgeByRing[ring]
+      if (bulge <= 0) continue
+      center.set(0, 0, 0)
+      const ringStart = ring * ringVertexCount
+      for (let i = 0; i < radialSegments; i += 1) {
+        const index = ringStart + i
+        center.x += positions.getX(index)
+        center.y += positions.getY(index)
+        center.z += positions.getZ(index)
+      }
+      center.multiplyScalar(1 / radialSegments)
+
+      const scale = 1 + bulge
+      for (let i = 0; i < ringVertexCount; i += 1) {
+        const index = ringStart + i
+        vertex.set(positions.getX(index), positions.getY(index), positions.getZ(index))
+        vertex.sub(center).multiplyScalar(scale).add(center)
+        positions.setXYZ(index, vertex.x, vertex.y, vertex.z)
+      }
+    }
+
+    positions.needsUpdate = true
+    tubeGeometry.computeVertexNormals()
+  }
+
   const updateSnake = (player: PlayerSnapshot, isLocal: boolean) => {
     let visual = snakes.get(player.id)
     if (!visual) {
@@ -321,6 +378,9 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       const curve = new SphericalCurve(baseCurve, centerlineRadius)
       const tubularSegments = Math.max(8, curvePoints.length * 4)
       const tubeGeometry = new THREE.TubeGeometry(curve, tubularSegments, radius, 10, false)
+      if (player.digestions.length) {
+        applyDigestionBulges(tubeGeometry, player.digestions)
+      }
       visual.tube.geometry.dispose()
       visual.tube.geometry = tubeGeometry
     }

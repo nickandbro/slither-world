@@ -37,6 +37,10 @@ function normalize(point: Point) {
   return { x: point.x / len, y: point.y / len, z: point.z / len }
 }
 
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value))
+}
+
 function cross(a: Point, b: Point): Point {
   return {
     x: a.y * b.z - a.z * b.y,
@@ -202,7 +206,25 @@ function blendPlayers(a: PlayerSnapshot, b: PlayerSnapshot, t: number): PlayerSn
     score: b.score,
     alive: b.alive,
     snake,
+    digestions: blendDigestions(a.digestions, b.digestions, t),
   }
+}
+
+function blendDigestions(a: number[], b: number[], t: number) {
+  const maxLength = Math.max(a.length, b.length)
+  const digestions: number[] = []
+  for (let i = 0; i < maxLength; i += 1) {
+    const da = a[i]
+    const db = b[i]
+    if (typeof da === 'number' && typeof db === 'number') {
+      digestions.push(clamp(lerp(da, db, t), 0, 1))
+    } else if (typeof db === 'number') {
+      digestions.push(db)
+    } else if (typeof da === 'number' && t < 0.95) {
+      digestions.push(da)
+    }
+  }
+  return digestions
 }
 
 function blendSnapshots(a: GameStateSnapshot, b: GameStateSnapshot, t: number): GameStateSnapshot {

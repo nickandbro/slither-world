@@ -21,6 +21,12 @@ type Player = {
   lastSeen: number
   respawnAt?: number
   snake: SnakeNode[]
+  digestions: Digestion[]
+}
+
+type Digestion = {
+  remaining: number
+  total: number
 }
 
 type Session = {
@@ -38,6 +44,7 @@ type GameStateSnapshot = {
     score: number
     alive: boolean
     snake: Point[]
+    digestions: number[]
   }>
 }
 
@@ -385,6 +392,7 @@ export class GameRoom {
       connected: true,
       lastSeen: Date.now(),
       snake,
+      digestions: [],
     }
   }
 
@@ -500,11 +508,16 @@ export class GameRoom {
         if (!collision(player.snake[0], this.pellets[i])) continue
         this.pellets.splice(i, 1)
         player.score += 1
-        addSnakeNode(player.snake, player.axis)
+        this.addDigestion(player)
         if (this.pellets.length < MAX_PELLETS) {
           this.pellets.push(pointFromSpherical(Math.random() * Math.PI * 2, Math.random() * Math.PI))
         }
       }
+    }
+
+    for (const player of this.players.values()) {
+      if (!player.alive) continue
+      this.advanceDigestions(player)
     }
 
     this.broadcastState()
@@ -514,6 +527,7 @@ export class GameRoom {
     if (!player.alive) return
     player.alive = false
     player.respawnAt = Date.now() + RESPAWN_COOLDOWN_MS
+    player.digestions = []
 
     for (let i = 2; i < player.snake.length && this.pellets.length < MAX_PELLETS; i += 2) {
       const node = player.snake[i]
@@ -533,6 +547,23 @@ export class GameRoom {
     player.boost = false
     player.respawnAt = undefined
     player.snake = spawned.snake
+    player.digestions = []
+  }
+
+  private addDigestion(player: Player) {
+    const steps = Math.max(1, (player.snake.length - 1) * NODE_QUEUE_SIZE)
+    player.digestions.push({ remaining: steps, total: steps })
+  }
+
+  private advanceDigestions(player: Player) {
+    for (let i = player.digestions.length - 1; i >= 0; i -= 1) {
+      const digestion = player.digestions[i]
+      digestion.remaining -= 1
+      if (digestion.remaining <= 0) {
+        addSnakeNode(player.snake, player.axis)
+        player.digestions.splice(i, 1)
+      }
+    }
   }
 
   private buildStateSnapshot(): GameStateSnapshot {
@@ -546,6 +577,9 @@ export class GameRoom {
         score: player.score,
         alive: player.alive,
         snake: player.snake.map(copyPoint),
+        digestions: player.digestions.map((digestion) =>
+          clamp(1 - digestion.remaining / digestion.total, 0, 1),
+        ),
       })),
     }
   }

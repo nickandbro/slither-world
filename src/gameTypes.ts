@@ -11,6 +11,7 @@ export type PlayerSnapshot = {
   score: number
   alive: boolean
   snake: Point[]
+  digestions: number[]
 }
 
 export type GameStateSnapshot = {
