@@ -118,7 +118,7 @@ function updateCamera(head: Point | null, current: Camera): Camera {
 }
 
 function axisFromPointer(angle: number, camera: Camera) {
-  const axis = { x: -Math.sin(angle), y: Math.cos(angle), z: 0 }
+  const axis = { x: Math.sin(angle), y: Math.cos(angle), z: 0 }
   if (!camera.active) return normalize(axis)
   const inverse = { x: -camera.q.x, y: -camera.q.y, z: -camera.q.z, w: camera.q.w }
   return normalize(rotateVectorByQuat(axis, inverse))
