@@ -12,9 +12,8 @@ type Player = {
   id: string
   name: string
   color: string
-  direction: number
-  targetDirection: number
-  spawnDirection: number
+  axis: Point
+  targetAxis: Point
   boost: boolean
   score: number
   alive: boolean
@@ -80,6 +79,28 @@ function copyPoint(src: Point): Point {
   return { x: src.x, y: src.y, z: src.z }
 }
 
+function length(point: Point) {
+  return Math.sqrt(point.x * point.x + point.y * point.y + point.z * point.z)
+}
+
+function normalize(point: Point): Point {
+  const len = length(point)
+  if (!Number.isFinite(len) || len === 0) return { x: 0, y: 0, z: 0 }
+  return { x: point.x / len, y: point.y / len, z: point.z / len }
+}
+
+function dot(a: Point, b: Point) {
+  return a.x * b.x + a.y * b.y + a.z * b.z
+}
+
+function cross(a: Point, b: Point): Point {
+  return {
+    x: a.y * b.z - a.z * b.y,
+    y: a.z * b.x - a.x * b.z,
+    z: a.x * b.y - a.y * b.x,
+  }
+}
+
 function rotateZ(point: Point, angle: number) {
   const cosA = Math.cos(angle)
   const sinA = Math.sin(angle)
@@ -98,7 +119,46 @@ function rotateY(point: Point, angle: number) {
   point.z = -sinA * x + cosA * z
 }
 
-function addSnakeNode(snake: SnakeNode[], startDirection: number) {
+function rotateAroundAxis(point: Point, axis: Point, angle: number) {
+  const u = normalize(axis)
+  const cosA = Math.cos(angle)
+  const sinA = Math.sin(angle)
+  const ux = u.x
+  const uy = u.y
+  const uz = u.z
+  const x = point.x
+  const y = point.y
+  const z = point.z
+  const dotProd = ux * x + uy * y + uz * z
+
+  point.x = x * cosA + (uy * z - uz * y) * sinA + ux * dotProd * (1 - cosA)
+  point.y = y * cosA + (uz * x - ux * z) * sinA + uy * dotProd * (1 - cosA)
+  point.z = z * cosA + (ux * y - uy * x) * sinA + uz * dotProd * (1 - cosA)
+}
+
+function rotateToward(current: Point, target: Point, maxAngle: number) {
+  const currentNorm = normalize(current)
+  const targetNorm = normalize(target)
+  const dotValue = clamp(dot(currentNorm, targetNorm), -1, 1)
+  const angle = Math.acos(dotValue)
+  if (!Number.isFinite(angle) || angle <= maxAngle) return targetNorm
+  if (angle === 0) return currentNorm
+
+  const axis = cross(currentNorm, targetNorm)
+  const axisLength = length(axis)
+  if (axisLength === 0) return currentNorm
+  const axisNorm = { x: axis.x / axisLength, y: axis.y / axisLength, z: axis.z / axisLength }
+  const rotated = { ...currentNorm }
+  rotateAroundAxis(rotated, axisNorm, maxAngle)
+  return normalize(rotated)
+}
+
+function randomAxis(): Point {
+  const angle = Math.random() * Math.PI * 2
+  return { x: Math.cos(angle), y: Math.sin(angle), z: 0 }
+}
+
+function addSnakeNode(snake: SnakeNode[], axis: Point) {
   const snakeNode: SnakeNode = {
     x: 0,
     y: 0,
@@ -118,9 +178,7 @@ function addSnakeNode(snake: SnakeNode[], startDirection: number) {
       snakeNode.x = last.x
       snakeNode.y = last.y
       snakeNode.z = last.z
-      rotateZ(snakeNode, -startDirection)
-      rotateY(snakeNode, -NODE_ANGLE * 2)
-      rotateZ(snakeNode, startDirection)
+      rotateAroundAxis(snakeNode, axis, -NODE_ANGLE * 2)
     } else {
       snakeNode.x = lastPos.x
       snakeNode.y = lastPos.y
@@ -131,7 +189,7 @@ function addSnakeNode(snake: SnakeNode[], startDirection: number) {
   snake.push(snakeNode)
 }
 
-function applySnakeRotation(snake: SnakeNode[], direction: number, velocity: number, startDirection: number) {
+function applySnakeRotation(snake: SnakeNode[], axis: Point, velocity: number) {
   let nextPosition: Point | null = null
 
   for (let i = 0; i < snake.length; i += 1) {
@@ -139,13 +197,9 @@ function applySnakeRotation(snake: SnakeNode[], direction: number, velocity: num
     const oldPosition = copyPoint(node)
 
     if (i === 0) {
-      rotateZ(node, -direction)
-      rotateY(node, velocity)
-      rotateZ(node, direction)
+      rotateAroundAxis(node, axis, velocity)
     } else if (nextPosition === null) {
-      rotateZ(node, -startDirection)
-      rotateY(node, velocity)
-      rotateZ(node, startDirection)
+      rotateAroundAxis(node, axis, velocity)
     } else {
       node.x = nextPosition.x
       node.y = nextPosition.y
@@ -164,14 +218,6 @@ function collision(a: Point, b: Point) {
   return dist < COLLISION_DISTANCE
 }
 
-function normalizeAngle(angle: number) {
-  const twoPi = Math.PI * 2
-  let normalized = angle % twoPi
-  if (normalized > Math.PI) normalized -= twoPi
-  if (normalized < -Math.PI) normalized += twoPi
-  return normalized
-}
-
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value))
 }
@@ -180,6 +226,18 @@ function sanitizeName(name: string) {
   const cleaned = name.trim().replace(/\s+/g, ' ')
   if (cleaned.length === 0) return 'Player'
   return cleaned.slice(0, 20)
+}
+
+function parseAxis(value: unknown): Point | null {
+  if (!value || typeof value !== 'object') return null
+  const axis = value as { x?: unknown; y?: unknown; z?: unknown }
+  const x = typeof axis.x === 'number' ? axis.x : NaN
+  const y = typeof axis.y === 'number' ? axis.y : NaN
+  const z = typeof axis.z === 'number' ? axis.z : NaN
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null
+  const normalized = normalize({ x, y, z })
+  if (length(normalized) === 0) return null
+  return normalized
 }
 
 export class GameRoom {
@@ -228,8 +286,8 @@ export class GameRoom {
         type?: string
         name?: unknown
         playerId?: unknown
-        direction?: unknown
         boost?: unknown
+        axis?: unknown
       }
 
       if (message.type === 'join') {
@@ -273,9 +331,8 @@ export class GameRoom {
         const player = this.players.get(session.playerId)
         if (!player) return
 
-        if (typeof message.direction === 'number' && Number.isFinite(message.direction)) {
-          player.targetDirection = normalizeAngle(message.direction)
-        }
+        const axis = parseAxis(message.axis)
+        if (axis) player.targetAxis = axis
         player.boost = Boolean(message.boost)
         player.lastSeen = Date.now()
       }
@@ -313,16 +370,15 @@ export class GameRoom {
   }
 
   private createPlayer(id: string, name: string): Player {
-    const direction = Math.random() * Math.PI * 2
-    const snake = this.spawnSnake(direction)
+    const baseAxis = randomAxis()
+    const { snake, axis } = this.spawnSnake(baseAxis)
 
     return {
       id,
       name,
       color: COLOR_POOL[this.players.size % COLOR_POOL.length],
-      direction,
-      targetDirection: direction,
-      spawnDirection: direction,
+      axis,
+      targetAxis: axis,
       boost: false,
       score: 0,
       alive: true,
@@ -332,28 +388,33 @@ export class GameRoom {
     }
   }
 
-  private spawnSnake(direction: number): SnakeNode[] {
+  private spawnSnake(baseAxis: Point): { snake: SnakeNode[]; axis: Point } {
     let snake: SnakeNode[] = []
+    let axis = baseAxis
 
     for (let attempt = 0; attempt < 8; attempt += 1) {
-      snake = this.createSnake(direction)
+      snake = this.createSnake(baseAxis)
       const theta = Math.random() * Math.PI * 2
       const phi = Math.PI - Math.random() * SPAWN_CONE_ANGLE
       const rotateYAngle = Math.PI - phi
 
       this.rotateSnake(snake, theta, rotateYAngle)
+      const rotatedAxis = { ...baseAxis }
+      rotateY(rotatedAxis, rotateYAngle)
+      rotateZ(rotatedAxis, theta)
+      axis = normalize(rotatedAxis)
       if (!this.isSnakeTooClose(snake)) {
-        return snake
+        return { snake, axis }
       }
     }
 
-    return snake
+    return { snake, axis }
   }
 
-  private createSnake(direction: number) {
+  private createSnake(axis: Point) {
     const snake: SnakeNode[] = []
     for (let i = 0; i < STARTING_LENGTH; i += 1) {
-      addSnakeNode(snake, direction)
+      addSnakeNode(snake, axis)
     }
     return snake
   }
@@ -399,10 +460,9 @@ export class GameRoom {
 
     for (const player of this.players.values()) {
       if (!player.alive) continue
-      const delta = normalizeAngle(player.targetDirection - player.direction)
-      player.direction = normalizeAngle(player.direction + clamp(delta, -TURN_RATE, TURN_RATE))
+      player.axis = rotateToward(player.axis, player.targetAxis, TURN_RATE)
       const speed = BASE_SPEED * (player.boost ? BOOST_MULTIPLIER : 1)
-      applySnakeRotation(player.snake, player.direction, speed, player.spawnDirection)
+      applySnakeRotation(player.snake, player.axis, speed)
     }
 
     const dead: Player[] = []
@@ -440,7 +500,7 @@ export class GameRoom {
         if (!collision(player.snake[0], this.pellets[i])) continue
         this.pellets.splice(i, 1)
         player.score += 1
-        addSnakeNode(player.snake, player.spawnDirection)
+        addSnakeNode(player.snake, player.axis)
         if (this.pellets.length < MAX_PELLETS) {
           this.pellets.push(pointFromSpherical(Math.random() * Math.PI * 2, Math.random() * Math.PI))
         }
@@ -464,14 +524,15 @@ export class GameRoom {
   }
 
   private respawnPlayer(player: Player) {
-    player.direction = Math.random() * Math.PI * 2
-    player.targetDirection = player.direction
-    player.spawnDirection = player.direction
+    const baseAxis = randomAxis()
+    const spawned = this.spawnSnake(baseAxis)
+    player.axis = spawned.axis
+    player.targetAxis = spawned.axis
     player.score = 0
     player.alive = true
     player.boost = false
     player.respawnAt = undefined
-    player.snake = this.spawnSnake(player.direction)
+    player.snake = spawned.snake
   }
 
   private buildStateSnapshot(): GameStateSnapshot {

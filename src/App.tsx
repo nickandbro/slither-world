@@ -36,6 +36,12 @@ type RenderConfig = {
   focalLength: number
 }
 
+type Camera = {
+  yaw: number
+  pitch: number
+  active: boolean
+}
+
 const NODE_ANGLE = Math.PI / 60
 const GRID_COUNT = 40
 const BASE_SIZE = 360
@@ -65,6 +71,54 @@ function pointFromSpherical(theta: number, phi: number): Point {
     y: Math.sin(theta) * sinPhi,
     z: Math.cos(phi),
   }
+}
+
+function rotatePointZ(point: Point, angle: number) {
+  const cosA = Math.cos(angle)
+  const sinA = Math.sin(angle)
+  const x = point.x
+  const y = point.y
+  point.x = cosA * x - sinA * y
+  point.y = sinA * x + cosA * y
+}
+
+function rotatePointY(point: Point, angle: number) {
+  const cosA = Math.cos(angle)
+  const sinA = Math.sin(angle)
+  const x = point.x
+  const z = point.z
+  point.x = cosA * x + sinA * z
+  point.z = -sinA * x + cosA * z
+}
+
+function normalize(point: Point) {
+  const len = Math.sqrt(point.x * point.x + point.y * point.y + point.z * point.z)
+  if (!Number.isFinite(len) || len === 0) return { x: 0, y: 0, z: 0 }
+  return { x: point.x / len, y: point.y / len, z: point.z / len }
+}
+
+function applyCamera(point: Point, camera: Camera) {
+  if (!camera.active) return point
+  const transformed = { x: point.x, y: point.y, z: point.z }
+  rotatePointZ(transformed, -camera.yaw)
+  rotatePointY(transformed, camera.pitch)
+  return transformed
+}
+
+function computeCamera(head: Point | null): Camera {
+  if (!head) return { yaw: 0, pitch: 0, active: false }
+  const yaw = Math.atan2(head.y, head.x)
+  const r = Math.sqrt(head.x * head.x + head.y * head.y)
+  const pitch = Math.atan2(r, -head.z)
+  return { yaw, pitch, active: true }
+}
+
+function axisFromPointer(angle: number, camera: Camera) {
+  const axis = { x: -Math.sin(angle), y: Math.cos(angle), z: 0 }
+  if (!camera.active) return normalize(axis)
+  rotatePointY(axis, -camera.pitch)
+  rotatePointZ(axis, camera.yaw)
+  return normalize(axis)
 }
 
 const colorCache = new Map<string, { r: number; g: number; b: number }>()
@@ -120,11 +174,12 @@ function drawScene(
   snapshot: GameStateSnapshot | null,
   pointerAngle: number | null,
   localPlayerId: string | null,
+  camera: Camera,
 ) {
   ctx.clearRect(0, 0, config.width, config.height)
 
   for (const point of GRID_POINTS) {
-    drawPoint(ctx, point, 1 / 250, '#2a6f97', config)
+    drawPoint(ctx, applyCamera(point, camera), 1 / 250, '#2a6f97', config)
   }
 
   if (snapshot) {
@@ -132,12 +187,12 @@ function drawScene(
       const color = player.color
       const opacityBoost = player.id === localPlayerId ? 1 : 0.9
       for (const node of player.snake) {
-        drawPoint(ctx, node, NODE_ANGLE * opacityBoost, color, config)
+        drawPoint(ctx, applyCamera(node, camera), NODE_ANGLE * opacityBoost, color, config)
       }
     }
 
     for (const pellet of snapshot.pellets) {
-      drawPoint(ctx, pellet, NODE_ANGLE, '#ffb703', config)
+      drawPoint(ctx, applyCamera(pellet, camera), NODE_ANGLE, '#ffb703', config)
     }
   }
 
@@ -200,6 +255,7 @@ export default function App() {
   const pointerRef = useRef({ angle: 0, boost: false, active: false })
   const sendIntervalRef = useRef<number | null>(null)
   const snapshotRef = useRef<GameStateSnapshot | null>(null)
+  const cameraRef = useRef<Camera>({ yaw: 0, pitch: 0, active: false })
 
   const [gameState, setGameState] = useState<GameStateSnapshot | null>(null)
   const [playerId, setPlayerId] = useState<string | null>(getStoredPlayerId())
@@ -280,12 +336,18 @@ export default function App() {
     const renderLoop = () => {
       const config = renderConfigRef.current
       if (config) {
+        const snapshot = snapshotRef.current
+        const localHead =
+          snapshot?.players.find((player) => player.id === playerId)?.snake[0] ?? null
+        const camera = computeCamera(localHead)
+        cameraRef.current = camera
         drawScene(
           ctx,
           config,
-          snapshotRef.current,
+          snapshot,
           pointerRef.current.active ? pointerRef.current.angle : null,
           playerId,
+          camera,
         )
       }
       frameId = window.requestAnimationFrame(renderLoop)
@@ -423,10 +485,11 @@ export default function App() {
       const socket = socketRef.current
       if (!socket || socket.readyState !== WebSocket.OPEN) return
       if (!pointerRef.current.active) return
+      const axis = axisFromPointer(pointerRef.current.angle, cameraRef.current)
       socket.send(
         JSON.stringify({
           type: 'input',
-          direction: pointerRef.current.angle,
+          axis,
           boost: pointerRef.current.boost,
         }),
       )
@@ -517,7 +580,7 @@ export default function App() {
         <div className='scorebar'>
           <div className='score'>Score: {score}</div>
           <div className='status'>
-            {connectionStatus} · {playersOnline} online
+            Room {roomName} · {connectionStatus} · {playersOnline} online
           </div>
         </div>
 
@@ -536,12 +599,37 @@ export default function App() {
           {localPlayer && !localPlayer.alive && (
             <div className='overlay'>
               <div className='overlay-title'>Good game!</div>
-              <div className='overlay-subtitle'>Reforming your snake...</div>
+              <div className='overlay-subtitle'>Your trail is still glowing.</div>
+              <button type='button' onClick={requestRespawn}>
+                Play again
+              </button>
             </div>
           )}
         </div>
 
         <div className='control-panel'>
+          <div className='control-row'>
+            <label className='control-label' htmlFor='room-name'>
+              Room
+            </label>
+            <input
+              id='room-name'
+              value={roomInput}
+              onChange={(event) => setRoomInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault()
+                  handleJoinRoom()
+                }
+              }}
+            />
+            <button type='button' onClick={handleJoinRoom}>
+              Join
+            </button>
+          </div>
+          <div className='control-row muted'>
+            <span>Share the room name to invite players.</span>
+          </div>
           <div className='control-row'>
             <label className='control-label' htmlFor='player-name'>
               Pilot name

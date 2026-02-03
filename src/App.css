@@ -70,6 +70,13 @@
   padding: 1rem;
 }
 
+.overlay button {
+  margin-top: 0.4rem;
+  background: #f4d35e;
+  color: #0b1320;
+  box-shadow: 0 10px 20px rgba(11, 19, 32, 0.35);
+}
+
 .overlay-title {
   font-size: 1.4rem;
 }
