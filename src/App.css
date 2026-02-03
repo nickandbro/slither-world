@@ -45,14 +45,32 @@
   background: #ffffff;
 }
 
-.game-canvas {
+.game-surface {
+  position: relative;
   width: min(92vw, 360px);
   aspect-ratio: 1;
   border-radius: 12px;
   border: 1px solid rgba(11, 19, 32, 0.5);
   background: #ffffff;
   box-shadow: inset 0 0 0 1px rgba(11, 19, 32, 0.04);
+  overflow: hidden;
+}
+
+.game-canvas,
+.hud-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.game-canvas {
   touch-action: none;
+}
+
+.hud-canvas {
+  pointer-events: none;
 }
 
 .overlay {

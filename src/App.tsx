@@ -1,26 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
-
-type Point = {
-  x: number
-  y: number
-  z: number
-}
-
-type PlayerSnapshot = {
-  id: string
-  name: string
-  color: string
-  score: number
-  alive: boolean
-  snake: Point[]
-}
-
-type GameStateSnapshot = {
-  now: number
-  pellets: Point[]
-  players: PlayerSnapshot[]
-}
+import { createWebGLScene } from './webglScene'
+import type { Camera, GameStateSnapshot, Point, Quaternion } from './gameTypes'
 
 type LeaderboardEntry = {
   name: string
@@ -33,51 +14,13 @@ type RenderConfig = {
   height: number
   centerX: number
   centerY: number
-  focalLength: number
 }
 
-type Quaternion = {
-  x: number
-  y: number
-  z: number
-  w: number
-}
-
-type Camera = {
-  q: Quaternion
-  active: boolean
-}
-
-const NODE_ANGLE = Math.PI / 60
-const GRID_COUNT = 40
-const BASE_SIZE = 360
-const FOCAL_LENGTH = 200
 const LOCAL_STORAGE_ID = 'spherical_snake_player_id'
 const LOCAL_STORAGE_NAME = 'spherical_snake_player_name'
 const LOCAL_STORAGE_BEST = 'spherical_snake_best_score'
 const LOCAL_STORAGE_ROOM = 'spherical_snake_room'
 const DEFAULT_ROOM = 'main'
-
-const GRID_POINTS = createGridPoints(GRID_COUNT)
-
-function createGridPoints(n: number) {
-  const points: Point[] = []
-  for (let i = 0; i < n; i += 1) {
-    for (let j = 0; j < n; j += 1) {
-      points.push(pointFromSpherical((i / n) * Math.PI * 2, (j / n) * Math.PI))
-    }
-  }
-  return points
-}
-
-function pointFromSpherical(theta: number, phi: number): Point {
-  const sinPhi = Math.sin(phi)
-  return {
-    x: Math.cos(theta) * sinPhi,
-    y: Math.sin(theta) * sinPhi,
-    z: Math.cos(phi),
-  }
-}
 
 function normalize(point: Point) {
   const len = Math.sqrt(point.x * point.x + point.y * point.y + point.z * point.z)
@@ -166,14 +109,9 @@ function rotateVectorByQuat(vector: Point, q: Quaternion) {
   }
 }
 
-function applyCamera(point: Point, camera: Camera) {
-  if (!camera.active) return point
-  return rotateVectorByQuat(point, camera.q)
-}
-
 function updateCamera(head: Point | null, current: Camera): Camera {
   if (!head) return { q: { ...IDENTITY_QUAT }, active: false }
-  const desired = quatFromTo(head, { x: 0, y: 0, z: -1 })
+  const desired = quatFromTo(head, { x: 0, y: 0, z: 1 })
   if (!current.active) return { q: desired, active: true }
   const blended = quatSlerp(current.q, desired, 0.2)
   return { q: blended, active: true }
@@ -186,99 +124,30 @@ function axisFromPointer(angle: number, camera: Camera) {
   return normalize(rotateVectorByQuat(axis, inverse))
 }
 
-const colorCache = new Map<string, { r: number; g: number; b: number }>()
-
-function hexToRgb(hex: string) {
-  const cached = colorCache.get(hex)
-  if (cached) return cached
-  const cleaned = hex.replace('#', '')
-  const value = Number.parseInt(cleaned.length === 3
-    ? cleaned
-        .split('')
-        .map((char) => char + char)
-        .join('')
-    : cleaned, 16)
-  const rgb = {
-    r: (value >> 16) & 255,
-    g: (value >> 8) & 255,
-    b: value & 255,
-  }
-  colorCache.set(hex, rgb)
-  return rgb
-}
-
-function drawPoint(
-  ctx: CanvasRenderingContext2D,
-  point: Point,
-  radius: number,
-  color: string,
-  config: RenderConfig,
-) {
-  const p = { x: point.x, y: point.y, z: point.z + 2 }
-  p.x *= -1 * config.focalLength / p.z
-  p.y *= -1 * config.focalLength / p.z
-  const scaledRadius = radius * config.focalLength / p.z
-  p.x += config.centerX
-  p.y += config.centerY
-
-  const alpha = 1 - (p.z - 1) / 2
-  const depthShade = 0.4 + 0.6 * alpha
-  const rgb = hexToRgb(color)
-
-  ctx.beginPath()
-  ctx.fillStyle = `rgba(${Math.round(rgb.r * depthShade)}, ${Math.round(rgb.g * depthShade)}, ${Math.round(
-    rgb.b * depthShade,
-  )}, ${alpha})`
-  ctx.arc(p.x, p.y, scaledRadius, 0, Math.PI * 2)
-  ctx.fill()
-}
-
-function drawScene(
+function drawHud(
   ctx: CanvasRenderingContext2D,
   config: RenderConfig,
-  snapshot: GameStateSnapshot | null,
   pointerAngle: number | null,
-  localPlayerId: string | null,
-  camera: Camera,
 ) {
   ctx.clearRect(0, 0, config.width, config.height)
+  if (pointerAngle === null) return
 
-  for (const point of GRID_POINTS) {
-    drawPoint(ctx, applyCamera(point, camera), 1 / 250, '#2a6f97', config)
-  }
-
-  if (snapshot) {
-    for (const player of snapshot.players) {
-      const color = player.color
-      const opacityBoost = player.id === localPlayerId ? 1 : 0.9
-      for (const node of player.snake) {
-        drawPoint(ctx, applyCamera(node, camera), NODE_ANGLE * opacityBoost, color, config)
-      }
-    }
-
-    for (const pellet of snapshot.pellets) {
-      drawPoint(ctx, applyCamera(pellet, camera), NODE_ANGLE, '#ffb703', config)
-    }
-  }
-
-  if (pointerAngle !== null) {
-    ctx.beginPath()
-    ctx.moveTo(config.centerX, config.centerY)
-    const r = (NODE_ANGLE / 2) * config.focalLength * 2.2
-    ctx.lineTo(
-      config.centerX + Math.cos(pointerAngle) * r,
-      config.centerY + Math.sin(pointerAngle) * r,
-    )
-    ctx.strokeStyle = '#ffffff'
-    ctx.lineWidth = 3
-    ctx.stroke()
-    ctx.lineWidth = 1
-  }
+  const radius = Math.min(config.width, config.height) * 0.22
+  ctx.beginPath()
+  ctx.moveTo(config.centerX, config.centerY)
+  ctx.lineTo(
+    config.centerX + Math.cos(pointerAngle) * radius,
+    config.centerY + Math.sin(pointerAngle) * radius,
+  )
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)'
+  ctx.lineWidth = Math.max(2, config.width * 0.004)
+  ctx.lineCap = 'round'
+  ctx.stroke()
 
   ctx.beginPath()
-  ctx.strokeStyle = '#0b1320'
-  ctx.arc(config.centerX, config.centerY, 0.58 * config.focalLength, 0, Math.PI * 2)
-  ctx.stroke()
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.7)'
+  ctx.arc(config.centerX, config.centerY, Math.max(2, config.width * 0.006), 0, Math.PI * 2)
+  ctx.fill()
 }
 
 function getInitialName() {
@@ -314,7 +183,8 @@ function sanitizeRoomName(value: string) {
 }
 
 export default function App() {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const glCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  const hudCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const socketRef = useRef<WebSocket | null>(null)
   const renderConfigRef = useRef<RenderConfig | null>(null)
   const pointerRef = useRef({ angle: 0, boost: false, active: false })
@@ -372,29 +242,33 @@ export default function App() {
   }, [roomName])
 
   useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
+    const glCanvas = glCanvasRef.current
+    const hudCanvas = hudCanvasRef.current
+    if (!glCanvas || !hudCanvas) return
+    const hudCtx = hudCanvas.getContext('2d')
+    if (!hudCtx) return
+
+    const webgl = createWebGLScene(glCanvas)
 
     const updateConfig = () => {
-      const rect = canvas.getBoundingClientRect()
-      const dpr = window.devicePixelRatio || 1
-      canvas.width = Math.round(rect.width * dpr)
-      canvas.height = Math.round(rect.height * dpr)
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      const rect = glCanvas.getBoundingClientRect()
+      if (!rect.width || !rect.height) return
+      const dpr = Math.min(window.devicePixelRatio || 1, 2)
+      webgl.resize(rect.width, rect.height, dpr)
+      hudCanvas.width = Math.round(rect.width * dpr)
+      hudCanvas.height = Math.round(rect.height * dpr)
+      hudCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
       renderConfigRef.current = {
         width: rect.width,
         height: rect.height,
         centerX: rect.width / 2,
         centerY: rect.height / 2,
-        focalLength: FOCAL_LENGTH * (rect.width / BASE_SIZE),
       }
     }
 
     updateConfig()
     const observer = new ResizeObserver(updateConfig)
-    observer.observe(canvas)
+    observer.observe(glCanvas)
     window.addEventListener('resize', updateConfig)
 
     let frameId = 0
@@ -402,18 +276,13 @@ export default function App() {
       const config = renderConfigRef.current
       if (config) {
         const snapshot = snapshotRef.current
+        const localId = playerIdRef.current
         const localHead =
-          snapshot?.players.find((player) => player.id === playerId)?.snake[0] ?? null
+          snapshot?.players.find((player) => player.id === localId)?.snake[0] ?? null
         const camera = updateCamera(localHead, cameraRef.current)
         cameraRef.current = camera
-        drawScene(
-          ctx,
-          config,
-          snapshot,
-          pointerRef.current.active ? pointerRef.current.angle : null,
-          playerId,
-          camera,
-        )
+        webgl.render(snapshot, camera, localId)
+        drawHud(hudCtx, config, pointerRef.current.active ? pointerRef.current.angle : null)
       }
       frameId = window.requestAnimationFrame(renderLoop)
     }
@@ -424,8 +293,9 @@ export default function App() {
       observer.disconnect()
       window.removeEventListener('resize', updateConfig)
       window.cancelAnimationFrame(frameId)
+      webgl.dispose()
     }
-  }, [playerId])
+  }, [])
 
   useEffect(() => {
     let reconnectTimer: number | null = null
@@ -535,7 +405,7 @@ export default function App() {
   }, [])
 
   const updatePointer = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current
+    const canvas = glCanvasRef.current
     if (!canvas) return
     const rect = canvas.getBoundingClientRect()
     const dx = event.clientX - rect.left - rect.width / 2
@@ -650,17 +520,20 @@ export default function App() {
         </div>
 
         <div className='play-area'>
-          <canvas
-            ref={canvasRef}
-            className='game-canvas'
-            aria-label='Spherical snake arena'
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerUp}
-            onPointerLeave={handlePointerLeave}
-            onPointerCancel={handlePointerLeave}
-            onContextMenu={(event) => event.preventDefault()}
-          />
+          <div className='game-surface'>
+            <canvas
+              ref={glCanvasRef}
+              className='game-canvas'
+              aria-label='Spherical snake arena'
+              onPointerDown={handlePointerDown}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerLeave={handlePointerLeave}
+              onPointerCancel={handlePointerLeave}
+              onContextMenu={(event) => event.preventDefault()}
+            />
+            <canvas ref={hudCanvasRef} className='hud-canvas' aria-hidden='true' />
+          </div>
           {localPlayer && !localPlayer.alive && (
             <div className='overlay'>
               <div className='overlay-title'>Good game!</div>
