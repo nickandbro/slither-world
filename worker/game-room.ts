@@ -27,6 +27,7 @@ type Player = {
 type Digestion = {
   remaining: number
   total: number
+  growthSteps: number
 }
 
 type Session = {
@@ -61,6 +62,7 @@ const TICK_MS = 50
 const RESPAWN_COOLDOWN_MS = 0
 const PLAYER_TIMEOUT_MS = 15000
 const SPAWN_CONE_ANGLE = Math.PI / 3
+const DIGESTION_GROWTH_STEPS = NODE_QUEUE_SIZE
 
 const COLOR_POOL = [
   '#ff6b6b',
@@ -551,18 +553,40 @@ export class GameRoom {
   }
 
   private addDigestion(player: Player) {
-    const steps = Math.max(1, (player.snake.length - 1) * NODE_QUEUE_SIZE)
-    player.digestions.push({ remaining: steps, total: steps })
+    const travelSteps = Math.max(1, (player.snake.length - 1) * NODE_QUEUE_SIZE)
+    const total = travelSteps + DIGESTION_GROWTH_STEPS
+    player.digestions.push({
+      remaining: total,
+      total,
+      growthSteps: DIGESTION_GROWTH_STEPS,
+    })
   }
 
   private advanceDigestions(player: Player) {
-    for (let i = player.digestions.length - 1; i >= 0; i -= 1) {
+    let growthTaken = false
+
+    for (let i = 0; i < player.digestions.length; ) {
       const digestion = player.digestions[i]
-      digestion.remaining -= 1
+      const atTail = digestion.remaining <= digestion.growthSteps
+
+      if (atTail) {
+        if (!growthTaken) {
+          digestion.remaining -= 1
+          growthTaken = true
+        } else {
+          digestion.remaining = Math.max(digestion.remaining, digestion.growthSteps)
+        }
+      } else {
+        digestion.remaining -= 1
+      }
+
       if (digestion.remaining <= 0) {
         addSnakeNode(player.snake, player.axis)
         player.digestions.splice(i, 1)
+        continue
       }
+
+      i += 1
     }
   }
 
@@ -577,9 +601,16 @@ export class GameRoom {
         score: player.score,
         alive: player.alive,
         snake: player.snake.map(copyPoint),
-        digestions: player.digestions.map((digestion) =>
-          clamp(1 - digestion.remaining / digestion.total, 0, 1),
-        ),
+        digestions: player.digestions.map((digestion) => {
+          const travelTotal = Math.max(1, digestion.total - digestion.growthSteps)
+          const travelRemaining = Math.max(0, digestion.remaining - digestion.growthSteps)
+          const travelProgress = clamp(1 - travelRemaining / travelTotal, 0, 1)
+          const growthProgress =
+            digestion.remaining <= digestion.growthSteps
+              ? clamp(1 - digestion.remaining / digestion.growthSteps, 0, 1)
+              : 0
+          return travelProgress + growthProgress
+        }),
       })),
     }
   }

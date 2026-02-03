@@ -13,6 +13,26 @@ type SnakeVisual = {
   color: string
 }
 
+type DigestionVisual = {
+  t: number
+  strength: number
+}
+
+type TailAddState = {
+  progress: number
+  duration: number
+  carryDistance: number
+  carryExtra: number | null
+}
+
+type TailDebugState = {
+  lastLength: number
+  lastTailGrowth: number
+  lastMaxDigestion: number
+  lastTailAddBucket: number
+  lastTailGrowthBucket: number
+}
+
 type WebGLScene = {
   resize: (width: number, height: number, dpr: number) => void
   render: (
@@ -35,6 +55,12 @@ const TAIL_CAP_SEGMENTS = 5
 const DIGESTION_BULGE = 0.45
 const DIGESTION_WIDTH = 2.5
 const DIGESTION_MAX_BULGE = 0.7
+const DIGESTION_START_RINGS = 3
+const DIGESTION_START_MAX = 0.18
+const TAIL_ADD_SMOOTH_MS = 180
+const DEBUG_TAIL = true
+
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
 
 function pointToVector(point: Point, radius: number) {
   return new THREE.Vector3(point.x, point.y, point.z).normalize().multiplyScalar(radius)
@@ -127,10 +153,15 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   let pelletCapacity = 0
   let viewportWidth = 1
   let viewportHeight = 1
+  let lastFrameTime = performance.now()
 
   const snakes = new Map<string, SnakeVisual>()
   const lastHeadPositions = new Map<string, THREE.Vector3>()
   const lastForwardDirections = new Map<string, THREE.Vector3>()
+  const lastSnakeLengths = new Map<string, number>()
+  const tailAddStates = new Map<string, TailAddState>()
+  const lastTailTotalLengths = new Map<string, number>()
+  const tailDebugStates = new Map<string, TailDebugState>()
   const tempMatrix = new THREE.Matrix4()
   const tempVector = new THREE.Vector3()
   const tempVectorB = new THREE.Vector3()
@@ -295,7 +326,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     return capGeometry
   }
 
-  const applyDigestionBulges = (tubeGeometry: THREE.TubeGeometry, digestions: number[]) => {
+  const applyDigestionBulges = (tubeGeometry: THREE.TubeGeometry, digestions: DigestionVisual[]) => {
     if (!digestions.length) return
     const params = tubeGeometry.parameters as { radialSegments?: number; tubularSegments?: number }
     const radialSegments = params.radialSegments ?? 8
@@ -306,9 +337,16 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     if (!positions) return
 
     const bulgeByRing = new Array(ringCount).fill(0)
+    const startOffset = Math.min(
+      DIGESTION_START_MAX,
+      DIGESTION_START_RINGS / Math.max(1, ringCount - 1),
+    )
     for (const digestion of digestions) {
-      const t = Math.max(0, Math.min(1, digestion))
-      const center = t * (ringCount - 1)
+      const strength = clamp(digestion.strength, 0, 1)
+      if (strength <= 0) continue
+      const t = clamp(digestion.t, 0, 1)
+      const mapped = startOffset + t * (1 - startOffset)
+      const center = mapped * (ringCount - 1)
       const start = Math.max(0, Math.floor(center - DIGESTION_WIDTH * 2))
       const end = Math.min(ringCount - 1, Math.ceil(center + DIGESTION_WIDTH * 2))
       for (let ring = start; ring <= end; ring += 1) {
@@ -316,7 +354,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
         const weight = Math.exp(-(dist * dist) / (2 * DIGESTION_WIDTH * DIGESTION_WIDTH))
         bulgeByRing[ring] = Math.min(
           DIGESTION_MAX_BULGE,
-          bulgeByRing[ring] + weight * DIGESTION_BULGE,
+          bulgeByRing[ring] + weight * DIGESTION_BULGE * strength,
         )
       }
     }
@@ -349,7 +387,55 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     tubeGeometry.computeVertexNormals()
   }
 
-  const updateSnake = (player: PlayerSnapshot, isLocal: boolean) => {
+  const buildDigestionVisuals = (digestions: number[]) => {
+    const visuals: DigestionVisual[] = []
+    let tailGrowth = 0
+
+    for (const digestion of digestions) {
+      const travelT = clamp(digestion, 0, 1)
+      const growth = clamp(digestion - 1, 0, 1)
+      visuals.push({ t: travelT, strength: 1 - growth })
+      if (growth > tailGrowth) tailGrowth = growth
+    }
+
+    return { visuals, tailGrowth }
+  }
+
+  const extendTailCurve = (
+    curvePoints: THREE.Vector3[],
+    extendDistance: number,
+    centerlineRadius: number,
+    tailBasisPrev?: THREE.Vector3 | null,
+    tailBasisTail?: THREE.Vector3 | null,
+  ) => {
+    if (extendDistance <= 0 || curvePoints.length < 2) return
+    const tailPos = curvePoints[curvePoints.length - 1]
+    const prevPos = curvePoints[curvePoints.length - 2]
+    const tailNormal = tailPos.clone().normalize()
+    const tailDir = tailPos.clone().sub(prevPos)
+    tailDir.addScaledVector(tailNormal, -tailDir.dot(tailNormal))
+    let segmentLength = tailDir.length()
+    if (tailBasisPrev && tailBasisTail) {
+      const basisDir = tailBasisTail.clone().sub(tailBasisPrev)
+      basisDir.addScaledVector(tailNormal, -basisDir.dot(tailNormal))
+      const basisLength = basisDir.length()
+      if (basisLength > segmentLength) {
+        tailDir.copy(basisDir)
+        segmentLength = basisLength
+      }
+    }
+    if (segmentLength <= 1e-6) return
+    tailDir.normalize()
+
+    const extended = tailPos
+      .clone()
+      .addScaledVector(tailDir, extendDistance)
+      .normalize()
+      .multiplyScalar(centerlineRadius)
+    curvePoints.push(extended)
+  }
+
+  const updateSnake = (player: PlayerSnapshot, isLocal: boolean, deltaSeconds: number) => {
     let visual = snakes.get(player.id)
     if (!visual) {
       visual = createSnakeVisual(player.color)
@@ -365,8 +451,45 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     updateSnakeMaterial(visual.head.material, visual.color, isLocal)
 
     const nodes = player.snake
+    const debug = DEBUG_TAIL && isLocal
+    const maxDigestion =
+      player.digestions.length > 0 ? Math.max(...player.digestions) : 0
+    const prevLength = lastSnakeLengths.get(player.id)
+    if (prevLength !== undefined) {
+      if (nodes.length > prevLength && nodes.length >= 2) {
+        tailAddStates.set(player.id, {
+          progress: 0,
+          duration: Math.max(0.05, TAIL_ADD_SMOOTH_MS / 1000),
+          carryDistance: lastTailTotalLengths.get(player.id) ?? 0,
+          carryExtra: null,
+        })
+        if (debug) {
+          console.log(
+            `[TAIL_DEBUG] ${player.id} length_increase ${prevLength} -> ${nodes.length} max_digestion=${maxDigestion.toFixed(
+              3,
+            )}`,
+          )
+        }
+      } else if (nodes.length < prevLength) {
+        tailAddStates.delete(player.id)
+        if (debug) {
+          console.log(
+            `[TAIL_DEBUG] ${player.id} length_decrease ${prevLength} -> ${nodes.length}`,
+          )
+        }
+      }
+    }
+    lastSnakeLengths.set(player.id, nodes.length)
+    const digestionState = buildDigestionVisuals(player.digestions)
     const radius = isLocal ? SNAKE_RADIUS * 1.1 : SNAKE_RADIUS
     const centerlineRadius = PLANET_RADIUS + radius * SNAKE_LIFT_FACTOR
+    let tailCurveTail: THREE.Vector3 | null = null
+    let tailCurvePrev: THREE.Vector3 | null = null
+    let tailExtendDistance = 0
+    let tailAddProgress = 0
+    let tailBasisPrev: THREE.Vector3 | null = null
+    let tailBasisTail: THREE.Vector3 | null = null
+    let tailSegmentLength = 0
     if (nodes.length < 2) {
       visual.tube.visible = false
       visual.tail.visible = false
@@ -374,12 +497,69 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       visual.tube.visible = true
       visual.tail.visible = true
       const curvePoints = nodes.map((node) => pointToVector(node, centerlineRadius))
+      const tailAddState = tailAddStates.get(player.id)
+      if (tailAddState && curvePoints.length >= 2) {
+        tailAddState.progress = clamp(
+          tailAddState.progress + deltaSeconds / tailAddState.duration,
+          0,
+          1,
+        )
+        tailAddProgress = tailAddState.progress
+        const start = curvePoints[curvePoints.length - 2]
+        const end = curvePoints[curvePoints.length - 1]
+        curvePoints[curvePoints.length - 1] = start.clone().lerp(end, tailAddState.progress)
+        if (tailAddState.progress >= 1) {
+          tailAddStates.delete(player.id)
+        }
+        if (curvePoints.length >= 3) {
+          tailBasisPrev = curvePoints[curvePoints.length - 3]
+          tailBasisTail = curvePoints[curvePoints.length - 2]
+          if (tailBasisPrev.distanceToSquared(tailBasisTail) < 1e-6) {
+            tailBasisPrev = null
+            tailBasisTail = null
+          }
+        }
+      }
+      if (curvePoints.length >= 2) {
+        tailSegmentLength = curvePoints[curvePoints.length - 1].distanceTo(
+          curvePoints[curvePoints.length - 2],
+        )
+      }
+      const referenceLength =
+        tailBasisPrev && tailBasisTail
+          ? tailBasisTail.distanceTo(tailBasisPrev)
+          : tailSegmentLength
+      const baseLength =
+        tailAddState && tailBasisPrev && tailBasisTail ? referenceLength : tailSegmentLength
+      const growthExtra = referenceLength * digestionState.tailGrowth
+      let extraLength = growthExtra
+      if (tailAddState) {
+        if (tailAddState.carryExtra === null) {
+          tailAddState.carryExtra = Math.max(0, tailAddState.carryDistance - baseLength)
+        }
+        const initialExtra = tailAddState.carryExtra
+        extraLength = initialExtra * (1 - tailAddProgress) + growthExtra * tailAddProgress
+      }
+      const extensionDistance = Math.max(0, extraLength)
+      extendTailCurve(
+        curvePoints,
+        extensionDistance,
+        centerlineRadius,
+        tailBasisPrev,
+        tailBasisTail,
+      )
+      if (curvePoints.length >= 2) {
+        tailCurvePrev = curvePoints[curvePoints.length - 2]
+        tailCurveTail = curvePoints[curvePoints.length - 1]
+        tailExtendDistance = tailCurveTail.distanceTo(tailCurvePrev)
+        lastTailTotalLengths.set(player.id, baseLength + extraLength)
+      }
       const baseCurve = new THREE.CatmullRomCurve3(curvePoints, false, 'centripetal')
       const curve = new SphericalCurve(baseCurve, centerlineRadius)
       const tubularSegments = Math.max(8, curvePoints.length * 4)
       const tubeGeometry = new THREE.TubeGeometry(curve, tubularSegments, radius, 10, false)
-      if (player.digestions.length) {
-        applyDigestionBulges(tubeGeometry, player.digestions)
+      if (digestionState.visuals.length) {
+        applyDigestionBulges(tubeGeometry, digestionState.visuals)
       }
       visual.tube.geometry.dispose()
       visual.tube.geometry = tubeGeometry
@@ -393,6 +573,10 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       visual.pupilRight.visible = false
       lastHeadPositions.delete(player.id)
       lastForwardDirections.delete(player.id)
+      lastSnakeLengths.delete(player.id)
+      tailAddStates.delete(player.id)
+      lastTailTotalLengths.delete(player.id)
+      tailDebugStates.delete(player.id)
       return
     }
 
@@ -401,6 +585,84 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     visual.eyeRight.visible = true
     visual.pupilLeft.visible = true
     visual.pupilRight.visible = true
+
+    if (debug) {
+      const tailAddState = tailAddStates.get(player.id)
+      const tailGrowth = digestionState.tailGrowth
+      const tailAddBucket = tailAddState ? Math.floor(tailAddProgress * 4) : -1
+      const tailGrowthBucket = tailGrowth > 0 ? Math.floor(tailGrowth * 4) : -1
+      const prevDebug = tailDebugStates.get(player.id)
+      const tailGrowthStarted = !prevDebug || (prevDebug.lastTailGrowth <= 0 && tailGrowth > 0)
+      const tailGrowthEnded = prevDebug && prevDebug.lastTailGrowth > 0 && tailGrowth <= 0
+      const digestionEnteredGrowth =
+        !prevDebug || (prevDebug.lastMaxDigestion < 1 && maxDigestion >= 1)
+      const digestionExitedGrowth =
+        prevDebug && prevDebug.lastMaxDigestion >= 1 && maxDigestion < 1
+
+      if (!prevDebug) {
+        console.log(
+          `[TAIL_DEBUG] ${player.id} init length=${nodes.length} max_digestion=${maxDigestion.toFixed(
+            3,
+          )}`,
+        )
+      }
+
+      if (tailGrowthStarted) {
+        console.log(
+          `[TAIL_DEBUG] ${player.id} tail_growth_start growth=${tailGrowth.toFixed(
+            3,
+          )} tail_extend=${tailExtendDistance.toFixed(4)}`,
+        )
+      }
+      if (tailGrowthEnded) {
+        console.log(
+          `[TAIL_DEBUG] ${player.id} tail_growth_end tail_extend=${tailExtendDistance.toFixed(4)}`,
+        )
+      }
+      if (digestionEnteredGrowth) {
+        console.log(
+          `[TAIL_DEBUG] ${player.id} digestion_enter_growth max_digestion=${maxDigestion.toFixed(
+            3,
+          )}`,
+        )
+      }
+      if (digestionExitedGrowth) {
+        console.log(
+          `[TAIL_DEBUG] ${player.id} digestion_exit_growth max_digestion=${maxDigestion.toFixed(
+            3,
+          )}`,
+        )
+      }
+
+      if (
+        prevDebug &&
+        prevDebug.lastTailAddBucket !== tailAddBucket &&
+        tailAddBucket >= 0 &&
+        tailAddState
+      ) {
+        console.log(
+          `[TAIL_DEBUG] ${player.id} tail_add_progress ${tailAddProgress.toFixed(
+            3,
+          )} tail_extend=${tailExtendDistance.toFixed(4)}`,
+        )
+      }
+
+      if (prevDebug && prevDebug.lastTailGrowthBucket !== tailGrowthBucket && tailGrowth > 0) {
+        console.log(
+          `[TAIL_DEBUG] ${player.id} tail_growth_progress ${tailGrowth.toFixed(
+            3,
+          )} tail_extend=${tailExtendDistance.toFixed(4)}`,
+        )
+      }
+
+      tailDebugStates.set(player.id, {
+        lastLength: nodes.length,
+        lastTailGrowth: tailGrowth,
+        lastMaxDigestion: maxDigestion,
+        lastTailAddBucket: tailAddBucket,
+        lastTailGrowthBucket: tailGrowthBucket,
+      })
+    }
 
     const headPoint = nodes[0]
     const headNormal = tempVector.set(headPoint.x, headPoint.y, headPoint.z).normalize()
@@ -479,9 +741,8 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     visual.pupilRight.position.copy(rightEyePosition).addScaledVector(forward, pupilForward)
 
     if (nodes.length > 1) {
-      const tailIndex = nodes.length - 1
-      const tailPos = pointToVector(nodes[tailIndex], centerlineRadius)
-      const prevPos = pointToVector(nodes[tailIndex - 1], centerlineRadius)
+      const tailPos = tailCurveTail ?? pointToVector(nodes[nodes.length - 1], centerlineRadius)
+      const prevPos = tailCurvePrev ?? pointToVector(nodes[nodes.length - 2], centerlineRadius)
       const tailDir = tailPos.clone().sub(prevPos)
       const tailNormal = tailPos.clone().normalize()
       tailDir.addScaledVector(tailNormal, -tailDir.dot(tailNormal))
@@ -507,7 +768,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     }
   }
 
-  const removeSnake = (visual: SnakeVisual) => {
+  const removeSnake = (visual: SnakeVisual, id: string) => {
     snakesGroup.remove(visual.group)
     visual.tube.geometry.dispose()
     if (visual.tail.geometry !== tailGeometry) {
@@ -515,18 +776,26 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     }
     visual.tube.material.dispose()
     visual.head.material.dispose()
+    lastSnakeLengths.delete(id)
+    tailAddStates.delete(id)
+    lastTailTotalLengths.delete(id)
+    tailDebugStates.delete(id)
   }
 
-  const updateSnakes = (players: PlayerSnapshot[], localPlayerId: string | null) => {
+  const updateSnakes = (
+    players: PlayerSnapshot[],
+    localPlayerId: string | null,
+    deltaSeconds: number,
+  ) => {
     const activeIds = new Set<string>()
     for (const player of players) {
       activeIds.add(player.id)
-      updateSnake(player, player.id === localPlayerId)
+      updateSnake(player, player.id === localPlayerId, deltaSeconds)
     }
 
     for (const [id, visual] of snakes) {
       if (!activeIds.has(id)) {
-        removeSnake(visual)
+        removeSnake(visual, id)
         snakes.delete(id)
         lastHeadPositions.delete(id)
         lastForwardDirections.delete(id)
@@ -559,6 +828,10 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   }
 
   const render = (snapshot: GameStateSnapshot | null, cameraState: Camera, localPlayerId: string | null) => {
+    const now = performance.now()
+    const deltaSeconds = Math.min(0.1, Math.max(0, (now - lastFrameTime) / 1000))
+    lastFrameTime = now
+
     if (cameraState.active) {
       world.quaternion.set(cameraState.q.x, cameraState.q.y, cameraState.q.z, cameraState.q.w)
     } else {
@@ -569,7 +842,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     let localHeadScreen: { x: number; y: number } | null = null
 
     if (snapshot) {
-      updateSnakes(snapshot.players, localPlayerId)
+      updateSnakes(snapshot.players, localPlayerId, deltaSeconds)
       updatePellets(snapshot.pellets)
 
       if (localPlayerId) {
@@ -591,7 +864,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
         }
       }
     } else {
-      updateSnakes([], localPlayerId)
+      updateSnakes([], localPlayerId, deltaSeconds)
       updatePellets([])
     }
 
@@ -625,8 +898,8 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     if (pelletMesh) {
       pelletsGroup.remove(pelletMesh)
     }
-    for (const visual of snakes.values()) {
-      removeSnake(visual)
+    for (const [id, visual] of snakes) {
+      removeSnake(visual, id)
     }
     snakes.clear()
   }

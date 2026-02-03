@@ -30,6 +30,7 @@ const MAX_SNAPSHOT_BUFFER = 20
 const MIN_INTERP_DELAY_MS = 60
 const MAX_EXTRAPOLATION_MS = 70
 const OFFSET_SMOOTHING = 0.12
+const MAX_DIGESTION_PROGRESS = 2
 
 function normalize(point: Point) {
   const len = Math.sqrt(point.x * point.x + point.y * point.y + point.z * point.z)
@@ -186,6 +187,7 @@ function lerpPoint(a: Point, b: Point, t: number): Point {
 function blendPlayers(a: PlayerSnapshot, b: PlayerSnapshot, t: number): PlayerSnapshot {
   const maxLength = Math.max(a.snake.length, b.snake.length)
   const snake: Point[] = []
+  const tailA = a.snake[a.snake.length - 1]
 
   for (let i = 0; i < maxLength; i += 1) {
     const nodeA = a.snake[i]
@@ -193,7 +195,11 @@ function blendPlayers(a: PlayerSnapshot, b: PlayerSnapshot, t: number): PlayerSn
     if (nodeA && nodeB) {
       snake.push(lerpPoint(nodeA, nodeB, t))
     } else if (nodeB) {
-      snake.push({ ...nodeB })
+      if (tailA) {
+        snake.push(lerpPoint(tailA, nodeB, t))
+      } else {
+        snake.push({ ...nodeB })
+      }
     } else if (nodeA) {
       snake.push({ ...nodeA })
     }
@@ -217,11 +223,11 @@ function blendDigestions(a: number[], b: number[], t: number) {
     const da = a[i]
     const db = b[i]
     if (typeof da === 'number' && typeof db === 'number') {
-      digestions.push(clamp(lerp(da, db, t), 0, 1))
+      digestions.push(clamp(lerp(da, db, t), 0, MAX_DIGESTION_PROGRESS))
     } else if (typeof db === 'number') {
-      digestions.push(db)
+      digestions.push(clamp(db, 0, MAX_DIGESTION_PROGRESS))
     } else if (typeof da === 'number' && t < 0.95) {
-      digestions.push(da)
+      digestions.push(clamp(da, 0, MAX_DIGESTION_PROGRESS))
     }
   }
   return digestions
