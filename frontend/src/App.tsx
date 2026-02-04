@@ -32,13 +32,22 @@ const CAMERA_DISTANCE_DEFAULT = 5.2
 const CAMERA_DISTANCE_MIN = 4.2
 const CAMERA_DISTANCE_MAX = 9
 const CAMERA_ZOOM_SENSITIVITY = 0.0015
+const POINTER_MAX_RANGE_RATIO = 0.25
 
 export default function App() {
   const glCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const hudCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const socketRef = useRef<WebSocket | null>(null)
   const renderConfigRef = useRef<RenderConfig | null>(null)
-  const pointerRef = useRef({ angle: 0, boost: false, active: false, screenX: 0, screenY: 0 })
+  const pointerRef = useRef({
+    angle: 0,
+    boost: false,
+    active: false,
+    screenX: 0,
+    screenY: 0,
+    distance: 0,
+    maxRange: 0,
+  })
   const sendIntervalRef = useRef<number | null>(null)
   const snapshotBufferRef = useRef<TimedSnapshot[]>([])
   const serverOffsetRef = useRef<number | null>(null)
@@ -47,6 +56,7 @@ export default function App() {
   const cameraRef = useRef<Camera>({ q: { ...IDENTITY_QUAT }, active: false })
   const cameraUpRef = useRef<Point>({ x: 0, y: 1, z: 0 })
   const cameraDistanceRef = useRef(CAMERA_DISTANCE_DEFAULT)
+  const headScreenRef = useRef<{ x: number; y: number } | null>(null)
 
   const [gameState, setGameState] = useState<GameStateSnapshot | null>(null)
   const [playerId, setPlayerId] = useState<string | null>(getStoredPlayerId())
@@ -186,11 +196,14 @@ export default function App() {
           pointerRef.current,
           cameraDistanceRef.current,
         )
+        headScreenRef.current = headScreen
         drawHud(
           hudCtx,
           config,
           pointerRef.current.active ? pointerRef.current.angle : null,
           headScreen,
+          pointerRef.current.active ? pointerRef.current.distance : null,
+          pointerRef.current.active ? pointerRef.current.maxRange : null,
         )
       }
       frameId = window.requestAnimationFrame(renderLoop)
@@ -331,11 +344,26 @@ export default function App() {
     const rect = canvas.getBoundingClientRect()
     const localX = event.clientX - rect.left
     const localY = event.clientY - rect.top
-    const dx = localX - rect.width / 2
-    const dy = localY - rect.height / 2
-    pointerRef.current.angle = Math.atan2(dy, dx)
+    const origin = headScreenRef.current
+    const originX = origin?.x ?? rect.width / 2
+    const originY = origin?.y ?? rect.height / 2
+    const dx = localX - originX
+    const dy = localY - originY
+    const distance2d = Math.hypot(dx, dy)
+    const maxRange = Math.min(rect.width, rect.height) * POINTER_MAX_RANGE_RATIO
     pointerRef.current.screenX = localX
     pointerRef.current.screenY = localY
+    pointerRef.current.distance = distance2d
+    pointerRef.current.maxRange = maxRange
+    if (!Number.isFinite(distance2d) || !Number.isFinite(maxRange) || maxRange <= 0) {
+      pointerRef.current.active = false
+      return
+    }
+    if (distance2d > maxRange) {
+      pointerRef.current.active = false
+      return
+    }
+    pointerRef.current.angle = Math.atan2(dy, dx)
     pointerRef.current.active = true
   }
 
@@ -344,8 +372,9 @@ export default function App() {
     sendIntervalRef.current = window.setInterval(() => {
       const socket = socketRef.current
       if (!socket || socket.readyState !== WebSocket.OPEN) return
-      if (!pointerRef.current.active) return
-      const axis = axisFromPointer(pointerRef.current.angle, cameraRef.current)
+      const axis = pointerRef.current.active
+        ? axisFromPointer(pointerRef.current.angle, cameraRef.current)
+        : null
       socket.send(
         JSON.stringify({
           type: 'input',

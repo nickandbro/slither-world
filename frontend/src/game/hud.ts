@@ -10,13 +10,16 @@ export function drawHud(
   config: RenderConfig,
   pointerAngle: number | null,
   origin: { x: number; y: number } | null,
+  pointerDistance: number | null,
+  maxRange: number | null,
 ) {
   ctx.clearRect(0, 0, config.width, config.height)
-  if (pointerAngle === null) return
+  if (pointerAngle === null || pointerDistance === null || maxRange === null) return
 
   const originX = origin?.x ?? config.centerX
   const originY = origin?.y ?? config.centerY
-  const radius = Math.min(config.width, config.height) * 0.22
+  if (!Number.isFinite(pointerDistance) || !Number.isFinite(maxRange) || maxRange <= 0) return
+  const radius = Math.max(6, Math.min(pointerDistance, maxRange))
   ctx.beginPath()
   ctx.moveTo(originX, originY)
   ctx.lineTo(

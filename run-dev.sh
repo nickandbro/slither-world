@@ -49,9 +49,23 @@ if ! command -v npm >/dev/null 2>&1; then
   exit 1
 fi
 
+USE_CARGO_WATCH=1
+if ! command -v cargo-watch >/dev/null 2>&1; then
+  echo "cargo-watch not found; attempting install for backend hot reload..." >&2
+  if ! cargo install cargo-watch --locked --version 8.4.1; then
+    echo "Failed to install cargo-watch. Falling back to cargo run." >&2
+    echo "Tip: upgrade Rust (rustup update) or install cargo-watch manually." >&2
+    USE_CARGO_WATCH=0
+  fi
+fi
+
 (
   cd "${ROOT_DIR}/backend"
-  PORT="${BACKEND_PORT}" cargo run
+  if [[ "${USE_CARGO_WATCH}" -eq 1 ]]; then
+    PORT="${BACKEND_PORT}" cargo watch -w src -w Cargo.toml -w Cargo.lock -w migrations -x run
+  else
+    PORT="${BACKEND_PORT}" cargo run
+  fi
 ) &
 BACKEND_PID=$!
 
