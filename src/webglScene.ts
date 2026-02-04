@@ -56,11 +56,12 @@ const PELLET_RADIUS = SNAKE_RADIUS * 0.75
 const PELLET_OFFSET = 0.035
 const TAIL_CAP_SEGMENTS = 5
 const TAIL_DIR_MIN_RATIO = 0.35
-const DIGESTION_BULGE = 0.45
+const DIGESTION_BULGE = 0.55
 const DIGESTION_WIDTH = 2.5
-const DIGESTION_MAX_BULGE = 0.7
+const DIGESTION_MAX_BULGE = 0.85
 const DIGESTION_START_RINGS = 3
 const DIGESTION_START_MAX = 0.18
+const DIGESTION_TRAVEL_EASE = 1.45
 const TAIL_ADD_SMOOTH_MS = 180
 const TAIL_EXTEND_RATE_UP = 0.14
 const TAIL_EXTEND_RATE_DOWN = 2.6
@@ -418,17 +419,21 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       DIGESTION_START_MAX,
       DIGESTION_START_RINGS / Math.max(1, ringCount - 1),
     )
+    const influenceRadius = DIGESTION_WIDTH
     for (const digestion of digestions) {
       const strength = clamp(digestion.strength, 0, 1)
       if (strength <= 0) continue
       const t = clamp(digestion.t, 0, 1)
       const mapped = startOffset + t * (1 - startOffset)
       const center = mapped * (ringCount - 1)
-      const start = Math.max(0, Math.floor(center - DIGESTION_WIDTH * 2))
-      const end = Math.min(ringCount - 1, Math.ceil(center + DIGESTION_WIDTH * 2))
+      const start = Math.max(0, Math.floor(center - influenceRadius))
+      const end = Math.min(ringCount - 1, Math.ceil(center + influenceRadius))
       for (let ring = start; ring <= end; ring += 1) {
         const dist = ring - center
-        const weight = Math.exp(-(dist * dist) / (2 * DIGESTION_WIDTH * DIGESTION_WIDTH))
+        const normalized = dist / influenceRadius
+        const cap = 1 - normalized * normalized
+        if (cap <= 0) continue
+        const weight = Math.sqrt(cap)
         bulgeByRing[ring] = Math.min(
           DIGESTION_MAX_BULGE,
           bulgeByRing[ring] + weight * DIGESTION_BULGE * strength,
@@ -470,8 +475,9 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
 
     for (const digestion of digestions) {
       const travelT = clamp(digestion, 0, 1)
+      const travelBiased = Math.pow(travelT, DIGESTION_TRAVEL_EASE)
       const growth = clamp(digestion - 1, 0, 1)
-      visuals.push({ t: travelT, strength: 1 - growth })
+      visuals.push({ t: travelBiased, strength: 1 - growth })
       if (growth > tailGrowth) tailGrowth = growth
     }
 

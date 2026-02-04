@@ -479,6 +479,7 @@ export class GameRoom {
     const now = Date.now()
     this.ensurePellets()
     const dtSeconds = TICK_MS / 1000
+    const moveSteps = new Map<string, number>()
 
     for (const [id, player] of this.players) {
       if (!player.connected && now - player.lastSeen > PLAYER_TIMEOUT_MS) {
@@ -505,6 +506,7 @@ export class GameRoom {
       const stepCount = Math.max(1, Math.round(speedFactor))
       const stepVelocity = (BASE_SPEED * speedFactor) / stepCount
       applySnakeRotation(player.snake, player.axis, stepVelocity, stepCount)
+      moveSteps.set(player.id, stepCount)
     }
 
     const dead: Player[] = []
@@ -551,7 +553,8 @@ export class GameRoom {
 
     for (const player of this.players.values()) {
       if (!player.alive) continue
-      this.advanceDigestions(player)
+      const steps = moveSteps.get(player.id) ?? 1
+      this.advanceDigestions(player, steps)
     }
 
     this.broadcastState()
@@ -595,31 +598,34 @@ export class GameRoom {
     })
   }
 
-  private advanceDigestions(player: Player) {
-    let growthTaken = false
+  private advanceDigestions(player: Player, steps = 1) {
+    const stepCount = Math.max(1, Math.floor(steps))
+    for (let step = 0; step < stepCount; step += 1) {
+      let growthTaken = false
 
-    for (let i = 0; i < player.digestions.length; ) {
-      const digestion = player.digestions[i]
-      const atTail = digestion.remaining <= digestion.growthSteps
+      for (let i = 0; i < player.digestions.length; ) {
+        const digestion = player.digestions[i]
+        const atTail = digestion.remaining <= digestion.growthSteps
 
-      if (atTail) {
-        if (!growthTaken) {
-          digestion.remaining -= 1
-          growthTaken = true
+        if (atTail) {
+          if (!growthTaken) {
+            digestion.remaining -= 1
+            growthTaken = true
+          } else {
+            digestion.remaining = Math.max(digestion.remaining, digestion.growthSteps)
+          }
         } else {
-          digestion.remaining = Math.max(digestion.remaining, digestion.growthSteps)
+          digestion.remaining -= 1
         }
-      } else {
-        digestion.remaining -= 1
-      }
 
-      if (digestion.remaining <= 0) {
-        addSnakeNode(player.snake, player.axis)
-        player.digestions.splice(i, 1)
-        continue
-      }
+        if (digestion.remaining <= 0) {
+          addSnakeNode(player.snake, player.axis)
+          player.digestions.splice(i, 1)
+          continue
+        }
 
-      i += 1
+        i += 1
+      }
     }
   }
 
