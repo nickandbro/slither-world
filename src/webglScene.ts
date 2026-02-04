@@ -819,7 +819,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
           tempVectorG.multiplyScalar(1 / tangentLen)
         }
         const angle = tangentLen > 1e-6 ? Math.acos(clamp(forward.dot(tempVectorG), -1, 1)) : Math.PI
-        if (distance <= TONGUE_MAX_RANGE && angle <= TONGUE_ANGLE_LIMIT) {
+        if (distance <= TONGUE_NEAR_RANGE && angle <= TONGUE_ANGLE_LIMIT) {
           candidatePosition = state.targetPosition
           candidateDistance = distance
           desiredLength = Math.min(distance, TONGUE_MAX_LENGTH)
@@ -879,12 +879,17 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     if (state.mode === 'extend' && hasCandidate && state.length >= desiredLength - TONGUE_GRAB_EPS) {
       state.mode = 'retract'
       state.carrying = matchedIndex >= 0 && matchedPosition !== null
+      if (!state.carrying) {
+        state.targetPosition = null
+      }
     }
 
     if (state.mode === 'retract' && state.length <= TONGUE_HIDE_THRESHOLD) {
-      state.mode = 'idle'
-      state.targetPosition = null
-      state.carrying = false
+      if (!state.carrying) {
+        state.mode = 'idle'
+        state.targetPosition = null
+        state.carrying = false
+      }
     }
 
     let override: PelletOverride | null = null
