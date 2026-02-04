@@ -59,6 +59,7 @@ const BOOST_MULTIPLIER = 1.75
 const STAMINA_MAX = 1
 const STAMINA_DRAIN_PER_SEC = 0.6
 const STAMINA_RECHARGE_PER_SEC = 0.35
+const DIGESTION_TRAVEL_SPEED_MULT = 3
 const TURN_RATE = 0.08
 const COLLISION_DISTANCE = 2 * Math.sin(NODE_ANGLE)
 const BASE_PELLET_COUNT = 3
@@ -589,7 +590,10 @@ export class GameRoom {
   }
 
   private addDigestion(player: Player) {
-    const travelSteps = Math.max(1, (player.snake.length - 1) * NODE_QUEUE_SIZE)
+    const travelSteps = Math.max(
+      1,
+      Math.round(((player.snake.length - 1) * NODE_QUEUE_SIZE) / DIGESTION_TRAVEL_SPEED_MULT),
+    )
     const total = travelSteps + DIGESTION_GROWTH_STEPS
     player.digestions.push({
       remaining: total,
