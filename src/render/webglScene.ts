@@ -123,6 +123,10 @@ const LAKE_TERRAIN_CLAMP_EPS = PLANET_RADIUS * 0.0008
 const LAKE_WATER_MASK_THRESHOLD = 0
 const LAKE_GRID_MASK_THRESHOLD = LAKE_WATER_MASK_THRESHOLD
 const LAKE_EXCLUSION_THRESHOLD = 0.18
+const GRID_LINE_COLOR = '#6fc85f'
+const GRID_LINE_OPACITY = 0.16
+const SHORELINE_LINE_OPACITY = 0.24
+const SHORE_SAND_COLOR = '#d8c48a'
 const SNAKE_RADIUS = 0.045
 const HEAD_RADIUS = SNAKE_RADIUS * 1.35
 const SNAKE_LIFT_FACTOR = 0.85
@@ -657,6 +661,68 @@ diffuseColor.a *= lakeAlpha;
   }
   return material
 }
+const createShorelineFillGeometry = (planetGeometry: THREE.BufferGeometry, lakes: Lake[]) => {
+  const positions = planetGeometry.attributes.position
+  const shoreline: number[] = []
+  const a = new THREE.Vector3()
+  const b = new THREE.Vector3()
+  const c = new THREE.Vector3()
+  const ab = new THREE.Vector3()
+  const bc = new THREE.Vector3()
+  const ca = new THREE.Vector3()
+  const centroid = new THREE.Vector3()
+  const normal = new THREE.Vector3()
+  const temp = new THREE.Vector3()
+  const isInsideLake = (point: THREE.Vector3) => {
+    if (point.lengthSq() < 1e-8) return false
+    normal.copy(point).normalize()
+    const sample = sampleLakes(normal, lakes, temp)
+    if (!sample.lake) return false
+    return sample.boundary > LAKE_WATER_MASK_THRESHOLD
+  }
+  for (let i = 0; i < positions.count; i += 3) {
+    a.set(positions.getX(i), positions.getY(i), positions.getZ(i))
+    b.set(positions.getX(i + 1), positions.getY(i + 1), positions.getZ(i + 1))
+    c.set(positions.getX(i + 2), positions.getY(i + 2), positions.getZ(i + 2))
+    let hasInside = false
+    let hasOutside = false
+    const mark = (point: THREE.Vector3) => {
+      if (isInsideLake(point)) {
+        hasInside = true
+      } else {
+        hasOutside = true
+      }
+    }
+    mark(a)
+    mark(b)
+    mark(c)
+    if (!(hasInside && hasOutside)) {
+      ab.copy(a).lerp(b, 0.5)
+      mark(ab)
+    }
+    if (!(hasInside && hasOutside)) {
+      bc.copy(b).lerp(c, 0.5)
+      mark(bc)
+    }
+    if (!(hasInside && hasOutside)) {
+      ca.copy(c).lerp(a, 0.5)
+      mark(ca)
+    }
+    if (!(hasInside && hasOutside)) {
+      centroid.copy(a).add(b).add(c).multiplyScalar(1 / 3)
+      mark(centroid)
+    }
+    if (!(hasInside && hasOutside)) continue
+    shoreline.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z)
+  }
+  const geometry = new THREE.BufferGeometry()
+  if (shoreline.length > 0) {
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(shoreline, 3))
+    geometry.computeVertexNormals()
+    geometry.computeBoundingSphere()
+  }
+  return geometry
+}
 const createFilteredGridGeometry = (gridGeometry: THREE.BufferGeometry, lakes: Lake[]) => {
   const positions = gridGeometry.attributes.position
   const filtered: number[] = []
@@ -694,6 +760,49 @@ const createFilteredGridGeometry = (gridGeometry: THREE.BufferGeometry, lakes: L
   const geometry = new THREE.BufferGeometry()
   if (filtered.length > 0) {
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(filtered, 3))
+    geometry.computeBoundingSphere()
+  }
+  return geometry
+}
+const createShorelineGeometry = (gridGeometry: THREE.BufferGeometry, lakes: Lake[]) => {
+  const positions = gridGeometry.attributes.position
+  const shoreline: number[] = []
+  const a = new THREE.Vector3()
+  const b = new THREE.Vector3()
+  const samplePoint = new THREE.Vector3()
+  const normal = new THREE.Vector3()
+  const temp = new THREE.Vector3()
+  const isInsideLake = (point: THREE.Vector3) => {
+    if (point.lengthSq() < 1e-8) return false
+    normal.copy(point).normalize()
+    const sample = sampleLakes(normal, lakes, temp)
+    if (!sample.lake) return false
+    return sample.boundary > LAKE_GRID_MASK_THRESHOLD
+  }
+  for (let i = 0; i < positions.count; i += 2) {
+    a.set(positions.getX(i), positions.getY(i), positions.getZ(i))
+    b.set(positions.getX(i + 1), positions.getY(i + 1), positions.getZ(i + 1))
+    const insideA = isInsideLake(a)
+    const insideB = isInsideLake(b)
+    let crosses = insideA !== insideB
+    if (!crosses) {
+      samplePoint.copy(a).lerp(b, 0.25)
+      const insideQuarter = isInsideLake(samplePoint)
+      samplePoint.copy(a).lerp(b, 0.5)
+      const insideMid = isInsideLake(samplePoint)
+      samplePoint.copy(a).lerp(b, 0.75)
+      const insideThreeQuarter = isInsideLake(samplePoint)
+      crosses =
+        insideQuarter !== insideA ||
+        insideMid !== insideA ||
+        insideThreeQuarter !== insideA
+    }
+    if (!crosses) continue
+    shoreline.push(a.x, a.y, a.z, b.x, b.y, b.z)
+  }
+  const geometry = new THREE.BufferGeometry()
+  if (shoreline.length > 0) {
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(shoreline, 3))
     geometry.computeBoundingSphere()
   }
   return geometry
@@ -821,16 +930,43 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
 
   const rawGridGeometry = new THREE.WireframeGeometry(planetGeometry)
   const gridGeometry = createFilteredGridGeometry(rawGridGeometry, lakes)
+  const shorelineLineGeometry = createShorelineGeometry(rawGridGeometry, lakes)
   rawGridGeometry.dispose()
   const gridMaterial = new THREE.LineBasicMaterial({
-    color: '#1b4965',
+    color: GRID_LINE_COLOR,
     transparent: true,
-    opacity: 0.12,
+    opacity: GRID_LINE_OPACITY,
   })
   gridMaterial.depthWrite = false
   const gridMesh = new THREE.LineSegments(gridGeometry, gridMaterial)
   gridMesh.scale.setScalar(1.002)
   world.add(gridMesh)
+  const shorelineLineMaterial = new THREE.LineBasicMaterial({
+    color: GRID_LINE_COLOR,
+    transparent: true,
+    opacity: SHORELINE_LINE_OPACITY,
+  })
+  shorelineLineMaterial.depthWrite = false
+  const shorelineLineMesh = new THREE.LineSegments(shorelineLineGeometry, shorelineLineMaterial)
+  shorelineLineMesh.scale.setScalar(1.002)
+  world.add(shorelineLineMesh)
+
+  const shorelineFillGeometry = createShorelineFillGeometry(planetGeometry, lakes)
+  const shorelineFillMaterial = new THREE.MeshStandardMaterial({
+    color: SHORE_SAND_COLOR,
+    roughness: 0.92,
+    metalness: 0.05,
+    transparent: true,
+  })
+  shorelineFillMaterial.depthWrite = false
+  shorelineFillMaterial.depthTest = true
+  shorelineFillMaterial.polygonOffset = true
+  shorelineFillMaterial.polygonOffsetFactor = -1
+  shorelineFillMaterial.polygonOffsetUnits = -1
+  const shorelineFillMesh = new THREE.Mesh(shorelineFillGeometry, shorelineFillMaterial)
+  shorelineFillMesh.renderOrder = 1
+  shorelineFillMesh.scale.setScalar(1.001)
+  world.add(shorelineFillMesh)
 
   const lakeSurfaceGeometry = new THREE.SphereGeometry(1, LAKE_SURFACE_SEGMENTS, LAKE_SURFACE_RINGS)
   const lakeMeshes: THREE.Mesh[] = []
@@ -2548,6 +2684,11 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     planetMaterial.dispose()
     gridGeometry.dispose()
     gridMaterial.dispose()
+    shorelineLineGeometry.dispose()
+    shorelineLineMaterial.dispose()
+    shorelineFillGeometry.dispose()
+    shorelineFillMaterial.dispose()
+    world.remove(shorelineFillMesh)
     for (const mesh of lakeMeshes) {
       world.remove(mesh)
     }
