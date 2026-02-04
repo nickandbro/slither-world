@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils'
 import type { Camera, GameStateSnapshot, PlayerSnapshot, Point } from '../game/types'
 
 type SnakeVisual = {
@@ -135,6 +136,14 @@ const TREE_MAX_SCALE = 1.15
 const TREE_MIN_ANGLE = 0.42
 const TREE_MIN_HEIGHT = SNAKE_RADIUS * 9.5
 const TREE_MAX_HEIGHT = TREE_MIN_HEIGHT * 1.5
+const MOUNTAIN_COUNT = 8
+const MOUNTAIN_VARIANTS = 3
+const MOUNTAIN_RADIUS_MIN = PLANET_RADIUS * 0.12
+const MOUNTAIN_RADIUS_MAX = PLANET_RADIUS * 0.22
+const MOUNTAIN_HEIGHT_MIN = PLANET_RADIUS * 0.12
+const MOUNTAIN_HEIGHT_MAX = PLANET_RADIUS * 0.26
+const MOUNTAIN_BASE_SINK = 0.015
+const MOUNTAIN_MIN_ANGLE = 0.55
 const PEBBLE_COUNT = 220
 const PEBBLE_RADIUS_MIN = PLANET_RADIUS * 0.0045
 const PEBBLE_RADIUS_MAX = PLANET_RADIUS * 0.014
@@ -148,6 +157,38 @@ const smoothValue = (current: number, target: number, deltaSeconds: number, rate
   const rate = target >= current ? rateUp : rateDown
   const alpha = 1 - Math.exp(-rate * Math.max(0, deltaSeconds))
   return current + (target - current) * alpha
+}
+const createMountainGeometry = (seed: number) => {
+  const rand = createSeededRandom(seed)
+  const baseGeometry = new THREE.DodecahedronGeometry(1, 0)
+  const geometry = mergeVertices(baseGeometry, 1e-3)
+  const positions = geometry.attributes.position
+  const temp = new THREE.Vector3()
+  const variance = 0.18 + rand() * 0.06
+  const hash3 = (x: number, y: number, z: number) => {
+    let h = seed ^ 0x9e3779b9
+    h = Math.imul(h ^ x, 0x85ebca6b)
+    h = Math.imul(h ^ y, 0xc2b2ae35)
+    h = Math.imul(h ^ z, 0x27d4eb2f)
+    h ^= h >>> 16
+    return (h >>> 0) / 4294967296
+  }
+  for (let i = 0; i < positions.count; i += 1) {
+    temp.set(positions.getX(i), positions.getY(i), positions.getZ(i))
+    if (temp.lengthSq() < 1e-6) continue
+    temp.normalize()
+    const qx = Math.round(temp.x * 1024)
+    const qy = Math.round(temp.y * 1024)
+    const qz = Math.round(temp.z * 1024)
+    const jitter = hash3(qx, qy, qz) * 2 - 1
+    const scale = 1 + jitter * variance
+    temp.multiplyScalar(scale)
+    positions.setXYZ(i, temp.x, temp.y, temp.z)
+  }
+  positions.needsUpdate = true
+  geometry.computeVertexNormals()
+  geometry.computeBoundingSphere()
+  return geometry
 }
 const slerpOnSphere = (from: THREE.Vector3, to: THREE.Vector3, alpha: number, radius: number) => {
   const fromDir = from.clone().normalize()
@@ -332,6 +373,9 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   let treeTrunkMesh: THREE.InstancedMesh | null = null
   let treeLeafMaterial: THREE.MeshStandardMaterial | null = null
   let treeTrunkMaterial: THREE.MeshStandardMaterial | null = null
+  const mountainGeometries: THREE.BufferGeometry[] = []
+  const mountainMeshes: THREE.InstancedMesh[] = []
+  let mountainMaterial: THREE.MeshStandardMaterial | null = null
   let pebbleGeometry: THREE.BufferGeometry | null = null
   let pebbleMaterial: THREE.MeshStandardMaterial | null = null
   let pebbleMesh: THREE.InstancedMesh | null = null
@@ -402,6 +446,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     })
     treeLeafMaterial = leafMaterial
     treeTrunkMaterial = trunkMaterial
+    const treeInstanceCount = Math.max(0, TREE_COUNT - MOUNTAIN_COUNT)
 
     for (let i = 0; i < treeTierHeights.length; i += 1) {
       const height = treeTierHeights[i]
@@ -411,6 +456,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       treeTierGeometries.push(geometry)
       const mesh = new THREE.InstancedMesh(geometry, leafMaterial, TREE_COUNT)
       mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage)
+      mesh.count = treeInstanceCount
       treeTierMeshes.push(mesh)
       environmentGroup.add(mesh)
     }
@@ -425,7 +471,24 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     treeTrunkGeometry.translate(0, TREE_TRUNK_HEIGHT / 2, 0)
     treeTrunkMesh = new THREE.InstancedMesh(treeTrunkGeometry, trunkMaterial, TREE_COUNT)
     treeTrunkMesh.instanceMatrix.setUsage(THREE.StaticDrawUsage)
+    treeTrunkMesh.count = treeInstanceCount
     environmentGroup.add(treeTrunkMesh)
+
+    mountainMaterial = new THREE.MeshStandardMaterial({
+      color: '#8f8f8f',
+      roughness: 0.95,
+      metalness: 0.02,
+      flatShading: true,
+    })
+    for (let i = 0; i < MOUNTAIN_VARIANTS; i += 1) {
+      const geometry = createMountainGeometry(0x3f2a9b1 + i * 57)
+      mountainGeometries.push(geometry)
+      const mesh = new THREE.InstancedMesh(geometry, mountainMaterial, MOUNTAIN_COUNT)
+      mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage)
+      mesh.count = 0
+      mountainMeshes.push(mesh)
+      environmentGroup.add(mesh)
+    }
 
     pebbleGeometry = new THREE.IcosahedronGeometry(1, 0)
     const rockMaterial = new THREE.MeshStandardMaterial({
@@ -470,7 +533,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       return randomOnSphere(rng, out)
     }
 
-    for (let i = 0; i < TREE_COUNT; i += 1) {
+    for (let i = 0; i < treeInstanceCount; i += 1) {
       const candidate = new THREE.Vector3()
       pickSparseNormal(candidate)
       const widthScale = randRange(TREE_MIN_SCALE, TREE_MAX_SCALE)
@@ -497,6 +560,56 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
         localMatrix.makeTranslation(0, treeTierOffsets[t], 0)
         worldMatrix.copy(baseMatrix).multiply(localMatrix)
         treeTierMeshes[t].setMatrixAt(i, worldMatrix)
+      }
+    }
+
+    const mountainNormals: THREE.Vector3[] = []
+    const mountainScales: THREE.Vector3[] = []
+    const mountainMinDot = Math.cos(MOUNTAIN_MIN_ANGLE)
+    const pickMountainNormal = (out: THREE.Vector3) => {
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        randomOnSphere(rng, out)
+        let ok = true
+        for (const existing of mountainNormals) {
+          if (existing.dot(out) > mountainMinDot) {
+            ok = false
+            break
+          }
+        }
+        if (ok) return out
+      }
+      return randomOnSphere(rng, out)
+    }
+    for (let i = 0; i < MOUNTAIN_COUNT; i += 1) {
+      const candidate = new THREE.Vector3()
+      pickMountainNormal(candidate)
+      const radius = randRange(MOUNTAIN_RADIUS_MIN, MOUNTAIN_RADIUS_MAX)
+      const height = randRange(MOUNTAIN_HEIGHT_MIN, MOUNTAIN_HEIGHT_MAX)
+      mountainNormals.push(candidate)
+      mountainScales.push(new THREE.Vector3(radius, height, radius))
+    }
+
+    if (mountainMeshes.length > 0) {
+      const mountainCounts = new Array(mountainMeshes.length).fill(0)
+      for (let i = 0; i < mountainNormals.length; i += 1) {
+        const variantIndex = Math.floor(rng() * mountainMeshes.length)
+        const mesh = mountainMeshes[variantIndex]
+        const instanceIndex = mountainCounts[variantIndex]
+        if (!mesh) continue
+        normal.copy(mountainNormals[i])
+        baseQuat.setFromUnitVectors(up, normal)
+        twistQuat.setFromAxisAngle(up, randRange(0, Math.PI * 2))
+        baseQuat.multiply(twistQuat)
+        baseScale.copy(mountainScales[i])
+        position.copy(normal).multiplyScalar(PLANET_RADIUS - MOUNTAIN_BASE_SINK)
+        baseMatrix.compose(position, baseQuat, baseScale)
+        mesh.setMatrixAt(instanceIndex, baseMatrix)
+        mountainCounts[variantIndex] += 1
+      }
+      for (let i = 0; i < mountainMeshes.length; i += 1) {
+        const mesh = mountainMeshes[i]
+        mesh.count = mountainCounts[i]
+        mesh.instanceMatrix.needsUpdate = true
       }
     }
 
@@ -1889,6 +2002,9 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     if (treeTrunkMesh) {
       environmentGroup.remove(treeTrunkMesh)
     }
+    for (const mesh of mountainMeshes) {
+      environmentGroup.remove(mesh)
+    }
     if (pebbleMesh) {
       environmentGroup.remove(pebbleMesh)
     }
@@ -1903,6 +2019,12 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     }
     if (treeTrunkMaterial) {
       treeTrunkMaterial.dispose()
+    }
+    for (const geometry of mountainGeometries) {
+      geometry.dispose()
+    }
+    if (mountainMaterial) {
+      mountainMaterial.dispose()
     }
     if (pebbleGeometry) {
       pebbleGeometry.dispose()
