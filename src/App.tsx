@@ -27,6 +27,10 @@ const MAX_SNAPSHOT_BUFFER = 20
 const MIN_INTERP_DELAY_MS = 60
 const MAX_EXTRAPOLATION_MS = 70
 const OFFSET_SMOOTHING = 0.12
+const CAMERA_DISTANCE_DEFAULT = 3
+const CAMERA_DISTANCE_MIN = 2.2
+const CAMERA_DISTANCE_MAX = 5
+const CAMERA_ZOOM_SENSITIVITY = 0.0015
 
 export default function App() {
   const glCanvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -41,6 +45,7 @@ export default function App() {
   const lastSnapshotTimeRef = useRef<number | null>(null)
   const cameraRef = useRef<Camera>({ q: { ...IDENTITY_QUAT }, active: false })
   const cameraUpRef = useRef<Point>({ x: 0, y: 1, z: 0 })
+  const cameraDistanceRef = useRef(CAMERA_DISTANCE_DEFAULT)
 
   const [gameState, setGameState] = useState<GameStateSnapshot | null>(null)
   const [playerId, setPlayerId] = useState<string | null>(getStoredPlayerId())
@@ -161,6 +166,7 @@ export default function App() {
     const observer = new ResizeObserver(updateConfig)
     observer.observe(glCanvas)
     window.addEventListener('resize', updateConfig)
+    glCanvas.addEventListener('wheel', handleWheel, { passive: false })
 
     let frameId = 0
     const renderLoop = () => {
@@ -172,7 +178,13 @@ export default function App() {
           snapshot?.players.find((player) => player.id === localId)?.snake[0] ?? null
         const camera = updateCamera(localHead, cameraRef.current, cameraUpRef)
         cameraRef.current = camera
-        const headScreen = webgl.render(snapshot, camera, localId, pointerRef.current)
+        const headScreen = webgl.render(
+          snapshot,
+          camera,
+          localId,
+          pointerRef.current,
+          cameraDistanceRef.current,
+        )
         drawHud(
           hudCtx,
           config,
@@ -188,6 +200,7 @@ export default function App() {
     return () => {
       observer.disconnect()
       window.removeEventListener('resize', updateConfig)
+      glCanvas.removeEventListener('wheel', handleWheel)
       window.cancelAnimationFrame(frameId)
       webgl.dispose()
     }
@@ -371,6 +384,19 @@ export default function App() {
     pointerRef.current.active = false
   }
 
+  const handleWheel = (event: WheelEvent) => {
+    if (!Number.isFinite(event.deltaY) || event.deltaY === 0) return
+    if (event.cancelable) event.preventDefault()
+    const clampedDelta = clamp(event.deltaY, -120, 120)
+    const zoomFactor = Math.exp(clampedDelta * CAMERA_ZOOM_SENSITIVITY)
+    const nextDistance = clamp(
+      cameraDistanceRef.current * zoomFactor,
+      CAMERA_DISTANCE_MIN,
+      CAMERA_DISTANCE_MAX,
+    )
+    cameraDistanceRef.current = nextDistance
+  }
+
   const requestRespawn = () => {
     const socket = socketRef.current
     if (!socket || socket.readyState !== WebSocket.OPEN) return
@@ -516,7 +542,7 @@ export default function App() {
             </button>
           </div>
           <div className='control-row muted'>
-            <span>Point to steer. Press space to boost.</span>
+            <span>Point to steer. Scroll to zoom. Press space to boost.</span>
           </div>
           <div className='control-row muted'>
             <span>Best this run: {bestScore}</span>

@@ -70,6 +70,7 @@ type WebGLScene = {
     camera: Camera,
     localPlayerId: string | null,
     pointer: PointerState | null,
+    cameraDistance: number,
   ) => { x: number; y: number } | null
   dispose: () => void
 }
@@ -121,6 +122,29 @@ const TAIL_GROWTH_RATE_DOWN = 1.2
 const TAIL_GROWTH_EASE = 2.5
 const TAIL_EXTEND_CURVE_BLEND = 0.65
 const DEBUG_TAIL = false
+const TREE_COUNT = 36
+const TREE_BASE_OFFSET = 0.004
+const TREE_HEIGHT = PLANET_RADIUS * 0.3
+const TREE_TRUNK_HEIGHT = TREE_HEIGHT * 0.3
+const TREE_TRUNK_RADIUS = TREE_HEIGHT * 0.12
+const TREE_TIER_HEIGHT_FACTORS = [0.4, 0.33, 0.27, 0.21]
+const TREE_TIER_RADIUS_FACTORS = [0.5, 0.44, 0.36, 0.28]
+const TREE_TIER_OVERLAP = 0.45
+const TREE_MIN_SCALE = 0.85
+const TREE_MAX_SCALE = 1.2
+const PEBBLE_COUNT = 800
+const PEBBLE_RADIUS_MIN = PLANET_RADIUS * 0.0045
+const PEBBLE_RADIUS_MAX = PLANET_RADIUS * 0.014
+const PEBBLE_OFFSET = 0.0015
+const PEBBLE_DENSE_CLUSTER_MIN = 1
+const PEBBLE_DENSE_CLUSTER_MAX = 3
+const PEBBLE_SPARSE_CLUSTER_MIN = 10
+const PEBBLE_SPARSE_CLUSTER_MAX = 15
+const PEBBLE_DENSE_SPREAD_MIN = 0.045
+const PEBBLE_DENSE_SPREAD_MAX = 0.095
+const PEBBLE_SPARSE_SPREAD_MIN = 0.18
+const PEBBLE_SPARSE_SPREAD_MAX = 0.42
+const PEBBLE_DENSE_SHARE = 0.35
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
 const formatNum = (value: number, digits = 4) =>
@@ -145,6 +169,34 @@ const slerpOnSphere = (from: THREE.Vector3, to: THREE.Vector3, alpha: number, ra
   axis.normalize()
   fromDir.applyAxisAngle(axis, angle * alpha)
   return fromDir.multiplyScalar(radius)
+}
+const createSeededRandom = (seed: number) => {
+  let state = seed >>> 0
+  return () => {
+    state += 0x6d2b79f5
+    let t = Math.imul(state ^ (state >>> 15), 1 | state)
+    t ^= t + Math.imul(t ^ (t >>> 7), 61 | t)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+const randomOnSphere = (rand: () => number, target = new THREE.Vector3()) => {
+  const theta = rand() * Math.PI * 2
+  const z = rand() * 2 - 1
+  const r = Math.sqrt(Math.max(0, 1 - z * z))
+  target.set(r * Math.cos(theta), z, r * Math.sin(theta))
+  return target
+}
+const randomTangentDirection = (rand: () => number, normal: THREE.Vector3, target = new THREE.Vector3()) => {
+  randomOnSphere(rand, target)
+  target.addScaledVector(normal, -target.dot(normal))
+  if (target.lengthSq() < 1e-6) {
+    if (Math.abs(normal.y) < 0.99) {
+      target.crossVectors(normal, new THREE.Vector3(0, 1, 0))
+    } else {
+      target.crossVectors(normal, new THREE.Vector3(1, 0, 0))
+    }
+  }
+  return target.normalize()
 }
 const advanceOnSphere = (
   origin: THREE.Vector3,
@@ -244,6 +296,9 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   gridMesh.scale.setScalar(1.002)
   world.add(gridMesh)
 
+  const environmentGroup = new THREE.Group()
+  world.add(environmentGroup)
+
   const snakesGroup = new THREE.Group()
   const pelletsGroup = new THREE.Group()
   world.add(snakesGroup)
@@ -288,6 +343,15 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     emissiveIntensity: 0.45,
     roughness: 0.25,
   })
+  const treeTierGeometries: THREE.BufferGeometry[] = []
+  const treeTierMeshes: THREE.InstancedMesh[] = []
+  let treeTrunkGeometry: THREE.BufferGeometry | null = null
+  let treeTrunkMesh: THREE.InstancedMesh | null = null
+  let treeLeafMaterial: THREE.MeshStandardMaterial | null = null
+  let treeTrunkMaterial: THREE.MeshStandardMaterial | null = null
+  let pebbleGeometry: THREE.BufferGeometry | null = null
+  let pebbleMaterial: THREE.MeshStandardMaterial | null = null
+  let pebbleMesh: THREE.InstancedMesh | null = null
   let pelletMesh: THREE.InstancedMesh | null = null
   let pelletCapacity = 0
   let viewportWidth = 1
@@ -317,6 +381,176 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   const tempVectorG = new THREE.Vector3()
   const tempQuat = new THREE.Quaternion()
   const tongueUp = new THREE.Vector3(0, 1, 0)
+
+  {
+    const rng = createSeededRandom(0x6f35d2a1)
+    const randRange = (min: number, max: number) => min + (max - min) * rng()
+    const treeTierHeights = TREE_TIER_HEIGHT_FACTORS.map((factor) => factor * TREE_HEIGHT)
+    const treeTierRadii = TREE_TIER_RADIUS_FACTORS.map((factor) => factor * TREE_HEIGHT)
+    const treeTierOffsets: number[] = []
+    let tierBase = TREE_TRUNK_HEIGHT * 0.95
+    for (let i = 0; i < treeTierHeights.length; i += 1) {
+      const height = treeTierHeights[i]
+      treeTierOffsets.push(tierBase + height * 0.5)
+      tierBase += height * (1 - TREE_TIER_OVERLAP)
+    }
+
+    const leafMaterial = new THREE.MeshStandardMaterial({
+      color: '#7fb35a',
+      roughness: 0.85,
+      metalness: 0.05,
+      flatShading: true,
+    })
+    const trunkMaterial = new THREE.MeshStandardMaterial({
+      color: '#b8743c',
+      roughness: 0.9,
+      metalness: 0.05,
+      flatShading: true,
+    })
+    treeLeafMaterial = leafMaterial
+    treeTrunkMaterial = trunkMaterial
+
+    for (let i = 0; i < treeTierHeights.length; i += 1) {
+      const height = treeTierHeights[i]
+      const radius = treeTierRadii[i]
+      const geometry = new THREE.ConeGeometry(radius, height, 6, 1)
+      geometry.translate(0, height / 2, 0)
+      treeTierGeometries.push(geometry)
+      const mesh = new THREE.InstancedMesh(geometry, leafMaterial, TREE_COUNT)
+      mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage)
+      treeTierMeshes.push(mesh)
+      environmentGroup.add(mesh)
+    }
+
+    treeTrunkGeometry = new THREE.CylinderGeometry(
+      TREE_TRUNK_RADIUS * 0.7,
+      TREE_TRUNK_RADIUS,
+      TREE_TRUNK_HEIGHT,
+      6,
+      1,
+    )
+    treeTrunkGeometry.translate(0, TREE_TRUNK_HEIGHT / 2, 0)
+    treeTrunkMesh = new THREE.InstancedMesh(treeTrunkGeometry, trunkMaterial, TREE_COUNT)
+    treeTrunkMesh.instanceMatrix.setUsage(THREE.StaticDrawUsage)
+    environmentGroup.add(treeTrunkMesh)
+
+    pebbleGeometry = new THREE.IcosahedronGeometry(1, 0)
+    const rockMaterial = new THREE.MeshStandardMaterial({
+      color: '#808080',
+      roughness: 0.95,
+      metalness: 0.05,
+      flatShading: true,
+    })
+    pebbleMaterial = rockMaterial
+    pebbleMesh = new THREE.InstancedMesh(pebbleGeometry, rockMaterial, PEBBLE_COUNT)
+    pebbleMesh.instanceMatrix.setUsage(THREE.StaticDrawUsage)
+    environmentGroup.add(pebbleMesh)
+
+    const up = new THREE.Vector3(0, 1, 0)
+    const normal = new THREE.Vector3()
+    const position = new THREE.Vector3()
+    const baseQuat = new THREE.Quaternion()
+    const twistQuat = new THREE.Quaternion()
+    const baseScale = new THREE.Vector3()
+    const baseMatrix = new THREE.Matrix4()
+    const localMatrix = new THREE.Matrix4()
+    const worldMatrix = new THREE.Matrix4()
+
+    for (let i = 0; i < TREE_COUNT; i += 1) {
+      randomOnSphere(rng, normal)
+      baseQuat.setFromUnitVectors(up, normal)
+      twistQuat.setFromAxisAngle(up, randRange(0, Math.PI * 2))
+      baseQuat.multiply(twistQuat)
+      const scale = randRange(TREE_MIN_SCALE, TREE_MAX_SCALE)
+      baseScale.setScalar(scale)
+      position.copy(normal).multiplyScalar(PLANET_RADIUS + TREE_BASE_OFFSET - TREE_TRUNK_HEIGHT * 0.08)
+      baseMatrix.compose(position, baseQuat, baseScale)
+
+      if (treeTrunkMesh) {
+        worldMatrix.copy(baseMatrix)
+        treeTrunkMesh.setMatrixAt(i, worldMatrix)
+      }
+
+      for (let t = 0; t < treeTierMeshes.length; t += 1) {
+        localMatrix.makeTranslation(0, treeTierOffsets[t], 0)
+        worldMatrix.copy(baseMatrix).multiply(localMatrix)
+        treeTierMeshes[t].setMatrixAt(i, worldMatrix)
+      }
+    }
+
+    if (treeTrunkMesh) {
+      treeTrunkMesh.instanceMatrix.needsUpdate = true
+    }
+    for (const mesh of treeTierMeshes) {
+      mesh.instanceMatrix.needsUpdate = true
+    }
+
+    if (pebbleMesh) {
+      const pebbleQuat = new THREE.Quaternion()
+      const pebbleScale = new THREE.Vector3()
+      const tangent = new THREE.Vector3()
+      const jittered = new THREE.Vector3()
+      const denseClusterNormals: THREE.Vector3[] = []
+      const denseClusterSpreads: number[] = []
+      const sparseClusterNormals: THREE.Vector3[] = []
+      const sparseClusterSpreads: number[] = []
+      const denseCount = Math.floor(
+        randRange(PEBBLE_DENSE_CLUSTER_MIN, PEBBLE_DENSE_CLUSTER_MAX + 1),
+      )
+      const sparseCount = Math.floor(
+        randRange(PEBBLE_SPARSE_CLUSTER_MIN, PEBBLE_SPARSE_CLUSTER_MAX + 1),
+      )
+      for (let i = 0; i < denseCount; i += 1) {
+        const cluster = new THREE.Vector3()
+        randomOnSphere(rng, cluster)
+        denseClusterNormals.push(cluster)
+        denseClusterSpreads.push(randRange(PEBBLE_DENSE_SPREAD_MIN, PEBBLE_DENSE_SPREAD_MAX))
+      }
+      for (let i = 0; i < sparseCount; i += 1) {
+        const cluster = new THREE.Vector3()
+        randomOnSphere(rng, cluster)
+        sparseClusterNormals.push(cluster)
+        sparseClusterSpreads.push(randRange(PEBBLE_SPARSE_SPREAD_MIN, PEBBLE_SPARSE_SPREAD_MAX))
+      }
+
+      for (let i = 0; i < PEBBLE_COUNT; i += 1) {
+        const useDense =
+          denseClusterNormals.length > 0 &&
+          (sparseClusterNormals.length === 0 || rng() < PEBBLE_DENSE_SHARE)
+        const centers = useDense ? denseClusterNormals : sparseClusterNormals
+        const spreads = useDense ? denseClusterSpreads : sparseClusterSpreads
+        const clusterIndex = Math.floor(rng() * centers.length)
+        const center = centers[clusterIndex]
+        const spread = spreads[clusterIndex]
+        randomTangentDirection(rng, center, tangent)
+        const angle = spread * Math.sqrt(rng())
+        jittered
+          .copy(center)
+          .multiplyScalar(Math.cos(angle))
+          .addScaledVector(tangent, Math.sin(angle))
+          .normalize()
+        normal.copy(jittered)
+
+        pebbleQuat.setFromUnitVectors(up, normal)
+        twistQuat.setFromAxisAngle(up, randRange(0, Math.PI * 2))
+        pebbleQuat.multiply(twistQuat)
+        const radius =
+          PEBBLE_RADIUS_MIN +
+          (PEBBLE_RADIUS_MAX - PEBBLE_RADIUS_MIN) * Math.pow(rng(), 0.55)
+        pebbleScale.set(
+          radius * randRange(0.6, 1.6),
+          radius * randRange(0.5, 1.3),
+          radius * randRange(0.6, 1.6),
+        )
+        position
+          .copy(normal)
+          .multiplyScalar(PLANET_RADIUS + PEBBLE_OFFSET - radius * 0.25)
+        worldMatrix.compose(position, pebbleQuat, pebbleScale)
+        pebbleMesh.setMatrixAt(i, worldMatrix)
+      }
+      pebbleMesh.instanceMatrix.needsUpdate = true
+    }
+  }
 
   const createSnakeVisual = (color: string): SnakeVisual => {
     const group = new THREE.Group()
@@ -1578,6 +1812,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     cameraState: Camera,
     localPlayerId: string | null,
     pointer: PointerState | null,
+    cameraDistance: number,
   ) => {
     const now = performance.now()
     const deltaSeconds = Math.min(0.1, Math.max(0, (now - lastFrameTime) / 1000))
@@ -1587,6 +1822,9 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       world.quaternion.set(cameraState.q.x, cameraState.q.y, cameraState.q.z, cameraState.q.w)
     } else {
       world.quaternion.identity()
+    }
+    if (Number.isFinite(cameraDistance)) {
+      camera.position.set(0, 0, cameraDistance)
     }
     camera.updateMatrixWorld()
 
@@ -1661,6 +1899,33 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     planetMaterial.dispose()
     gridGeometry.dispose()
     gridMaterial.dispose()
+    for (const mesh of treeTierMeshes) {
+      environmentGroup.remove(mesh)
+    }
+    if (treeTrunkMesh) {
+      environmentGroup.remove(treeTrunkMesh)
+    }
+    if (pebbleMesh) {
+      environmentGroup.remove(pebbleMesh)
+    }
+    for (const geometry of treeTierGeometries) {
+      geometry.dispose()
+    }
+    if (treeTrunkGeometry) {
+      treeTrunkGeometry.dispose()
+    }
+    if (treeLeafMaterial) {
+      treeLeafMaterial.dispose()
+    }
+    if (treeTrunkMaterial) {
+      treeTrunkMaterial.dispose()
+    }
+    if (pebbleGeometry) {
+      pebbleGeometry.dispose()
+    }
+    if (pebbleMaterial) {
+      pebbleMaterial.dispose()
+    }
     headGeometry.dispose()
     tailGeometry.dispose()
     eyeGeometry.dispose()
