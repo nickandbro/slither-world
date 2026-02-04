@@ -1,8 +1,8 @@
 use super::constants::{
   BASE_PELLET_COUNT, BASE_SPEED, BOOST_MULTIPLIER, BOT_BOOST_DISTANCE, BOT_COUNT,
-  BOT_MIN_STAMINA_TO_BOOST, COLOR_POOL, MAX_PELLETS, PLAYER_TIMEOUT_MS, RESPAWN_COOLDOWN_MS,
-  SPAWN_CONE_ANGLE, STAMINA_DRAIN_PER_SEC, STAMINA_MAX, STAMINA_RECHARGE_PER_SEC, TICK_MS,
-  TURN_RATE,
+  BOT_MIN_STAMINA_TO_BOOST, COLOR_POOL, MAX_PELLETS, MAX_SPAWN_ATTEMPTS, PLAYER_TIMEOUT_MS,
+  RESPAWN_COOLDOWN_MS, RESPAWN_RETRY_MS, SPAWN_CONE_ANGLE, STAMINA_DRAIN_PER_SEC, STAMINA_MAX,
+  STAMINA_RECHARGE_PER_SEC, TICK_MS, TURN_RATE,
 };
 use super::digestion::{add_digestion, advance_digestions, get_digestion_progress};
 use super::input::parse_axis;
@@ -402,58 +402,75 @@ impl RoomState {
   fn create_player(&self, id: String, name: String, is_bot: bool) -> Player {
     let base_axis = random_axis();
     let spawned = self.spawn_snake(base_axis);
+    let (alive, axis, snake, respawn_at) = match spawned {
+      Some(spawned) => (true, spawned.axis, spawned.snake, None),
+      None => (
+        false,
+        base_axis,
+        Vec::new(),
+        Some(Self::now_millis() + RESPAWN_RETRY_MS),
+      ),
+    };
 
     Player {
       id,
       name,
       color: COLOR_POOL[self.players.len() % COLOR_POOL.len()].to_string(),
       is_bot,
-      axis: spawned.axis,
-      target_axis: spawned.axis,
+      axis,
+      target_axis: axis,
       boost: false,
       stamina: STAMINA_MAX,
       score: 0,
-      alive: true,
+      alive,
       connected: true,
       last_seen: Self::now_millis(),
-      respawn_at: None,
-      snake: spawned.snake,
+      respawn_at,
+      snake,
       digestions: Vec::new(),
     }
   }
 
-  fn spawn_snake(&self, base_axis: Point) -> SpawnedSnake {
+  fn spawn_snake(&self, base_axis: Point) -> Option<SpawnedSnake> {
     let mut rng = rand::thread_rng();
-    for _ in 0..8 {
-      let mut snake = create_snake(base_axis);
+    for attempt in 0..MAX_SPAWN_ATTEMPTS {
+      let axis_seed = if attempt == 0 {
+        base_axis
+      } else {
+        random_axis()
+      };
+      let mut snake = create_snake(axis_seed);
       let theta = rng.gen::<f64>() * std::f64::consts::PI * 2.0;
       let phi = std::f64::consts::PI - rng.gen::<f64>() * SPAWN_CONE_ANGLE;
       let rotate_y_angle = std::f64::consts::PI - phi;
 
       rotate_snake(&mut snake, theta, rotate_y_angle);
-      let mut rotated_axis = base_axis;
+      let mut rotated_axis = axis_seed;
       rotate_y(&mut rotated_axis, rotate_y_angle);
       rotate_z(&mut rotated_axis, theta);
       let axis = normalize(rotated_axis);
 
       if !self.is_snake_too_close(&snake) {
-        return SpawnedSnake { snake, axis };
+        return Some(SpawnedSnake { snake, axis });
       }
     }
 
-    SpawnedSnake {
-      snake: create_snake(base_axis),
-      axis: base_axis,
-    }
+    None
   }
 
   fn is_snake_too_close(&self, snake: &[SnakeNode]) -> bool {
-    let Some(head) = snake.first() else { return false };
-    let head_point = Point {
-      x: head.x,
-      y: head.y,
-      z: head.z,
-    };
+    if snake.is_empty() {
+      return false;
+    }
+
+    let candidate_points: Vec<Point> = snake
+      .iter()
+      .map(|node| Point {
+        x: node.x,
+        y: node.y,
+        z: node.z,
+      })
+      .collect();
 
     for player in self.players.values() {
       if !player.alive {
@@ -465,8 +482,10 @@ impl RoomState {
           y: node.y,
           z: node.z,
         };
-        if collision(head_point, node_point) {
-          return true;
+        for candidate in &candidate_points {
+          if collision(*candidate, node_point) {
+            return true;
+          }
         }
       }
     }
@@ -647,6 +666,10 @@ impl RoomState {
     let base_axis = random_axis();
     let spawned = self.spawn_snake(base_axis);
     let Some(player) = self.players.get_mut(player_id) else { return };
+    let Some(spawned) = spawned else {
+      player.respawn_at = Some(Self::now_millis() + RESPAWN_RETRY_MS);
+      return;
+    };
     player.axis = spawned.axis;
     player.target_axis = spawned.axis;
     player.score = 0;
