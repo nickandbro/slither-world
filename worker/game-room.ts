@@ -15,6 +15,7 @@ type Player = {
   axis: Point
   targetAxis: Point
   boost: boolean
+  stamina: number
   score: number
   alive: boolean
   connected: boolean
@@ -43,6 +44,7 @@ type GameStateSnapshot = {
     name: string
     color: string
     score: number
+    stamina: number
     alive: boolean
     snake: Point[]
     digestions: number[]
@@ -54,6 +56,9 @@ const NODE_QUEUE_SIZE = 9
 const STARTING_LENGTH = 8
 const BASE_SPEED = (NODE_ANGLE * 2) / (NODE_QUEUE_SIZE + 1)
 const BOOST_MULTIPLIER = 1.75
+const STAMINA_MAX = 1
+const STAMINA_DRAIN_PER_SEC = 0.6
+const STAMINA_RECHARGE_PER_SEC = 0.35
 const TURN_RATE = 0.08
 const COLLISION_DISTANCE = 2 * Math.sin(NODE_ANGLE)
 const BASE_PELLET_COUNT = 3
@@ -401,6 +406,7 @@ export class GameRoom {
       axis,
       targetAxis: axis,
       boost: false,
+      stamina: STAMINA_MAX,
       score: 0,
       alive: true,
       connected: true,
@@ -472,6 +478,7 @@ export class GameRoom {
   private tick() {
     const now = Date.now()
     this.ensurePellets()
+    const dtSeconds = TICK_MS / 1000
 
     for (const [id, player] of this.players) {
       if (!player.connected && now - player.lastSeen > PLAYER_TIMEOUT_MS) {
@@ -483,7 +490,18 @@ export class GameRoom {
     for (const player of this.players.values()) {
       if (!player.alive) continue
       player.axis = rotateToward(player.axis, player.targetAxis, TURN_RATE)
-      const speedFactor = player.boost ? BOOST_MULTIPLIER : 1
+      const wantsBoost = player.boost
+      const hasStamina = player.stamina > 0
+      const isBoosting = wantsBoost && hasStamina
+      if (isBoosting) {
+        player.stamina = Math.max(0, player.stamina - STAMINA_DRAIN_PER_SEC * dtSeconds)
+      } else if (!wantsBoost) {
+        player.stamina = Math.min(
+          STAMINA_MAX,
+          player.stamina + STAMINA_RECHARGE_PER_SEC * dtSeconds,
+        )
+      }
+      const speedFactor = isBoosting ? BOOST_MULTIPLIER : 1
       const stepCount = Math.max(1, Math.round(speedFactor))
       const stepVelocity = (BASE_SPEED * speedFactor) / stepCount
       applySnakeRotation(player.snake, player.axis, stepVelocity, stepCount)
@@ -561,6 +579,7 @@ export class GameRoom {
     player.score = 0
     player.alive = true
     player.boost = false
+    player.stamina = STAMINA_MAX
     player.respawnAt = undefined
     player.snake = spawned.snake
     player.digestions = []
@@ -613,6 +632,7 @@ export class GameRoom {
         name: player.name,
         color: player.color,
         score: player.score,
+        stamina: player.stamina,
         alive: player.alive,
         snake: player.snake.map(copyPoint),
         digestions: player.digestions.map((digestion) => {

@@ -210,6 +210,7 @@ function blendPlayers(a: PlayerSnapshot, b: PlayerSnapshot, t: number): PlayerSn
     name: b.name,
     color: b.color,
     score: b.score,
+    stamina: lerp(a.stamina, b.stamina, t),
     alive: b.alive,
     snake,
     digestions: blendDigestions(a.digestions, b.digestions, t),
@@ -400,6 +401,15 @@ export default function App() {
 
   const score = localPlayer?.score ?? 0
   const playersOnline = gameState?.players.length ?? 0
+  const staminaPlayers = useMemo(() => {
+    if (!gameState) return []
+    const localId = playerId
+    return [...gameState.players].sort((a, b) => {
+      if (a.id === localId) return -1
+      if (b.id === localId) return 1
+      return b.score - a.score
+    })
+  }, [gameState, playerId])
 
   const pushSnapshot = (state: GameStateSnapshot) => {
     const now = Date.now()
@@ -770,6 +780,33 @@ export default function App() {
               onContextMenu={(event) => event.preventDefault()}
             />
             <canvas ref={hudCanvasRef} className='hud-canvas' aria-hidden='true' />
+            {staminaPlayers.length > 0 && (
+              <div className='stamina-panel' aria-label='Stamina meters'>
+                {staminaPlayers.map((player) => {
+                  const pct = Math.round(clamp(player.stamina, 0, 1) * 100)
+                  const displayName =
+                    player.id === playerId ? `${player.name} (You)` : player.name
+                  const rowClass = [
+                    'stamina-row',
+                    player.id === playerId ? 'is-local' : '',
+                    player.alive ? '' : 'is-dead',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')
+                  return (
+                    <div key={player.id} className={rowClass}>
+                      <div className='stamina-header'>
+                        <span className='stamina-name'>{displayName}</span>
+                        <span className='stamina-value'>{pct}%</span>
+                      </div>
+                      <div className='stamina-bar'>
+                        <div className='stamina-fill' style={{ width: `${pct}%` }} />
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
           </div>
           {localPlayer && !localPlayer.alive && (
             <div className='overlay'>
