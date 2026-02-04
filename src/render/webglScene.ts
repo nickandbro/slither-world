@@ -65,6 +65,24 @@ type TailDebugState = {
   lastDirAngleBucket: number
 }
 
+type Lake = {
+  center: THREE.Vector3
+  radius: number
+  depth: number
+  edgeFalloff: number
+  noiseAmplitude: number
+  noiseFrequency: number
+  noiseFrequencyB: number
+  noiseFrequencyC: number
+  noisePhase: number
+  noisePhaseB: number
+  noisePhaseC: number
+  warpAmplitude: number
+  tangent: THREE.Vector3
+  bitangent: THREE.Vector3
+  surfaceInset: number
+}
+
 type WebGLScene = {
   resize: (width: number, height: number, dpr: number) => void
   render: (
@@ -79,6 +97,18 @@ type WebGLScene = {
 
 const PLANET_RADIUS = 1
 const PLANET_FIBONACCI_POINTS = 2048
+const LAKE_COUNT = 2
+const LAKE_MIN_ANGLE = 0.9
+const LAKE_MAX_ANGLE = 1.3
+const LAKE_MIN_DEPTH = PLANET_RADIUS * 0.07
+const LAKE_MAX_DEPTH = PLANET_RADIUS * 0.12
+const LAKE_EDGE_FALLOFF = 0.2
+const LAKE_NOISE_AMPLITUDE = 0.55
+const LAKE_NOISE_FREQ_MIN = 3
+const LAKE_NOISE_FREQ_MAX = 6
+const LAKE_SURFACE_INSET_RATIO = 0.6
+const LAKE_SURFACE_THRESHOLD = 0.15
+const LAKE_EXCLUSION_THRESHOLD = 0.18
 const SNAKE_RADIUS = 0.045
 const HEAD_RADIUS = SNAKE_RADIUS * 1.35
 const SNAKE_LIFT_FACTOR = 0.85
@@ -153,6 +183,10 @@ const PEBBLE_OFFSET = 0.0015
 const PEBBLE_RADIUS_VARIANCE = 0.8
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
+const smoothstep = (edge0: number, edge1: number, x: number) => {
+  const t = clamp((x - edge0) / (edge1 - edge0), 0, 1)
+  return t * t * (3 - 2 * t)
+}
 const formatNum = (value: number, digits = 4) =>
   Number.isFinite(value) ? value.toFixed(digits) : 'NaN'
 const smoothValue = (current: number, target: number, deltaSeconds: number, rateUp: number, rateDown: number) => {
@@ -230,6 +264,157 @@ const createFibonacciSphereGeometry = (radius: number, count: number) => {
   const geometry = new ConvexGeometry(points)
   geometry.computeVertexNormals()
   geometry.computeBoundingSphere()
+  return geometry
+}
+const createLakes = (seed: number, count: number) => {
+  const rng = createSeededRandom(seed)
+  const lakes: Lake[] = []
+  const randRange = (min: number, max: number) => min + (max - min) * rng()
+  const pickCenter = (radius: number, out: THREE.Vector3) => {
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      randomOnSphere(rng, out)
+      let ok = true
+      for (const lake of lakes) {
+        const minSeparation = (radius + lake.radius) * 0.75
+        if (out.dot(lake.center) > Math.cos(minSeparation)) {
+          ok = false
+          break
+        }
+      }
+      if (ok) return out
+    }
+    return randomOnSphere(rng, out)
+  }
+  for (let i = 0; i < count; i += 1) {
+    const radius = randRange(LAKE_MIN_ANGLE, LAKE_MAX_ANGLE)
+    const depth = randRange(LAKE_MIN_DEPTH, LAKE_MAX_DEPTH)
+    const center = new THREE.Vector3()
+    pickCenter(radius, center)
+    const up = Math.abs(center.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0)
+    const tangent = new THREE.Vector3().crossVectors(up, center).normalize()
+    const bitangent = new THREE.Vector3().crossVectors(center, tangent).normalize()
+    const noiseFrequency = randRange(LAKE_NOISE_FREQ_MIN, LAKE_NOISE_FREQ_MAX)
+    const noiseFrequencyB = noiseFrequency * randRange(0.55, 0.95)
+    const noiseFrequencyC = noiseFrequency * randRange(1.1, 1.7)
+    const noisePhase = rng() * Math.PI * 2
+    const noisePhaseB = rng() * Math.PI * 2
+    const noisePhaseC = rng() * Math.PI * 2
+    const warpAmplitude = randRange(0.08, 0.18)
+    lakes.push({
+      center,
+      radius,
+      depth,
+      edgeFalloff: LAKE_EDGE_FALLOFF,
+      noiseAmplitude: LAKE_NOISE_AMPLITUDE,
+      noiseFrequency,
+      noiseFrequencyB,
+      noiseFrequencyC,
+      noisePhase,
+      noisePhaseB,
+      noisePhaseC,
+      warpAmplitude,
+      tangent,
+      bitangent,
+      surfaceInset: depth * LAKE_SURFACE_INSET_RATIO,
+    })
+  }
+  return lakes
+}
+const sampleLakes = (normal: THREE.Vector3, lakes: Lake[], temp: THREE.Vector3) => {
+  let maxBoundary = 0
+  let maxDepth = 0
+  let boundaryLake: Lake | null = null
+  for (const lake of lakes) {
+    const dot = clamp(lake.center.dot(normal), -1, 1)
+    const angle = Math.acos(dot)
+    if (angle >= lake.radius + lake.edgeFalloff) continue
+
+    temp.copy(normal).addScaledVector(lake.center, -dot)
+    const x = temp.dot(lake.tangent)
+    const y = temp.dot(lake.bitangent)
+    const warp = Math.sin((x + y) * lake.noiseFrequencyC + lake.noisePhaseC) * lake.warpAmplitude
+    const u = x * lake.noiseFrequency + lake.noisePhase + warp
+    const v = y * lake.noiseFrequencyB + lake.noisePhaseB - warp
+    const w = (x - y) * lake.noiseFrequencyC + lake.noisePhaseC * 0.7
+    const noise =
+      Math.sin(u) +
+      Math.sin(v) +
+      0.6 * Math.sin(2 * u + v * 0.6) +
+      0.45 * Math.sin(2.3 * v - 0.7 * u) +
+      0.35 * Math.sin(w)
+    const noiseNormalized = noise / 3.15
+    const edgeRadius = clamp(
+      lake.radius * (1 + lake.noiseAmplitude * noiseNormalized),
+      lake.radius * 0.65,
+      lake.radius * 1.35,
+    )
+    if (angle >= edgeRadius) continue
+
+    const inner = Math.max(0, edgeRadius - lake.edgeFalloff)
+    const edgeBlend =
+      angle <= inner ? 1 : smoothstep(0, 1, (edgeRadius - angle) / lake.edgeFalloff)
+    const core = clamp(1 - angle / edgeRadius, 0, 1)
+    const basin = Math.pow(core, 0.6)
+    const depth = edgeBlend * basin * lake.depth
+
+    if (edgeBlend > maxBoundary) {
+      maxBoundary = edgeBlend
+      boundaryLake = lake
+    }
+    if (depth > maxDepth) maxDepth = depth
+  }
+  return { boundary: maxBoundary, depth: maxDepth, lake: boundaryLake }
+}
+const applyLakeDepressions = (geometry: THREE.BufferGeometry, lakes: Lake[]) => {
+  const positions = geometry.attributes.position
+  const normal = new THREE.Vector3()
+  const temp = new THREE.Vector3()
+  for (let i = 0; i < positions.count; i += 1) {
+    normal.set(positions.getX(i), positions.getY(i), positions.getZ(i)).normalize()
+    const sample = sampleLakes(normal, lakes, temp)
+    const radius = PLANET_RADIUS - sample.depth
+    positions.setXYZ(i, normal.x * radius, normal.y * radius, normal.z * radius)
+  }
+  positions.needsUpdate = true
+  geometry.computeVertexNormals()
+  geometry.computeBoundingSphere()
+}
+const createLakeSurfaceGeometry = (baseGeometry: THREE.BufferGeometry, lakes: Lake[]) => {
+  const positions = baseGeometry.attributes.position
+  const lakePositions: number[] = []
+  const lakeNormals: number[] = []
+  const a = new THREE.Vector3()
+  const b = new THREE.Vector3()
+  const c = new THREE.Vector3()
+  const centroid = new THREE.Vector3()
+  const normal = new THREE.Vector3()
+  const temp = new THREE.Vector3()
+  for (let i = 0; i < positions.count; i += 3) {
+    a.set(positions.getX(i), positions.getY(i), positions.getZ(i))
+    b.set(positions.getX(i + 1), positions.getY(i + 1), positions.getZ(i + 1))
+    c.set(positions.getX(i + 2), positions.getY(i + 2), positions.getZ(i + 2))
+    centroid.copy(a).add(b).add(c).multiplyScalar(1 / 3).normalize()
+    const sample = sampleLakes(centroid, lakes, temp)
+    if (sample.boundary <= LAKE_SURFACE_THRESHOLD || !sample.lake) continue
+
+    const surfaceRadius = PLANET_RADIUS - sample.lake.surfaceInset
+    normal.copy(a).normalize()
+    lakePositions.push(normal.x * surfaceRadius, normal.y * surfaceRadius, normal.z * surfaceRadius)
+    lakeNormals.push(normal.x, normal.y, normal.z)
+    normal.copy(b).normalize()
+    lakePositions.push(normal.x * surfaceRadius, normal.y * surfaceRadius, normal.z * surfaceRadius)
+    lakeNormals.push(normal.x, normal.y, normal.z)
+    normal.copy(c).normalize()
+    lakePositions.push(normal.x * surfaceRadius, normal.y * surfaceRadius, normal.z * surfaceRadius)
+    lakeNormals.push(normal.x, normal.y, normal.z)
+  }
+
+  const geometry = new THREE.BufferGeometry()
+  if (lakePositions.length > 0) {
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(lakePositions, 3))
+    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(lakeNormals, 3))
+    geometry.computeBoundingSphere()
+  }
   return geometry
 }
 const randomOnSphere = (rand: () => number, target = new THREE.Vector3()) => {
@@ -317,7 +502,10 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   camera.add(keyLight)
   camera.add(rimLight)
 
-  const planetGeometry = createFibonacciSphereGeometry(PLANET_RADIUS, PLANET_FIBONACCI_POINTS)
+  const lakes = createLakes(0x91fcae12, LAKE_COUNT)
+  const basePlanetGeometry = createFibonacciSphereGeometry(PLANET_RADIUS, PLANET_FIBONACCI_POINTS)
+  const planetGeometry = basePlanetGeometry.clone()
+  applyLakeDepressions(planetGeometry, lakes)
   const planetMaterial = new THREE.MeshStandardMaterial({
     color: '#7ddf6a',
     roughness: 0.9,
@@ -336,6 +524,22 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   const gridMesh = new THREE.LineSegments(gridGeometry, gridMaterial)
   gridMesh.scale.setScalar(1.002)
   world.add(gridMesh)
+
+  const lakeGeometry = createLakeSurfaceGeometry(basePlanetGeometry, lakes)
+  const lakeMaterial = new THREE.MeshStandardMaterial({
+    color: '#2aa9ff',
+    roughness: 0.15,
+    metalness: 0.05,
+    transparent: true,
+    opacity: 0.9,
+    emissive: '#0a386b',
+    emissiveIntensity: 0.35,
+  })
+  lakeMaterial.depthWrite = false
+  const lakeMesh = new THREE.Mesh(lakeGeometry, lakeMaterial)
+  lakeMesh.renderOrder = 2
+  world.add(lakeMesh)
+  basePlanetGeometry.dispose()
 
   const environmentGroup = new THREE.Group()
   world.add(environmentGroup)
@@ -534,10 +738,14 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     const minDot = Math.cos(TREE_MIN_ANGLE)
     const minHeightScale = TREE_MIN_HEIGHT / baseTreeHeight
     const maxHeightScale = Math.max(minHeightScale, TREE_MAX_HEIGHT / baseTreeHeight)
+    const lakeSampleTemp = new THREE.Vector3()
+    const isInLake = (candidate: THREE.Vector3) =>
+      sampleLakes(candidate, lakes, lakeSampleTemp).boundary > LAKE_EXCLUSION_THRESHOLD
 
     const pickSparseNormal = (out: THREE.Vector3) => {
       for (let attempt = 0; attempt < 60; attempt += 1) {
         randomOnSphere(rng, out)
+        if (isInLake(out)) continue
         let ok = true
         for (const existing of treeNormals) {
           if (existing.dot(out) > minDot) {
@@ -547,7 +755,11 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
         }
         if (ok) return out
       }
-      return randomOnSphere(rng, out)
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        randomOnSphere(rng, out)
+        if (!isInLake(out)) return out
+      }
+      return out
     }
 
     for (let i = 0; i < treeInstanceCount; i += 1) {
@@ -586,6 +798,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     const pickMountainNormal = (out: THREE.Vector3) => {
       for (let attempt = 0; attempt < 60; attempt += 1) {
         randomOnSphere(rng, out)
+        if (isInLake(out)) continue
         let ok = true
         for (const existing of mountainNormals) {
           if (existing.dot(out) > mountainMinDot) {
@@ -595,7 +808,11 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
         }
         if (ok) return out
       }
-      return randomOnSphere(rng, out)
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        randomOnSphere(rng, out)
+        if (!isInLake(out)) return out
+      }
+      return out
     }
     for (let i = 0; i < MOUNTAIN_COUNT; i += 1) {
       const candidate = new THREE.Vector3()
@@ -642,8 +859,13 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       const pebbleScale = new THREE.Vector3()
       const scaleMin = 1 - PEBBLE_RADIUS_VARIANCE * 0.45
       const scaleMax = 1 + PEBBLE_RADIUS_VARIANCE * 0.55
-      for (let i = 0; i < PEBBLE_COUNT; i += 1) {
+      let placed = 0
+      let attempts = 0
+      const maxAttempts = PEBBLE_COUNT * 10
+      while (placed < PEBBLE_COUNT && attempts < maxAttempts) {
+        attempts += 1
         randomOnSphere(rng, normal)
+        if (isInLake(normal)) continue
         pebbleQuat.setFromUnitVectors(up, normal)
         twistQuat.setFromAxisAngle(up, randRange(0, Math.PI * 2))
         pebbleQuat.multiply(twistQuat)
@@ -660,8 +882,10 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
           .copy(normal)
           .multiplyScalar(PLANET_RADIUS + PEBBLE_OFFSET - radius * 0.25)
         worldMatrix.compose(position, pebbleQuat, pebbleScale)
-        pebbleMesh.setMatrixAt(i, worldMatrix)
+        pebbleMesh.setMatrixAt(placed, worldMatrix)
+        placed += 1
       }
+      pebbleMesh.count = placed
       pebbleMesh.instanceMatrix.needsUpdate = true
     }
   }
@@ -2013,6 +2237,9 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     planetMaterial.dispose()
     gridGeometry.dispose()
     gridMaterial.dispose()
+    world.remove(lakeMesh)
+    lakeGeometry.dispose()
+    lakeMaterial.dispose()
     for (const mesh of treeTierMeshes) {
       environmentGroup.remove(mesh)
     }
