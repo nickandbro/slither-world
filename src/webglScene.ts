@@ -32,7 +32,7 @@ type TongueState = {
   length: number
   mode: 'idle' | 'extend' | 'retract'
   targetPosition: THREE.Vector3 | null
-  cooldown: number
+  carrying: boolean
 }
 
 type PelletOverride = {
@@ -97,10 +97,8 @@ const TONGUE_ANGLE_LIMIT = Math.PI / 6
 const TONGUE_EXTEND_RATE = 10
 const TONGUE_RETRACT_RATE = 14
 const TONGUE_HIDE_THRESHOLD = HEAD_RADIUS * 0.12
-const TONGUE_REACQUIRE_THRESHOLD = HEAD_RADIUS * 0.2
 const TONGUE_GRAB_EPS = HEAD_RADIUS * 0.12
 const TONGUE_PELLET_MATCH = HEAD_RADIUS * 1.6
-const TONGUE_COOLDOWN = 0.35
 const TAIL_CAP_SEGMENTS = 5
 const TAIL_DIR_MIN_RATIO = 0.35
 const DIGESTION_BULGE = 0.55
@@ -757,10 +755,9 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   ): PelletOverride | null => {
     let state = tongueStates.get(playerId)
     if (!state) {
-      state = { length: 0, mode: 'idle', targetPosition: null, cooldown: 0 }
+      state = { length: 0, mode: 'idle', targetPosition: null, carrying: false }
       tongueStates.set(playerId, state)
     }
-    state.cooldown = Math.max(0, state.cooldown - deltaSeconds)
 
     const mouthPosition = tempVectorD
       .copy(headPosition)
@@ -771,15 +768,47 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     let candidatePosition: THREE.Vector3 | null = null
     let candidateDistance = Infinity
     let hasCandidate = false
+    let matchedIndex = -1
+    let matchedPosition: THREE.Vector3 | null = null
 
     if (!pellets || pellets.length === 0) {
       if (state.mode !== 'idle') {
         state.mode = 'retract'
+        state.carrying = false
+        state.targetPosition = null
       }
     } else {
-      const canAcquire =
-        state.cooldown <= 0 &&
-        (state.mode === 'idle' || (state.mode === 'retract' && state.length < TONGUE_REACQUIRE_THRESHOLD))
+      if (state.targetPosition) {
+        let bestDistanceSq = Infinity
+        let bestIndex = -1
+        let bestPosition: THREE.Vector3 | null = null
+        for (let i = 0; i < pellets.length; i += 1) {
+          const pellet = pellets[i]
+          tempVectorE
+            .set(pellet.x, pellet.y, pellet.z)
+            .normalize()
+            .multiplyScalar(PLANET_RADIUS + PELLET_OFFSET)
+          const distSq = tempVectorE.distanceToSquared(state.targetPosition)
+          if (distSq < bestDistanceSq) {
+            bestDistanceSq = distSq
+            bestIndex = i
+            bestPosition = tempVectorE.clone()
+          }
+        }
+        const matchThresholdSq = TONGUE_PELLET_MATCH * TONGUE_PELLET_MATCH
+        if (bestIndex >= 0 && bestPosition && bestDistanceSq <= matchThresholdSq) {
+          matchedIndex = bestIndex
+          matchedPosition = bestPosition
+          state.targetPosition.copy(bestPosition)
+        } else if (state.mode === 'retract') {
+          state.carrying = false
+          state.targetPosition = null
+        } else if (state.mode === 'extend') {
+          state.mode = 'retract'
+          state.carrying = false
+          state.targetPosition = null
+        }
+      }
 
       if (state.mode === 'extend' && state.targetPosition) {
         tempVectorF.copy(state.targetPosition).sub(mouthPosition)
@@ -797,10 +826,12 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
           hasCandidate = true
         } else {
           state.mode = 'retract'
+          state.carrying = false
+          state.targetPosition = null
         }
       }
 
-      if (!hasCandidate && canAcquire) {
+      if (!hasCandidate && state.mode === 'idle') {
         for (let i = 0; i < pellets.length; i += 1) {
           const pellet = pellets[i]
           tempVectorE
@@ -828,9 +859,11 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
         desiredLength = Math.min(candidateDistance, TONGUE_MAX_LENGTH)
         state.targetPosition = candidatePosition
         state.mode = 'extend'
+        state.carrying = false
         hasCandidate = true
       } else if (state.mode === 'extend') {
         state.mode = 'retract'
+        state.carrying = false
       }
     }
 
@@ -845,40 +878,24 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
 
     if (state.mode === 'extend' && hasCandidate && state.length >= desiredLength - TONGUE_GRAB_EPS) {
       state.mode = 'retract'
+      state.carrying = matchedIndex >= 0 && matchedPosition !== null
     }
 
     if (state.mode === 'retract' && state.length <= TONGUE_HIDE_THRESHOLD) {
       state.mode = 'idle'
       state.targetPosition = null
-      state.cooldown = TONGUE_COOLDOWN
+      state.carrying = false
     }
 
     let override: PelletOverride | null = null
     let targetPosition = state.targetPosition
 
-    if (state.mode === 'retract' && targetPosition && pellets && pellets.length > 0) {
-      let bestIndex = -1
-      let bestDistanceSq = Infinity
-      let bestPosition: THREE.Vector3 | null = null
-      for (let i = 0; i < pellets.length; i += 1) {
-        const pellet = pellets[i]
-        tempVectorE
-          .set(pellet.x, pellet.y, pellet.z)
-          .normalize()
-          .multiplyScalar(PLANET_RADIUS + PELLET_OFFSET)
-        const distSq = tempVectorE.distanceToSquared(targetPosition)
-        if (distSq < bestDistanceSq) {
-          bestDistanceSq = distSq
-          bestIndex = i
-          bestPosition = tempVectorE.clone()
-        }
-      }
-      const matchThresholdSq = TONGUE_PELLET_MATCH * TONGUE_PELLET_MATCH
-      if (bestIndex >= 0 && bestPosition && bestDistanceSq <= matchThresholdSq) {
+    if (state.mode === 'retract' && state.carrying && targetPosition && pellets && pellets.length > 0) {
+      if (matchedIndex >= 0 && matchedPosition) {
         if (state.targetPosition) {
-          state.targetPosition.copy(bestPosition)
+          state.targetPosition.copy(matchedPosition)
         } else {
-          state.targetPosition = bestPosition
+          state.targetPosition = matchedPosition
         }
         targetPosition = state.targetPosition
         tempVectorF.copy(targetPosition).sub(mouthPosition)
@@ -888,7 +905,10 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
           tempVectorF.copy(forward)
         }
         const grabbedPos = mouthPosition.clone().addScaledVector(tempVectorF, state.length)
-        override = { index: bestIndex, position: grabbedPos }
+        override = { index: matchedIndex, position: grabbedPos }
+      } else {
+        state.carrying = false
+        state.targetPosition = null
       }
     }
 
