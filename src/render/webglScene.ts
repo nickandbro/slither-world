@@ -110,6 +110,8 @@ const LAKE_NOISE_FREQ_MIN = 3
 const LAKE_NOISE_FREQ_MAX = 6
 const LAKE_SHELF_DEPTH_RATIO = 0.45
 const LAKE_SHELF_CORE = 0.55
+const LAKE_CENTER_PIT_START = 0.72
+const LAKE_CENTER_PIT_RATIO = 0.35
 const LAKE_SURFACE_INSET_RATIO = 0.5
 const LAKE_SURFACE_EXTRA_INSET = PLANET_RADIUS * 0.01
 const LAKE_SURFACE_THRESHOLD = 0.12
@@ -362,7 +364,11 @@ const sampleLakes = (normal: THREE.Vector3, lakes: Lake[], temp: THREE.Vector3) 
     const edgeBlend = Math.pow(edgeT, LAKE_EDGE_SHARPNESS)
     const core = clamp(1 - angle / shelfRadius, 0, 1)
     const basinFactor = smoothstep(LAKE_SHELF_CORE, 1, core)
-    const depth = edgeBlend * (lake.shelfDepth + basinFactor * (lake.depth - lake.shelfDepth))
+    const pitFactor = smoothstep(LAKE_CENTER_PIT_START, 1, core)
+    const pitDepth = pitFactor * pitFactor * lake.depth * LAKE_CENTER_PIT_RATIO
+    const depth =
+      edgeBlend *
+      (lake.shelfDepth + basinFactor * (lake.depth - lake.shelfDepth) + pitDepth)
 
     if (edgeBlend > maxBoundary) {
       maxBoundary = edgeBlend
