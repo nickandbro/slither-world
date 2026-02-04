@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import type { Camera, GameStateSnapshot, PlayerSnapshot, Point } from './gameTypes'
+import type { Camera, GameStateSnapshot, PlayerSnapshot, Point } from '../game/types'
 
 type SnakeVisual = {
   group: THREE.Group

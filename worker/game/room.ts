@@ -1,271 +1,33 @@
-type Point = {
-  x: number
-  y: number
-  z: number
-}
-
-type SnakeNode = Point & {
-  posQueue: Array<Point | null>
-}
-
-type Player = {
-  id: string
-  name: string
-  color: string
-  axis: Point
-  targetAxis: Point
-  boost: boolean
-  stamina: number
-  score: number
-  alive: boolean
-  connected: boolean
-  lastSeen: number
-  respawnAt?: number
-  snake: SnakeNode[]
-  digestions: Digestion[]
-}
-
-type Digestion = {
-  remaining: number
-  total: number
-  growthSteps: number
-}
-
-type Session = {
-  socket: WebSocket
-  playerId?: string
-}
-
-type GameStateSnapshot = {
-  now: number
-  pellets: Point[]
-  players: Array<{
-    id: string
-    name: string
-    color: string
-    score: number
-    stamina: number
-    alive: boolean
-    snake: Point[]
-    digestions: number[]
-  }>
-}
-
-const NODE_ANGLE = Math.PI / 60
-const NODE_QUEUE_SIZE = 9
-const STARTING_LENGTH = 8
-const BASE_SPEED = (NODE_ANGLE * 2) / (NODE_QUEUE_SIZE + 1)
-const BOOST_MULTIPLIER = 1.75
-const STAMINA_MAX = 1
-const STAMINA_DRAIN_PER_SEC = 0.6
-const STAMINA_RECHARGE_PER_SEC = 0.35
-const DIGESTION_TRAVEL_SPEED_MULT = 3
-const TURN_RATE = 0.08
-const COLLISION_DISTANCE = 2 * Math.sin(NODE_ANGLE)
-const BASE_PELLET_COUNT = 3
-const MAX_PELLETS = 12
-const TICK_MS = 50
-const RESPAWN_COOLDOWN_MS = 0
-const PLAYER_TIMEOUT_MS = 15000
-const SPAWN_CONE_ANGLE = Math.PI / 3
-const DIGESTION_GROWTH_STEPS = NODE_QUEUE_SIZE
-
-const COLOR_POOL = [
-  '#ff6b6b',
-  '#ffd166',
-  '#06d6a0',
-  '#4dabf7',
-  '#f06595',
-  '#845ef7',
-  '#20c997',
-  '#fcc419',
-]
-
-function pointFromSpherical(theta: number, phi: number): Point {
-  const sinPhi = Math.sin(phi)
-  return {
-    x: Math.cos(theta) * sinPhi,
-    y: Math.sin(theta) * sinPhi,
-    z: Math.cos(phi),
-  }
-}
-
-function copyPoint(src: Point): Point {
-  return { x: src.x, y: src.y, z: src.z }
-}
-
-function length(point: Point) {
-  return Math.sqrt(point.x * point.x + point.y * point.y + point.z * point.z)
-}
-
-function normalize(point: Point): Point {
-  const len = length(point)
-  if (!Number.isFinite(len) || len === 0) return { x: 0, y: 0, z: 0 }
-  return { x: point.x / len, y: point.y / len, z: point.z / len }
-}
-
-function dot(a: Point, b: Point) {
-  return a.x * b.x + a.y * b.y + a.z * b.z
-}
-
-function cross(a: Point, b: Point): Point {
-  return {
-    x: a.y * b.z - a.z * b.y,
-    y: a.z * b.x - a.x * b.z,
-    z: a.x * b.y - a.y * b.x,
-  }
-}
-
-function rotateZ(point: Point, angle: number) {
-  const cosA = Math.cos(angle)
-  const sinA = Math.sin(angle)
-  const x = point.x
-  const y = point.y
-  point.x = cosA * x - sinA * y
-  point.y = sinA * x + cosA * y
-}
-
-function rotateY(point: Point, angle: number) {
-  const cosA = Math.cos(angle)
-  const sinA = Math.sin(angle)
-  const x = point.x
-  const z = point.z
-  point.x = cosA * x + sinA * z
-  point.z = -sinA * x + cosA * z
-}
-
-function rotateAroundAxis(point: Point, axis: Point, angle: number) {
-  const u = normalize(axis)
-  const cosA = Math.cos(angle)
-  const sinA = Math.sin(angle)
-  const ux = u.x
-  const uy = u.y
-  const uz = u.z
-  const x = point.x
-  const y = point.y
-  const z = point.z
-  const dotProd = ux * x + uy * y + uz * z
-
-  point.x = x * cosA + (uy * z - uz * y) * sinA + ux * dotProd * (1 - cosA)
-  point.y = y * cosA + (uz * x - ux * z) * sinA + uy * dotProd * (1 - cosA)
-  point.z = z * cosA + (ux * y - uy * x) * sinA + uz * dotProd * (1 - cosA)
-}
-
-function rotateToward(current: Point, target: Point, maxAngle: number) {
-  const currentNorm = normalize(current)
-  const targetNorm = normalize(target)
-  const dotValue = clamp(dot(currentNorm, targetNorm), -1, 1)
-  const angle = Math.acos(dotValue)
-  if (!Number.isFinite(angle) || angle <= maxAngle) return targetNorm
-  if (angle === 0) return currentNorm
-
-  const axis = cross(currentNorm, targetNorm)
-  const axisLength = length(axis)
-  if (axisLength === 0) return currentNorm
-  const axisNorm = { x: axis.x / axisLength, y: axis.y / axisLength, z: axis.z / axisLength }
-  const rotated = { ...currentNorm }
-  rotateAroundAxis(rotated, axisNorm, maxAngle)
-  return normalize(rotated)
-}
-
-function randomAxis(): Point {
-  const angle = Math.random() * Math.PI * 2
-  return { x: Math.cos(angle), y: Math.sin(angle), z: 0 }
-}
-
-function addSnakeNode(snake: SnakeNode[], axis: Point) {
-  const snakeNode: SnakeNode = {
-    x: 0,
-    y: 0,
-    z: -1,
-    posQueue: [],
-  }
-
-  for (let i = 0; i < NODE_QUEUE_SIZE; i += 1) {
-    snakeNode.posQueue.push(null)
-  }
-
-  if (snake.length > 0) {
-    const last = snake[snake.length - 1]
-    const lastPos = last.posQueue[NODE_QUEUE_SIZE - 1]
-
-    if (lastPos === null) {
-      snakeNode.x = last.x
-      snakeNode.y = last.y
-      snakeNode.z = last.z
-      rotateAroundAxis(snakeNode, axis, -NODE_ANGLE * 2)
-    } else {
-      snakeNode.x = lastPos.x
-      snakeNode.y = lastPos.y
-      snakeNode.z = lastPos.z
-    }
-  }
-
-  snake.push(snakeNode)
-}
-
-function applySnakeRotationStep(snake: SnakeNode[], axis: Point, velocity: number) {
-  let nextPosition: Point | null = null
-
-  for (let i = 0; i < snake.length; i += 1) {
-    const node = snake[i]
-    const oldPosition = copyPoint(node)
-
-    if (i === 0) {
-      rotateAroundAxis(node, axis, velocity)
-    } else if (nextPosition === null) {
-      rotateAroundAxis(node, axis, velocity)
-    } else {
-      node.x = nextPosition.x
-      node.y = nextPosition.y
-      node.z = nextPosition.z
-    }
-
-    node.posQueue.unshift(oldPosition)
-    nextPosition = node.posQueue.pop() ?? null
-  }
-}
-
-function applySnakeRotation(
-  snake: SnakeNode[],
-  axis: Point,
-  stepVelocity: number,
-  steps = 1,
-) {
-  const stepCount = Math.max(1, Math.floor(steps))
-  for (let i = 0; i < stepCount; i += 1) {
-    applySnakeRotationStep(snake, axis, stepVelocity)
-  }
-}
-
-function collision(a: Point, b: Point) {
-  const dist = Math.sqrt(
-    Math.pow(a.x - b.x, 2) + Math.pow(a.y - b.y, 2) + Math.pow(a.z - b.z, 2),
-  )
-  return dist < COLLISION_DISTANCE
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value))
-}
-
-function sanitizeName(name: string) {
-  const cleaned = name.trim().replace(/\s+/g, ' ')
-  if (cleaned.length === 0) return 'Player'
-  return cleaned.slice(0, 20)
-}
-
-function parseAxis(value: unknown): Point | null {
-  if (!value || typeof value !== 'object') return null
-  const axis = value as { x?: unknown; y?: unknown; z?: unknown }
-  const x = typeof axis.x === 'number' ? axis.x : NaN
-  const y = typeof axis.y === 'number' ? axis.y : NaN
-  const z = typeof axis.z === 'number' ? axis.z : NaN
-  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null
-  const normalized = normalize({ x, y, z })
-  if (length(normalized) === 0) return null
-  return normalized
-}
+import type { GameStateSnapshot, Player, Point, Session, SnakeNode } from './types'
+import {
+  BASE_PELLET_COUNT,
+  BASE_SPEED,
+  BOOST_MULTIPLIER,
+  COLOR_POOL,
+  MAX_PELLETS,
+  PLAYER_TIMEOUT_MS,
+  RESPAWN_COOLDOWN_MS,
+  SPAWN_CONE_ANGLE,
+  STAMINA_DRAIN_PER_SEC,
+  STAMINA_MAX,
+  STAMINA_RECHARGE_PER_SEC,
+  TICK_MS,
+  TURN_RATE,
+} from './constants'
+import {
+  collision,
+  copyPoint,
+  normalize,
+  pointFromSpherical,
+  randomAxis,
+  rotateToward,
+  rotateY,
+  rotateZ,
+} from './math'
+import { addDigestion, advanceDigestions, getDigestionProgress } from './digestion'
+import { parseAxis } from './input'
+import { applySnakeRotation, createSnake, rotateSnake as rotateSnakeNodes } from './snake'
+import { sanitizePlayerName } from '../shared/names'
 
 export class GameRoom {
   private sessions = new Map<WebSocket, Session>()
@@ -318,7 +80,7 @@ export class GameRoom {
       }
 
       if (message.type === 'join') {
-        const name = sanitizeName(String(message.name ?? 'Player'))
+        const name = sanitizePlayerName(String(message.name ?? 'Player'))
         const requestedId = typeof message.playerId === 'string' ? message.playerId : undefined
 
         let player = requestedId ? this.players.get(requestedId) : undefined
@@ -422,12 +184,12 @@ export class GameRoom {
     let axis = baseAxis
 
     for (let attempt = 0; attempt < 8; attempt += 1) {
-      snake = this.createSnake(baseAxis)
+      snake = createSnake(baseAxis)
       const theta = Math.random() * Math.PI * 2
       const phi = Math.PI - Math.random() * SPAWN_CONE_ANGLE
       const rotateYAngle = Math.PI - phi
 
-      this.rotateSnake(snake, theta, rotateYAngle)
+      rotateSnakeNodes(snake, theta, rotateYAngle)
       const rotatedAxis = { ...baseAxis }
       rotateY(rotatedAxis, rotateYAngle)
       rotateZ(rotatedAxis, theta)
@@ -438,26 +200,6 @@ export class GameRoom {
     }
 
     return { snake, axis }
-  }
-
-  private createSnake(axis: Point) {
-    const snake: SnakeNode[] = []
-    for (let i = 0; i < STARTING_LENGTH; i += 1) {
-      addSnakeNode(snake, axis)
-    }
-    return snake
-  }
-
-  private rotateSnake(snake: SnakeNode[], zAngle: number, yAngle: number) {
-    for (const node of snake) {
-      rotateY(node, yAngle)
-      rotateZ(node, zAngle)
-      for (const queued of node.posQueue) {
-        if (!queued) continue
-        rotateY(queued, yAngle)
-        rotateZ(queued, zAngle)
-      }
-    }
   }
 
   private isSnakeTooClose(snake: SnakeNode[]) {
@@ -545,7 +287,7 @@ export class GameRoom {
         if (!collision(player.snake[0], this.pellets[i])) continue
         this.pellets.splice(i, 1)
         player.score += 1
-        this.addDigestion(player)
+        addDigestion(player)
         if (this.pellets.length < MAX_PELLETS) {
           this.pellets.push(pointFromSpherical(Math.random() * Math.PI * 2, Math.random() * Math.PI))
         }
@@ -555,7 +297,7 @@ export class GameRoom {
     for (const player of this.players.values()) {
       if (!player.alive) continue
       const steps = moveSteps.get(player.id) ?? 1
-      this.advanceDigestions(player, steps)
+      advanceDigestions(player, steps)
     }
 
     this.broadcastState()
@@ -589,50 +331,6 @@ export class GameRoom {
     player.digestions = []
   }
 
-  private addDigestion(player: Player) {
-    const travelSteps = Math.max(
-      1,
-      Math.round(((player.snake.length - 1) * NODE_QUEUE_SIZE) / DIGESTION_TRAVEL_SPEED_MULT),
-    )
-    const total = travelSteps + DIGESTION_GROWTH_STEPS
-    player.digestions.push({
-      remaining: total,
-      total,
-      growthSteps: DIGESTION_GROWTH_STEPS,
-    })
-  }
-
-  private advanceDigestions(player: Player, steps = 1) {
-    const stepCount = Math.max(1, Math.floor(steps))
-    for (let step = 0; step < stepCount; step += 1) {
-      let growthTaken = false
-
-      for (let i = 0; i < player.digestions.length; ) {
-        const digestion = player.digestions[i]
-        const atTail = digestion.remaining <= digestion.growthSteps
-
-        if (atTail) {
-          if (!growthTaken) {
-            digestion.remaining -= 1
-            growthTaken = true
-          } else {
-            digestion.remaining = Math.max(digestion.remaining, digestion.growthSteps)
-          }
-        } else {
-          digestion.remaining -= 1
-        }
-
-        if (digestion.remaining <= 0) {
-          addSnakeNode(player.snake, player.axis)
-          player.digestions.splice(i, 1)
-          continue
-        }
-
-        i += 1
-      }
-    }
-  }
-
   private buildStateSnapshot(): GameStateSnapshot {
     return {
       now: Date.now(),
@@ -645,16 +343,7 @@ export class GameRoom {
         stamina: player.stamina,
         alive: player.alive,
         snake: player.snake.map(copyPoint),
-        digestions: player.digestions.map((digestion) => {
-          const travelTotal = Math.max(1, digestion.total - digestion.growthSteps)
-          const travelRemaining = Math.max(0, digestion.remaining - digestion.growthSteps)
-          const travelProgress = clamp(1 - travelRemaining / travelTotal, 0, 1)
-          const growthProgress =
-            digestion.remaining <= digestion.growthSteps
-              ? clamp(1 - digestion.remaining / digestion.growthSteps, 0, 1)
-              : 0
-          return travelProgress + growthProgress
-        }),
+        digestions: player.digestions.map(getDigestionProgress),
       })),
     }
   }

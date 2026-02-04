@@ -1,373 +1,32 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
-import { createWebGLScene } from './webglScene'
-import type { Camera, GameStateSnapshot, PlayerSnapshot, Point, Quaternion } from './gameTypes'
-
-type LeaderboardEntry = {
-  name: string
-  score: number
-  created_at: number
-}
-
-type RenderConfig = {
-  width: number
-  height: number
-  centerX: number
-  centerY: number
-}
-
-type TimedSnapshot = GameStateSnapshot & {
-  receivedAt: number
-}
-
-const LOCAL_STORAGE_ID = 'spherical_snake_player_id'
-const LOCAL_STORAGE_NAME = 'spherical_snake_player_name'
-const LOCAL_STORAGE_BEST = 'spherical_snake_best_score'
-const LOCAL_STORAGE_ROOM = 'spherical_snake_room'
-const DEFAULT_ROOM = 'main'
+import { createWebGLScene } from './render/webglScene'
+import type { Camera, GameStateSnapshot, Point } from './game/types'
+import { axisFromPointer, updateCamera } from './game/camera'
+import { IDENTITY_QUAT, clamp } from './game/math'
+import { buildInterpolatedSnapshot, type TimedSnapshot } from './game/snapshots'
+import { drawHud, type RenderConfig } from './game/hud'
+import {
+  getInitialName,
+  getStoredBestScore,
+  getStoredPlayerId,
+  getInitialRoom,
+  sanitizeRoomName,
+  storeBestScore,
+  storePlayerId,
+  storePlayerName,
+  storeRoomName,
+} from './game/storage'
+import {
+  fetchLeaderboard as fetchLeaderboardRequest,
+  submitBestScore as submitBestScoreRequest,
+  type LeaderboardEntry,
+} from './services/leaderboard'
 
 const MAX_SNAPSHOT_BUFFER = 20
 const MIN_INTERP_DELAY_MS = 60
 const MAX_EXTRAPOLATION_MS = 70
 const OFFSET_SMOOTHING = 0.12
-const MAX_DIGESTION_PROGRESS = 2
-
-function normalize(point: Point) {
-  const len = Math.sqrt(point.x * point.x + point.y * point.y + point.z * point.z)
-  if (!Number.isFinite(len) || len === 0) return { x: 0, y: 0, z: 0 }
-  return { x: point.x / len, y: point.y / len, z: point.z / len }
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value))
-}
-
-function cross(a: Point, b: Point): Point {
-  return {
-    x: a.y * b.z - a.z * b.y,
-    y: a.z * b.x - a.x * b.z,
-    z: a.x * b.y - a.y * b.x,
-  }
-}
-
-function dot(a: Point, b: Point) {
-  return a.x * b.x + a.y * b.y + a.z * b.z
-}
-
-const IDENTITY_QUAT: Quaternion = { x: 0, y: 0, z: 0, w: 1 }
-
-function normalizeQuat(q: Quaternion) {
-  const len = Math.sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w)
-  if (!Number.isFinite(len) || len === 0) return { ...IDENTITY_QUAT }
-  return { x: q.x / len, y: q.y / len, z: q.z / len, w: q.w / len }
-}
-
-function quatFromBasis(right: Point, up: Point, forward: Point): Quaternion {
-  const m00 = right.x
-  const m01 = right.y
-  const m02 = right.z
-  const m10 = up.x
-  const m11 = up.y
-  const m12 = up.z
-  const m20 = forward.x
-  const m21 = forward.y
-  const m22 = forward.z
-
-  const trace = m00 + m11 + m22
-  let x = 0
-  let y = 0
-  let z = 0
-  let w = 1
-
-  if (trace > 0) {
-    const s = 0.5 / Math.sqrt(trace + 1)
-    w = 0.25 / s
-    x = (m21 - m12) * s
-    y = (m02 - m20) * s
-    z = (m10 - m01) * s
-  } else if (m00 > m11 && m00 > m22) {
-    const s = 2 * Math.sqrt(1 + m00 - m11 - m22)
-    w = (m21 - m12) / s
-    x = 0.25 * s
-    y = (m01 + m10) / s
-    z = (m02 + m20) / s
-  } else if (m11 > m22) {
-    const s = 2 * Math.sqrt(1 + m11 - m00 - m22)
-    w = (m02 - m20) / s
-    x = (m01 + m10) / s
-    y = 0.25 * s
-    z = (m12 + m21) / s
-  } else {
-    const s = 2 * Math.sqrt(1 + m22 - m00 - m11)
-    w = (m10 - m01) / s
-    x = (m02 + m20) / s
-    y = (m12 + m21) / s
-    z = 0.25 * s
-  }
-
-  return {
-    x,
-    y,
-    z,
-    w,
-  }
-}
-
-function rotateVectorByQuat(vector: Point, q: Quaternion) {
-  const qv = { x: q.x, y: q.y, z: q.z }
-  const uv = cross(qv, vector)
-  const uuv = cross(qv, uv)
-  return {
-    x: vector.x + (uv.x * q.w + uuv.x) * 2,
-    y: vector.y + (uv.y * q.w + uuv.y) * 2,
-    z: vector.z + (uv.z * q.w + uuv.z) * 2,
-  }
-}
-
-function updateCamera(head: Point | null, current: Camera, upRef: { current: Point }): Camera {
-  if (!head) return { q: { ...IDENTITY_QUAT }, active: false }
-  const headNorm = normalize(head)
-  const currentUp = upRef.current
-  const upDot = dot(currentUp, headNorm)
-  let projectedUp = {
-    x: currentUp.x - headNorm.x * upDot,
-    y: currentUp.y - headNorm.y * upDot,
-    z: currentUp.z - headNorm.z * upDot,
-  }
-  let projectedLen = Math.sqrt(
-    projectedUp.x * projectedUp.x +
-      projectedUp.y * projectedUp.y +
-      projectedUp.z * projectedUp.z,
-  )
-  if (!Number.isFinite(projectedLen) || projectedLen < 1e-3) {
-    const fallback = Math.abs(headNorm.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 }
-    const fallbackDot = dot(fallback, headNorm)
-    projectedUp = {
-      x: fallback.x - headNorm.x * fallbackDot,
-      y: fallback.y - headNorm.y * fallbackDot,
-      z: fallback.z - headNorm.z * fallbackDot,
-    }
-    projectedLen = Math.sqrt(
-      projectedUp.x * projectedUp.x +
-        projectedUp.y * projectedUp.y +
-        projectedUp.z * projectedUp.z,
-    )
-  }
-  projectedUp = normalize(projectedUp)
-  upRef.current = projectedUp
-
-  let right = cross(projectedUp, headNorm)
-  right = normalize(right)
-  let upOrtho = cross(headNorm, right)
-  upOrtho = normalize(upOrtho)
-
-  const desired = normalizeQuat(quatFromBasis(right, upOrtho, headNorm))
-  return { q: desired, active: true }
-}
-
-function axisFromPointer(angle: number, camera: Camera) {
-  const axis = { x: Math.sin(angle), y: Math.cos(angle), z: 0 }
-  if (!camera.active) return normalize(axis)
-  const inverse = { x: -camera.q.x, y: -camera.q.y, z: -camera.q.z, w: camera.q.w }
-  return normalize(rotateVectorByQuat(axis, inverse))
-}
-
-function lerp(a: number, b: number, t: number) {
-  return a + (b - a) * t
-}
-
-function lerpPoint(a: Point, b: Point, t: number): Point {
-  return {
-    x: lerp(a.x, b.x, t),
-    y: lerp(a.y, b.y, t),
-    z: lerp(a.z, b.z, t),
-  }
-}
-
-function blendPlayers(a: PlayerSnapshot, b: PlayerSnapshot, t: number): PlayerSnapshot {
-  const maxLength = Math.max(a.snake.length, b.snake.length)
-  const snake: Point[] = []
-  const tailA = a.snake[a.snake.length - 1]
-
-  for (let i = 0; i < maxLength; i += 1) {
-    const nodeA = a.snake[i]
-    const nodeB = b.snake[i]
-    if (nodeA && nodeB) {
-      snake.push(lerpPoint(nodeA, nodeB, t))
-    } else if (nodeB) {
-      if (tailA) {
-        snake.push(lerpPoint(tailA, nodeB, t))
-      } else {
-        snake.push({ ...nodeB })
-      }
-    } else if (nodeA) {
-      snake.push({ ...nodeA })
-    }
-  }
-
-  return {
-    id: b.id,
-    name: b.name,
-    color: b.color,
-    score: b.score,
-    stamina: lerp(a.stamina, b.stamina, t),
-    alive: b.alive,
-    snake,
-    digestions: blendDigestions(a.digestions, b.digestions, t),
-  }
-}
-
-function blendDigestions(a: number[], b: number[], t: number) {
-  const maxLength = Math.max(a.length, b.length)
-  const digestions: number[] = []
-  for (let i = 0; i < maxLength; i += 1) {
-    const da = a[i]
-    const db = b[i]
-    if (typeof da === 'number' && typeof db === 'number') {
-      digestions.push(clamp(lerp(da, db, t), 0, MAX_DIGESTION_PROGRESS))
-    } else if (typeof db === 'number') {
-      digestions.push(clamp(db, 0, MAX_DIGESTION_PROGRESS))
-    } else if (typeof da === 'number' && t < 0.95) {
-      digestions.push(clamp(da, 0, MAX_DIGESTION_PROGRESS))
-    }
-  }
-  return digestions
-}
-
-function blendSnapshots(a: GameStateSnapshot, b: GameStateSnapshot, t: number): GameStateSnapshot {
-  const playersA = new Map(a.players.map((player) => [player.id, player]))
-  const playersB = new Map(b.players.map((player) => [player.id, player]))
-  const orderedIds: string[] = []
-
-  for (const player of b.players) orderedIds.push(player.id)
-  for (const player of a.players) {
-    if (!playersB.has(player.id)) orderedIds.push(player.id)
-  }
-
-  const players: PlayerSnapshot[] = []
-  for (const id of orderedIds) {
-    const playerA = playersA.get(id)
-    const playerB = playersB.get(id)
-    if (playerA && playerB) {
-      players.push(blendPlayers(playerA, playerB, t))
-    } else if (playerB) {
-      players.push(playerB)
-    } else if (playerA && t < 0.95) {
-      players.push(playerA)
-    }
-  }
-
-  return {
-    now: lerp(a.now, b.now, t),
-    pellets: t < 0.5 ? a.pellets : b.pellets,
-    players,
-  }
-}
-
-function buildInterpolatedSnapshot(
-  buffer: TimedSnapshot[],
-  renderTime: number,
-  maxExtrapolationMs: number,
-): GameStateSnapshot | null {
-  if (buffer.length === 0) return null
-
-  while (buffer.length > 2 && buffer[1].now <= renderTime - maxExtrapolationMs) {
-    buffer.shift()
-  }
-
-  let before = buffer[0]
-  let after: TimedSnapshot | undefined
-
-  for (let i = 1; i < buffer.length; i += 1) {
-    if (buffer[i].now >= renderTime) {
-      before = buffer[i - 1]
-      after = buffer[i]
-      break
-    }
-  }
-
-  if (!after) {
-    const latest = buffer[buffer.length - 1]
-    const previous = buffer.length > 1 ? buffer[buffer.length - 2] : null
-    const extra = renderTime - latest.now
-    if (previous && extra > 0 && extra <= maxExtrapolationMs) {
-      const dt = latest.now - previous.now
-      if (dt > 0) {
-        const t = 1 + extra / dt
-        return blendSnapshots(previous, latest, t)
-      }
-    }
-    return latest
-  }
-
-  if (renderTime <= before.now) return before
-
-  const span = after.now - before.now
-  if (span <= 0) return before
-  const t = (renderTime - before.now) / span
-  return blendSnapshots(before, after, t)
-}
-
-function drawHud(
-  ctx: CanvasRenderingContext2D,
-  config: RenderConfig,
-  pointerAngle: number | null,
-  origin: { x: number; y: number } | null,
-) {
-  ctx.clearRect(0, 0, config.width, config.height)
-  if (pointerAngle === null) return
-
-  const originX = origin?.x ?? config.centerX
-  const originY = origin?.y ?? config.centerY
-  const radius = Math.min(config.width, config.height) * 0.22
-  ctx.beginPath()
-  ctx.moveTo(originX, originY)
-  ctx.lineTo(
-    originX + Math.cos(pointerAngle) * radius,
-    originY + Math.sin(pointerAngle) * radius,
-  )
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)'
-  ctx.lineWidth = Math.max(2, config.width * 0.004)
-  ctx.lineCap = 'round'
-  ctx.stroke()
-
-  ctx.beginPath()
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.7)'
-  ctx.arc(originX, originY, Math.max(2, config.width * 0.006), 0, Math.PI * 2)
-  ctx.fill()
-}
-
-function getInitialName() {
-  const stored = localStorage.getItem(LOCAL_STORAGE_NAME)
-  if (stored) return stored
-  const fallback = `Player-${Math.floor(Math.random() * 999) + 1}`
-  localStorage.setItem(LOCAL_STORAGE_NAME, fallback)
-  return fallback
-}
-
-function getStoredBestScore() {
-  const value = localStorage.getItem(LOCAL_STORAGE_BEST)
-  if (!value) return 0
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? parsed : 0
-}
-
-function getStoredPlayerId() {
-  return localStorage.getItem(LOCAL_STORAGE_ID)
-}
-
-function getInitialRoom() {
-  const params = new URLSearchParams(window.location.search)
-  const fromUrl = params.get('room')
-  const stored = localStorage.getItem(LOCAL_STORAGE_ROOM)
-  return sanitizeRoomName(fromUrl ?? stored ?? DEFAULT_ROOM)
-}
-
-function sanitizeRoomName(value: string) {
-  const cleaned = value.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9-_]/g, '')
-  if (!cleaned) return DEFAULT_ROOM
-  return cleaned.slice(0, 20)
-}
 
 export default function App() {
   const glCanvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -458,16 +117,16 @@ export default function App() {
   useEffect(() => {
     if (score > bestScore) {
       setBestScore(score)
-      localStorage.setItem(LOCAL_STORAGE_BEST, String(score))
+      storeBestScore(score)
     }
   }, [score, bestScore])
 
   useEffect(() => {
-    localStorage.setItem(LOCAL_STORAGE_NAME, playerName)
+    storePlayerName(playerName)
   }, [playerName])
 
   useEffect(() => {
-    localStorage.setItem(LOCAL_STORAGE_ROOM, roomName)
+    storeRoomName(roomName)
     const url = new URL(window.location.href)
     url.searchParams.set('room', roomName)
     window.history.replaceState({}, '', url)
@@ -575,7 +234,7 @@ export default function App() {
         if (message.type === 'init') {
           if (message.playerId) {
             setPlayerId(message.playerId)
-            localStorage.setItem(LOCAL_STORAGE_ID, message.playerId)
+            storePlayerId(message.playerId)
           }
           if (message.state) {
             pushSnapshot(message.state)
@@ -637,8 +296,10 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    fetchLeaderboard()
-    const interval = window.setInterval(fetchLeaderboard, 15000)
+    void refreshLeaderboard()
+    const interval = window.setInterval(() => {
+      void refreshLeaderboard()
+    }, 15000)
     return () => window.clearInterval(interval)
   }, [])
 
@@ -726,35 +387,26 @@ export default function App() {
     }
   }
 
-  const submitBestScore = async () => {
+  const handleSubmitBestScore = async () => {
     if (!bestScore) return
     setLeaderboardStatus('Submitting...')
     try {
-      const res = await fetch('/api/leaderboard', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: playerName,
-          score: bestScore,
-        }),
-      })
-      const data = (await res.json()) as { ok?: boolean; error?: string }
-      if (!res.ok || !data.ok) {
-        setLeaderboardStatus(data.error ?? 'Submission failed')
+      const result = await submitBestScoreRequest(playerName, bestScore)
+      if (!result.ok) {
+        setLeaderboardStatus(result.error ?? 'Submission failed')
         return
       }
       setLeaderboardStatus('Saved to leaderboard')
-      fetchLeaderboard()
+      void refreshLeaderboard()
     } catch {
       setLeaderboardStatus('Submission failed')
     }
   }
 
-  async function fetchLeaderboard() {
+  async function refreshLeaderboard() {
     try {
-      const res = await fetch('/api/leaderboard')
-      const data = (await res.json()) as { scores?: LeaderboardEntry[] }
-      setLeaderboard(data.scores ?? [])
+      const scores = await fetchLeaderboardRequest()
+      setLeaderboard(scores)
     } catch {
       setLeaderboard([])
     }
@@ -875,7 +527,7 @@ export default function App() {
       <aside className='leaderboard'>
         <div className='leaderboard-header'>
           <h2>Global leaderboard</h2>
-          <button type='button' onClick={submitBestScore}>
+          <button type='button' onClick={handleSubmitBestScore}>
             Submit best
           </button>
         </div>
