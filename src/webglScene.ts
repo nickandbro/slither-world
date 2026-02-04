@@ -476,6 +476,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     return { visuals, tailGrowth }
   }
 
+
   const computeTailDirection = (
     curvePoints: THREE.Vector3[],
     centerlineRadius: number,
@@ -646,16 +647,19 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     }
     lastSnakeLengths.set(player.id, nodes.length)
     const digestionState = buildDigestionVisuals(player.digestions)
+    const targetTailGrowth = digestionState.tailGrowth
     const previousGrowth = tailGrowthStates.get(player.id)
-    const growthSeed = previousGrowth ?? digestionState.tailGrowth
-    let smoothedTailGrowth = smoothValue(
-      growthSeed,
-      digestionState.tailGrowth,
-      deltaSeconds,
-      TAIL_GROWTH_RATE_UP,
-      TAIL_GROWTH_RATE_DOWN,
-    )
-    if (digestionState.tailGrowth > 0) {
+    let smoothedTailGrowth = targetTailGrowth
+    if (previousGrowth !== undefined && targetTailGrowth < previousGrowth) {
+      smoothedTailGrowth = smoothValue(
+        previousGrowth,
+        targetTailGrowth,
+        deltaSeconds,
+        TAIL_GROWTH_RATE_UP,
+        TAIL_GROWTH_RATE_DOWN,
+      )
+    }
+    if (targetTailGrowth > 0) {
       smoothedTailGrowth = Math.max(previousGrowth ?? 0, smoothedTailGrowth)
     }
     tailGrowthStates.set(player.id, smoothedTailGrowth)
