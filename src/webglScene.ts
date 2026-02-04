@@ -766,16 +766,17 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       tailDirMinLen = Number.isFinite(referenceLength)
         ? Math.max(0, referenceLength * TAIL_DIR_MIN_RATIO)
         : 0
-      const baseLength =
-        tailAddState && tailBasisPrev && tailBasisTail ? referenceLength : tailSegmentLength
+      const baseLength = tailSegmentLength
       const growthExtra = referenceLength * smoothedTailGrowth
       let extraLengthTarget = growthExtra
+      let minExtraLength = 0
       if (tailAddState) {
-        if (tailAddState.carryExtra === null) {
-          tailAddState.carryExtra = lastTailExtensionDistances.get(player.id) ?? 0
-        }
-        const initialExtra = tailAddState.carryExtra
-        extraLengthTarget = initialExtra * (1 - tailAddProgress) + growthExtra * tailAddProgress
+        const carryDistance = Number.isFinite(tailAddState.carryDistance)
+          ? tailAddState.carryDistance
+          : lastTailTotalLengths.get(player.id) ?? baseLength
+        tailAddState.carryDistance = carryDistance
+        minExtraLength = Math.max(0, carryDistance - baseLength)
+        extraLengthTarget = minExtraLength + growthExtra
       }
       const extraTargetClamped = Math.max(0, extraLengthTarget)
       let extensionDistance = extraTargetClamped
@@ -810,6 +811,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       }
       if (tailAddState) {
         extensionDistance = Math.min(extensionDistance, extraTargetClamped)
+        extensionDistance = Math.max(extensionDistance, minExtraLength)
         const clampState = tailExtraStates.get(player.id)
         if (clampState) {
           clampState.value = extensionDistance
