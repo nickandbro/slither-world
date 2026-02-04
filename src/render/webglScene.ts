@@ -125,26 +125,21 @@ const DEBUG_TAIL = false
 const TREE_COUNT = 36
 const TREE_BASE_OFFSET = 0.004
 const TREE_HEIGHT = PLANET_RADIUS * 0.3
-const TREE_TRUNK_HEIGHT = TREE_HEIGHT * 0.3
+const TREE_TRUNK_HEIGHT = TREE_HEIGHT / 3
 const TREE_TRUNK_RADIUS = TREE_HEIGHT * 0.12
 const TREE_TIER_HEIGHT_FACTORS = [0.4, 0.33, 0.27, 0.21]
 const TREE_TIER_RADIUS_FACTORS = [0.5, 0.44, 0.36, 0.28]
-const TREE_TIER_OVERLAP = 0.45
-const TREE_MIN_SCALE = 0.85
-const TREE_MAX_SCALE = 1.2
-const PEBBLE_COUNT = 800
+const TREE_TIER_OVERLAP = 0.55
+const TREE_MIN_SCALE = 0.9
+const TREE_MAX_SCALE = 1.15
+const TREE_MIN_ANGLE = 0.42
+const TREE_MIN_HEIGHT = SNAKE_RADIUS * 9.5
+const TREE_MAX_HEIGHT = TREE_MIN_HEIGHT * 1.5
+const PEBBLE_COUNT = 220
 const PEBBLE_RADIUS_MIN = PLANET_RADIUS * 0.0045
 const PEBBLE_RADIUS_MAX = PLANET_RADIUS * 0.014
 const PEBBLE_OFFSET = 0.0015
-const PEBBLE_DENSE_CLUSTER_MIN = 1
-const PEBBLE_DENSE_CLUSTER_MAX = 3
-const PEBBLE_SPARSE_CLUSTER_MIN = 10
-const PEBBLE_SPARSE_CLUSTER_MAX = 15
-const PEBBLE_DENSE_SPREAD_MIN = 0.045
-const PEBBLE_DENSE_SPREAD_MAX = 0.095
-const PEBBLE_SPARSE_SPREAD_MIN = 0.18
-const PEBBLE_SPARSE_SPREAD_MAX = 0.42
-const PEBBLE_DENSE_SHARE = 0.35
+const PEBBLE_RADIUS_VARIANCE = 0.8
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
 const formatNum = (value: number, digits = 4) =>
@@ -185,18 +180,6 @@ const randomOnSphere = (rand: () => number, target = new THREE.Vector3()) => {
   const r = Math.sqrt(Math.max(0, 1 - z * z))
   target.set(r * Math.cos(theta), z, r * Math.sin(theta))
   return target
-}
-const randomTangentDirection = (rand: () => number, normal: THREE.Vector3, target = new THREE.Vector3()) => {
-  randomOnSphere(rand, target)
-  target.addScaledVector(normal, -target.dot(normal))
-  if (target.lengthSq() < 1e-6) {
-    if (Math.abs(normal.y) < 0.99) {
-      target.crossVectors(normal, new THREE.Vector3(0, 1, 0))
-    } else {
-      target.crossVectors(normal, new THREE.Vector3(1, 0, 0))
-    }
-  }
-  return target.normalize()
 }
 const advanceOnSphere = (
   origin: THREE.Vector3,
@@ -385,14 +368,24 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   {
     const rng = createSeededRandom(0x6f35d2a1)
     const randRange = (min: number, max: number) => min + (max - min) * rng()
-    const treeTierHeights = TREE_TIER_HEIGHT_FACTORS.map((factor) => factor * TREE_HEIGHT)
+    const tierHeightSum = TREE_TIER_HEIGHT_FACTORS.reduce((sum, value) => sum + value, 0)
+    const tierHeightScale =
+      tierHeightSum > 0 ? (TREE_HEIGHT - TREE_TRUNK_HEIGHT) / tierHeightSum : 0
+    const treeTierHeights = TREE_TIER_HEIGHT_FACTORS.map(
+      (factor) => factor * tierHeightScale,
+    )
     const treeTierRadii = TREE_TIER_RADIUS_FACTORS.map((factor) => factor * TREE_HEIGHT)
     const treeTierOffsets: number[] = []
-    let tierBase = TREE_TRUNK_HEIGHT * 0.95
+    let tierBase = TREE_TRUNK_HEIGHT * 0.75
     for (let i = 0; i < treeTierHeights.length; i += 1) {
       const height = treeTierHeights[i]
-      treeTierOffsets.push(tierBase + height * 0.5)
+      treeTierOffsets.push(tierBase - height * 0.08)
       tierBase += height * (1 - TREE_TIER_OVERLAP)
+    }
+    let baseTreeHeight = TREE_TRUNK_HEIGHT
+    for (let i = 0; i < treeTierHeights.length; i += 1) {
+      const top = treeTierOffsets[i] + treeTierHeights[i]
+      if (top > baseTreeHeight) baseTreeHeight = top
     }
 
     const leafMaterial = new THREE.MeshStandardMaterial({
@@ -456,14 +449,43 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     const localMatrix = new THREE.Matrix4()
     const worldMatrix = new THREE.Matrix4()
 
+    const treeNormals: THREE.Vector3[] = []
+    const treeScales: THREE.Vector3[] = []
+    const minDot = Math.cos(TREE_MIN_ANGLE)
+    const minHeightScale = TREE_MIN_HEIGHT / baseTreeHeight
+    const maxHeightScale = Math.max(minHeightScale, TREE_MAX_HEIGHT / baseTreeHeight)
+
+    const pickSparseNormal = (out: THREE.Vector3) => {
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        randomOnSphere(rng, out)
+        let ok = true
+        for (const existing of treeNormals) {
+          if (existing.dot(out) > minDot) {
+            ok = false
+            break
+          }
+        }
+        if (ok) return out
+      }
+      return randomOnSphere(rng, out)
+    }
+
     for (let i = 0; i < TREE_COUNT; i += 1) {
-      randomOnSphere(rng, normal)
+      const candidate = new THREE.Vector3()
+      pickSparseNormal(candidate)
+      const widthScale = randRange(TREE_MIN_SCALE, TREE_MAX_SCALE)
+      const heightScale = randRange(minHeightScale, maxHeightScale)
+      treeNormals.push(candidate)
+      treeScales.push(new THREE.Vector3(widthScale, heightScale, widthScale))
+    }
+
+    for (let i = 0; i < treeNormals.length; i += 1) {
+      normal.copy(treeNormals[i])
       baseQuat.setFromUnitVectors(up, normal)
       twistQuat.setFromAxisAngle(up, randRange(0, Math.PI * 2))
       baseQuat.multiply(twistQuat)
-      const scale = randRange(TREE_MIN_SCALE, TREE_MAX_SCALE)
-      baseScale.setScalar(scale)
-      position.copy(normal).multiplyScalar(PLANET_RADIUS + TREE_BASE_OFFSET - TREE_TRUNK_HEIGHT * 0.08)
+      baseScale.copy(treeScales[i])
+      position.copy(normal).multiplyScalar(PLANET_RADIUS + TREE_BASE_OFFSET - TREE_TRUNK_HEIGHT * 0.12)
       baseMatrix.compose(position, baseQuat, baseScale)
 
       if (treeTrunkMesh) {
@@ -488,59 +510,21 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     if (pebbleMesh) {
       const pebbleQuat = new THREE.Quaternion()
       const pebbleScale = new THREE.Vector3()
-      const tangent = new THREE.Vector3()
-      const jittered = new THREE.Vector3()
-      const denseClusterNormals: THREE.Vector3[] = []
-      const denseClusterSpreads: number[] = []
-      const sparseClusterNormals: THREE.Vector3[] = []
-      const sparseClusterSpreads: number[] = []
-      const denseCount = Math.floor(
-        randRange(PEBBLE_DENSE_CLUSTER_MIN, PEBBLE_DENSE_CLUSTER_MAX + 1),
-      )
-      const sparseCount = Math.floor(
-        randRange(PEBBLE_SPARSE_CLUSTER_MIN, PEBBLE_SPARSE_CLUSTER_MAX + 1),
-      )
-      for (let i = 0; i < denseCount; i += 1) {
-        const cluster = new THREE.Vector3()
-        randomOnSphere(rng, cluster)
-        denseClusterNormals.push(cluster)
-        denseClusterSpreads.push(randRange(PEBBLE_DENSE_SPREAD_MIN, PEBBLE_DENSE_SPREAD_MAX))
-      }
-      for (let i = 0; i < sparseCount; i += 1) {
-        const cluster = new THREE.Vector3()
-        randomOnSphere(rng, cluster)
-        sparseClusterNormals.push(cluster)
-        sparseClusterSpreads.push(randRange(PEBBLE_SPARSE_SPREAD_MIN, PEBBLE_SPARSE_SPREAD_MAX))
-      }
-
+      const scaleMin = 1 - PEBBLE_RADIUS_VARIANCE * 0.45
+      const scaleMax = 1 + PEBBLE_RADIUS_VARIANCE * 0.55
       for (let i = 0; i < PEBBLE_COUNT; i += 1) {
-        const useDense =
-          denseClusterNormals.length > 0 &&
-          (sparseClusterNormals.length === 0 || rng() < PEBBLE_DENSE_SHARE)
-        const centers = useDense ? denseClusterNormals : sparseClusterNormals
-        const spreads = useDense ? denseClusterSpreads : sparseClusterSpreads
-        const clusterIndex = Math.floor(rng() * centers.length)
-        const center = centers[clusterIndex]
-        const spread = spreads[clusterIndex]
-        randomTangentDirection(rng, center, tangent)
-        const angle = spread * Math.sqrt(rng())
-        jittered
-          .copy(center)
-          .multiplyScalar(Math.cos(angle))
-          .addScaledVector(tangent, Math.sin(angle))
-          .normalize()
-        normal.copy(jittered)
-
+        randomOnSphere(rng, normal)
         pebbleQuat.setFromUnitVectors(up, normal)
         twistQuat.setFromAxisAngle(up, randRange(0, Math.PI * 2))
         pebbleQuat.multiply(twistQuat)
+        const radiusBlend = Math.pow(rng(), 0.8)
         const radius =
           PEBBLE_RADIUS_MIN +
-          (PEBBLE_RADIUS_MAX - PEBBLE_RADIUS_MIN) * Math.pow(rng(), 0.55)
+          (PEBBLE_RADIUS_MAX - PEBBLE_RADIUS_MIN) * radiusBlend
         pebbleScale.set(
-          radius * randRange(0.6, 1.6),
-          radius * randRange(0.5, 1.3),
-          radius * randRange(0.6, 1.6),
+          radius * randRange(scaleMin, scaleMax),
+          radius * randRange(scaleMin * 0.9, scaleMax * 0.9),
+          radius * randRange(scaleMin, scaleMax),
         )
         position
           .copy(normal)
