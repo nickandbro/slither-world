@@ -18,6 +18,13 @@ test('connects to the multiplayer server', async ({ page }) => {
   const status = page.locator('.status')
   await expect(status).toContainText('Connected')
   await expect(status).toContainText('online')
+  await expect
+    .poll(async () => {
+      const text = await status.innerText()
+      const match = text.match(/(\d+)\s+online/)
+      return match ? Number(match[1]) : 0
+    })
+    .toBeGreaterThanOrEqual(3)
 })
 
 test('submits a leaderboard entry', async ({ page }) => {

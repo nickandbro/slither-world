@@ -16,6 +16,9 @@ pub const RESPAWN_COOLDOWN_MS: i64 = 0;
 pub const PLAYER_TIMEOUT_MS: i64 = 15000;
 pub const SPAWN_CONE_ANGLE: f64 = std::f64::consts::PI / 3.0;
 pub const DIGESTION_GROWTH_STEPS: i64 = NODE_QUEUE_SIZE as i64;
+pub const BOT_COUNT: usize = 2;
+pub const BOT_BOOST_DISTANCE: f64 = 0.6;
+pub const BOT_MIN_STAMINA_TO_BOOST: f64 = 0.6;
 
 pub const COLOR_POOL: [&str; 8] = [
   "#ff6b6b",

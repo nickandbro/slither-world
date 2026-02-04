@@ -1,12 +1,14 @@
 use super::constants::{
-  BASE_PELLET_COUNT, BASE_SPEED, BOOST_MULTIPLIER, COLOR_POOL, MAX_PELLETS, PLAYER_TIMEOUT_MS,
-  RESPAWN_COOLDOWN_MS, SPAWN_CONE_ANGLE, STAMINA_DRAIN_PER_SEC, STAMINA_MAX,
-  STAMINA_RECHARGE_PER_SEC, TICK_MS, TURN_RATE,
+  BASE_PELLET_COUNT, BASE_SPEED, BOOST_MULTIPLIER, BOT_BOOST_DISTANCE, BOT_COUNT,
+  BOT_MIN_STAMINA_TO_BOOST, COLOR_POOL, MAX_PELLETS, PLAYER_TIMEOUT_MS, RESPAWN_COOLDOWN_MS,
+  SPAWN_CONE_ANGLE, STAMINA_DRAIN_PER_SEC, STAMINA_MAX, STAMINA_RECHARGE_PER_SEC, TICK_MS,
+  TURN_RATE,
 };
 use super::digestion::{add_digestion, advance_digestions, get_digestion_progress};
 use super::input::parse_axis;
 use super::math::{
-  collision, normalize, point_from_spherical, random_axis, rotate_toward, rotate_y, rotate_z,
+  collision, cross, length, normalize, point_from_spherical, random_axis, rotate_toward, rotate_y,
+  rotate_z,
 };
 use super::snake::{apply_snake_rotation, create_snake, rotate_snake};
 use super::types::{GameStateSnapshot, Player, PlayerSnapshot, Point, SnakeNode};
@@ -157,6 +159,9 @@ impl RoomState {
         player.last_seen = Self::now_millis();
       }
     }
+    if self.human_count() == 0 {
+      self.remove_bots();
+    }
   }
 
   fn handle_join(&mut self, session_id: &str, name: Option<String>, player_id: Option<String>) {
@@ -171,13 +176,13 @@ impl RoomState {
         player.last_seen = Self::now_millis();
         id
       } else {
-        let new_player = self.create_player(id.clone(), sanitized_name.clone());
+        let new_player = self.create_player(id.clone(), sanitized_name.clone(), false);
         self.players.insert(id.clone(), new_player);
         id
       }
     } else {
       let id = Uuid::new_v4().to_string();
-      let new_player = self.create_player(id.clone(), sanitized_name.clone());
+      let new_player = self.create_player(id.clone(), sanitized_name.clone(), false);
       self.players.insert(id.clone(), new_player);
       id
     };
@@ -234,7 +239,123 @@ impl RoomState {
       .and_then(|entry| entry.player_id.clone())
   }
 
-  fn create_player(&self, id: String, name: String) -> Player {
+  fn human_count(&self) -> usize {
+    self
+      .players
+      .values()
+      .filter(|player| !player.is_bot && player.connected)
+      .count()
+  }
+
+  fn bot_count(&self) -> usize {
+    self.players.values().filter(|player| player.is_bot).count()
+  }
+
+  fn remove_bots(&mut self) {
+    self.players.retain(|_, player| !player.is_bot);
+  }
+
+  fn next_bot_index(&self) -> usize {
+    self
+      .players
+      .values()
+      .filter(|player| player.is_bot)
+      .filter_map(|player| player.name.strip_prefix("Bot-"))
+      .filter_map(|suffix| suffix.parse::<usize>().ok())
+      .max()
+      .unwrap_or(0)
+      + 1
+  }
+
+  fn ensure_bots(&mut self) {
+    if self.human_count() == 0 {
+      self.remove_bots();
+      return;
+    }
+
+    let mut current = self.bot_count();
+    if current >= BOT_COUNT {
+      return;
+    }
+
+    let mut index = self.next_bot_index();
+    while current < BOT_COUNT {
+      let id = format!("bot-{}", Uuid::new_v4());
+      let name = format!("Bot-{}", index);
+      let bot = self.create_player(id.clone(), name, true);
+      self.players.insert(id, bot);
+      current += 1;
+      index += 1;
+    }
+  }
+
+  fn update_bots(&mut self) {
+    if self.bot_count() == 0 {
+      return;
+    }
+    let now = Self::now_millis();
+    let pellets = self.pellets.clone();
+    let bot_ids: Vec<String> = self
+      .players
+      .iter()
+      .filter_map(|(id, player)| if player.is_bot { Some(id.clone()) } else { None })
+      .collect();
+
+    for bot_id in bot_ids {
+      let mut should_respawn = false;
+      {
+        let Some(player) = self.players.get_mut(&bot_id) else { continue };
+        if !player.alive {
+          if let Some(respawn_at) = player.respawn_at {
+            if now >= respawn_at {
+              should_respawn = true;
+            }
+          }
+        } else {
+          let Some(head) = player.snake.first() else { continue };
+          let head_point = Point {
+            x: head.x,
+            y: head.y,
+            z: head.z,
+          };
+
+          let mut nearest: Option<(Point, f64)> = None;
+          for pellet in &pellets {
+            let delta = Point {
+              x: pellet.x - head_point.x,
+              y: pellet.y - head_point.y,
+              z: pellet.z - head_point.z,
+            };
+            let dist = length(delta);
+            match nearest {
+              Some((_, best)) if dist >= best => {}
+              _ => nearest = Some((*pellet, dist)),
+            }
+          }
+
+          if let Some((target_pellet, dist)) = nearest {
+            let axis_raw = cross(head_point, target_pellet);
+            let axis = if length(axis_raw) < 1e-6 {
+              random_axis()
+            } else {
+              normalize(axis_raw)
+            };
+            player.target_axis = axis;
+            player.boost = dist > BOT_BOOST_DISTANCE && player.stamina > BOT_MIN_STAMINA_TO_BOOST;
+          } else {
+            player.target_axis = random_axis();
+            player.boost = false;
+          }
+        }
+      }
+
+      if should_respawn {
+        self.respawn_player(&bot_id);
+      }
+    }
+  }
+
+  fn create_player(&self, id: String, name: String, is_bot: bool) -> Player {
     let base_axis = random_axis();
     let spawned = self.spawn_snake(base_axis);
 
@@ -242,6 +363,7 @@ impl RoomState {
       id,
       name,
       color: COLOR_POOL[self.players.len() % COLOR_POOL.len()].to_string(),
+      is_bot,
       axis: spawned.axis,
       target_axis: spawned.axis,
       boost: false,
@@ -329,6 +451,9 @@ impl RoomState {
         now - player.last_seen <= PLAYER_TIMEOUT_MS
       }
     });
+
+    self.ensure_bots();
+    self.update_bots();
 
     let player_ids: Vec<String> = self.players.keys().cloned().collect();
     for id in &player_ids {

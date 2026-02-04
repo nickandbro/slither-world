@@ -28,6 +28,7 @@ pub struct Player {
   pub id: String,
   pub name: String,
   pub color: String,
+  pub is_bot: bool,
   pub axis: Point,
   pub target_axis: Point,
   pub boost: bool,
