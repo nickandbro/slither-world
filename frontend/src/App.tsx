@@ -1,0 +1,573 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
+import './App.css'
+import { createWebGLScene } from './render/webglScene'
+import type { Camera, GameStateSnapshot, Point } from './game/types'
+import { axisFromPointer, updateCamera } from './game/camera'
+import { IDENTITY_QUAT, clamp } from './game/math'
+import { buildInterpolatedSnapshot, type TimedSnapshot } from './game/snapshots'
+import { drawHud, type RenderConfig } from './game/hud'
+import {
+  getInitialName,
+  getStoredBestScore,
+  getStoredPlayerId,
+  getInitialRoom,
+  sanitizeRoomName,
+  storeBestScore,
+  storePlayerId,
+  storePlayerName,
+  storeRoomName,
+} from './game/storage'
+import {
+  fetchLeaderboard as fetchLeaderboardRequest,
+  submitBestScore as submitBestScoreRequest,
+  type LeaderboardEntry,
+} from './services/leaderboard'
+import { resolveWebSocketUrl } from './services/backend'
+
+const MAX_SNAPSHOT_BUFFER = 20
+const MIN_INTERP_DELAY_MS = 60
+const MAX_EXTRAPOLATION_MS = 70
+const OFFSET_SMOOTHING = 0.12
+const CAMERA_DISTANCE_DEFAULT = 3
+const CAMERA_DISTANCE_MIN = 2.2
+const CAMERA_DISTANCE_MAX = 5
+const CAMERA_ZOOM_SENSITIVITY = 0.0015
+
+export default function App() {
+  const glCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  const hudCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  const socketRef = useRef<WebSocket | null>(null)
+  const renderConfigRef = useRef<RenderConfig | null>(null)
+  const pointerRef = useRef({ angle: 0, boost: false, active: false, screenX: 0, screenY: 0 })
+  const sendIntervalRef = useRef<number | null>(null)
+  const snapshotBufferRef = useRef<TimedSnapshot[]>([])
+  const serverOffsetRef = useRef<number | null>(null)
+  const tickIntervalRef = useRef(50)
+  const lastSnapshotTimeRef = useRef<number | null>(null)
+  const cameraRef = useRef<Camera>({ q: { ...IDENTITY_QUAT }, active: false })
+  const cameraUpRef = useRef<Point>({ x: 0, y: 1, z: 0 })
+  const cameraDistanceRef = useRef(CAMERA_DISTANCE_DEFAULT)
+
+  const [gameState, setGameState] = useState<GameStateSnapshot | null>(null)
+  const [playerId, setPlayerId] = useState<string | null>(getStoredPlayerId())
+  const [playerName, setPlayerName] = useState(getInitialName)
+  const [roomName, setRoomName] = useState(getInitialRoom)
+  const [roomInput, setRoomInput] = useState(getInitialRoom)
+  const [bestScore, setBestScore] = useState(getStoredBestScore)
+  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([])
+  const [connectionStatus, setConnectionStatus] = useState('Connecting')
+  const [leaderboardStatus, setLeaderboardStatus] = useState('')
+  const playerIdRef = useRef<string | null>(playerId)
+  const playerNameRef = useRef(playerName)
+
+  const localPlayer = useMemo(() => {
+    return gameState?.players.find((player) => player.id === playerId) ?? null
+  }, [gameState, playerId])
+
+  const score = localPlayer?.score ?? 0
+  const playersOnline = gameState?.players.length ?? 0
+  const staminaPlayers = useMemo(() => {
+    if (!gameState) return []
+    const localId = playerId
+    return [...gameState.players].sort((a, b) => {
+      if (a.id === localId) return -1
+      if (b.id === localId) return 1
+      return b.score - a.score
+    })
+  }, [gameState, playerId])
+
+  const pushSnapshot = (state: GameStateSnapshot) => {
+    const now = Date.now()
+    const sampleOffset = state.now - now
+    const currentOffset = serverOffsetRef.current
+    serverOffsetRef.current =
+      currentOffset === null ? sampleOffset : currentOffset + (sampleOffset - currentOffset) * OFFSET_SMOOTHING
+
+    const lastSnapshotTime = lastSnapshotTimeRef.current
+    if (lastSnapshotTime !== null) {
+      const delta = state.now - lastSnapshotTime
+      if (delta > 0 && delta < 1000) {
+        tickIntervalRef.current = tickIntervalRef.current * 0.9 + delta * 0.1
+      }
+    }
+    lastSnapshotTimeRef.current = state.now
+
+    const buffer = snapshotBufferRef.current
+    buffer.push({ ...state, receivedAt: now })
+    buffer.sort((a, b) => a.now - b.now)
+    if (buffer.length > MAX_SNAPSHOT_BUFFER) {
+      buffer.splice(0, buffer.length - MAX_SNAPSHOT_BUFFER)
+    }
+  }
+
+  const getRenderSnapshot = () => {
+    const buffer = snapshotBufferRef.current
+    if (buffer.length === 0) return null
+    const offset = serverOffsetRef.current
+    if (offset === null) return buffer[buffer.length - 1]
+
+    const delay = Math.max(MIN_INTERP_DELAY_MS, tickIntervalRef.current * 1.5)
+    const renderTime = Date.now() + offset - delay
+    const snapshot = buildInterpolatedSnapshot(buffer, renderTime, MAX_EXTRAPOLATION_MS)
+    return snapshot
+  }
+
+  useEffect(() => {
+    playerIdRef.current = playerId
+  }, [playerId])
+
+  useEffect(() => {
+    playerNameRef.current = playerName
+  }, [playerName])
+
+  useEffect(() => {
+    if (score > bestScore) {
+      setBestScore(score)
+      storeBestScore(score)
+    }
+  }, [score, bestScore])
+
+  useEffect(() => {
+    storePlayerName(playerName)
+  }, [playerName])
+
+  useEffect(() => {
+    storeRoomName(roomName)
+    const url = new URL(window.location.href)
+    url.searchParams.set('room', roomName)
+    window.history.replaceState({}, '', url)
+  }, [roomName])
+
+  useEffect(() => {
+    const glCanvas = glCanvasRef.current
+    const hudCanvas = hudCanvasRef.current
+    if (!glCanvas || !hudCanvas) return
+    const hudCtx = hudCanvas.getContext('2d')
+    if (!hudCtx) return
+
+    const webgl = createWebGLScene(glCanvas)
+
+    const updateConfig = () => {
+      const rect = glCanvas.getBoundingClientRect()
+      if (!rect.width || !rect.height) return
+      const dpr = Math.min(window.devicePixelRatio || 1, 2)
+      webgl.resize(rect.width, rect.height, dpr)
+      hudCanvas.width = Math.round(rect.width * dpr)
+      hudCanvas.height = Math.round(rect.height * dpr)
+      hudCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      renderConfigRef.current = {
+        width: rect.width,
+        height: rect.height,
+        centerX: rect.width / 2,
+        centerY: rect.height / 2,
+      }
+    }
+
+    updateConfig()
+    const observer = new ResizeObserver(updateConfig)
+    observer.observe(glCanvas)
+    window.addEventListener('resize', updateConfig)
+    glCanvas.addEventListener('wheel', handleWheel, { passive: false })
+
+    let frameId = 0
+    const renderLoop = () => {
+      const config = renderConfigRef.current
+      if (config) {
+        const snapshot = getRenderSnapshot()
+        const localId = playerIdRef.current
+        const localHead =
+          snapshot?.players.find((player) => player.id === localId)?.snake[0] ?? null
+        const camera = updateCamera(localHead, cameraRef.current, cameraUpRef)
+        cameraRef.current = camera
+        const headScreen = webgl.render(
+          snapshot,
+          camera,
+          localId,
+          pointerRef.current,
+          cameraDistanceRef.current,
+        )
+        drawHud(
+          hudCtx,
+          config,
+          pointerRef.current.active ? pointerRef.current.angle : null,
+          headScreen,
+        )
+      }
+      frameId = window.requestAnimationFrame(renderLoop)
+    }
+
+    renderLoop()
+
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', updateConfig)
+      glCanvas.removeEventListener('wheel', handleWheel)
+      window.cancelAnimationFrame(frameId)
+      webgl.dispose()
+    }
+  }, [])
+
+  useEffect(() => {
+    let reconnectTimer: number | null = null
+    let cancelled = false
+
+    const connect = () => {
+      if (cancelled) return
+      const socket = new WebSocket(
+        resolveWebSocketUrl(`/api/room/${encodeURIComponent(roomName)}`),
+      )
+      socketRef.current = socket
+      snapshotBufferRef.current = []
+      serverOffsetRef.current = null
+      lastSnapshotTimeRef.current = null
+      tickIntervalRef.current = 50
+      setConnectionStatus('Connecting')
+      setGameState(null)
+
+      socket.addEventListener('open', () => {
+        setConnectionStatus('Connected')
+        sendJoin(socket)
+        startInputLoop()
+      })
+
+      socket.addEventListener('message', (event) => {
+        if (typeof event.data !== 'string') return
+        let payload: unknown
+        try {
+          payload = JSON.parse(event.data)
+        } catch {
+          return
+        }
+        if (!payload || typeof payload !== 'object') return
+        const message = payload as {
+          type?: string
+          playerId?: string
+          state?: GameStateSnapshot
+        }
+        if (message.type === 'init') {
+          if (message.playerId) {
+            setPlayerId(message.playerId)
+            storePlayerId(message.playerId)
+          }
+          if (message.state) {
+            pushSnapshot(message.state)
+            setGameState(message.state)
+          }
+          return
+        }
+        if (message.type === 'state') {
+          if (message.state) {
+            pushSnapshot(message.state)
+            setGameState(message.state)
+          }
+        }
+      })
+
+      socket.addEventListener('close', () => {
+        if (cancelled) return
+        setConnectionStatus('Reconnecting')
+        reconnectTimer = window.setTimeout(connect, 1500)
+      })
+
+      socket.addEventListener('error', () => {
+        socket.close()
+      })
+    }
+
+    connect()
+
+    return () => {
+      cancelled = true
+      if (reconnectTimer) window.clearTimeout(reconnectTimer)
+      socketRef.current?.close()
+      socketRef.current = null
+    }
+  }, [roomName])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.code === 'Space') {
+        event.preventDefault()
+        pointerRef.current.boost = true
+      }
+    }
+
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (event.code === 'Space') {
+        event.preventDefault()
+        pointerRef.current.boost = false
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshLeaderboard()
+    const interval = window.setInterval(() => {
+      void refreshLeaderboard()
+    }, 15000)
+    return () => window.clearInterval(interval)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (sendIntervalRef.current !== null) {
+        window.clearInterval(sendIntervalRef.current)
+      }
+      sendIntervalRef.current = null
+    }
+  }, [])
+
+  const updatePointer = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = glCanvasRef.current
+    if (!canvas) return
+    const rect = canvas.getBoundingClientRect()
+    const localX = event.clientX - rect.left
+    const localY = event.clientY - rect.top
+    const dx = localX - rect.width / 2
+    const dy = localY - rect.height / 2
+    pointerRef.current.angle = Math.atan2(dy, dx)
+    pointerRef.current.screenX = localX
+    pointerRef.current.screenY = localY
+    pointerRef.current.active = true
+  }
+
+  const startInputLoop = () => {
+    if (sendIntervalRef.current !== null) return
+    sendIntervalRef.current = window.setInterval(() => {
+      const socket = socketRef.current
+      if (!socket || socket.readyState !== WebSocket.OPEN) return
+      if (!pointerRef.current.active) return
+      const axis = axisFromPointer(pointerRef.current.angle, cameraRef.current)
+      socket.send(
+        JSON.stringify({
+          type: 'input',
+          axis,
+          boost: pointerRef.current.boost,
+        }),
+      )
+    }, 50)
+  }
+
+  const sendJoin = (socket: WebSocket) => {
+    if (socket.readyState !== WebSocket.OPEN) return
+    socket.send(
+      JSON.stringify({
+        type: 'join',
+        name: playerNameRef.current,
+        playerId: playerIdRef.current,
+      }),
+    )
+  }
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    event.currentTarget.setPointerCapture(event.pointerId)
+    updatePointer(event)
+  }
+
+  const handlePointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    updatePointer(event)
+  }
+
+  const handlePointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    event.currentTarget.releasePointerCapture(event.pointerId)
+  }
+
+  const handlePointerLeave = () => {
+    pointerRef.current.active = false
+  }
+
+  const handleWheel = (event: WheelEvent) => {
+    if (!Number.isFinite(event.deltaY) || event.deltaY === 0) return
+    if (event.cancelable) event.preventDefault()
+    const clampedDelta = clamp(event.deltaY, -120, 120)
+    const zoomFactor = Math.exp(clampedDelta * CAMERA_ZOOM_SENSITIVITY)
+    const nextDistance = clamp(
+      cameraDistanceRef.current * zoomFactor,
+      CAMERA_DISTANCE_MIN,
+      CAMERA_DISTANCE_MAX,
+    )
+    cameraDistanceRef.current = nextDistance
+  }
+
+  const requestRespawn = () => {
+    const socket = socketRef.current
+    if (!socket || socket.readyState !== WebSocket.OPEN) return
+    socket.send(JSON.stringify({ type: 'respawn' }))
+  }
+
+  const handleJoinRoom = () => {
+    const nextRoom = sanitizeRoomName(roomInput)
+    setRoomInput(nextRoom)
+    if (nextRoom !== roomName) {
+      setRoomName(nextRoom)
+    } else if (socketRef.current) {
+      sendJoin(socketRef.current)
+    }
+  }
+
+  const handleSubmitBestScore = async () => {
+    if (!bestScore) return
+    setLeaderboardStatus('Submitting...')
+    try {
+      const result = await submitBestScoreRequest(playerName, bestScore)
+      if (!result.ok) {
+        setLeaderboardStatus(result.error ?? 'Submission failed')
+        return
+      }
+      setLeaderboardStatus('Saved to leaderboard')
+      void refreshLeaderboard()
+    } catch {
+      setLeaderboardStatus('Submission failed')
+    }
+  }
+
+  async function refreshLeaderboard() {
+    try {
+      const scores = await fetchLeaderboardRequest()
+      setLeaderboard(scores)
+    } catch {
+      setLeaderboard([])
+    }
+  }
+
+  return (
+    <div className='app'>
+      <div className='game-card'>
+        <div className='scorebar'>
+          <div className='score'>Score: {score}</div>
+          <div className='status'>
+            Room {roomName} · {connectionStatus} · {playersOnline} online
+          </div>
+        </div>
+
+        <div className='play-area'>
+          <div className='game-surface'>
+            <canvas
+              ref={glCanvasRef}
+              className='game-canvas'
+              aria-label='Spherical snake arena'
+              onPointerDown={handlePointerDown}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerLeave={handlePointerLeave}
+              onPointerCancel={handlePointerLeave}
+              onContextMenu={(event) => event.preventDefault()}
+            />
+            <canvas ref={hudCanvasRef} className='hud-canvas' aria-hidden='true' />
+            {staminaPlayers.length > 0 && (
+              <div className='stamina-panel' aria-label='Stamina meters'>
+                {staminaPlayers.map((player) => {
+                  const pct = Math.round(clamp(player.stamina, 0, 1) * 100)
+                  const displayName =
+                    player.id === playerId ? `${player.name} (You)` : player.name
+                  const rowClass = [
+                    'stamina-row',
+                    player.id === playerId ? 'is-local' : '',
+                    player.alive ? '' : 'is-dead',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')
+                  return (
+                    <div key={player.id} className={rowClass}>
+                      <div className='stamina-header'>
+                        <span className='stamina-name'>{displayName}</span>
+                        <span className='stamina-value'>{pct}%</span>
+                      </div>
+                      <div className='stamina-bar'>
+                        <div className='stamina-fill' style={{ width: `${pct}%` }} />
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+          {localPlayer && !localPlayer.alive && (
+            <div className='overlay'>
+              <div className='overlay-title'>Good game!</div>
+              <div className='overlay-subtitle'>Your trail is still glowing.</div>
+              <button type='button' onClick={requestRespawn}>
+                Play again
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className='control-panel'>
+          <div className='control-row'>
+            <label className='control-label' htmlFor='room-name'>
+              Room
+            </label>
+            <input
+              id='room-name'
+              value={roomInput}
+              onChange={(event) => setRoomInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault()
+                  handleJoinRoom()
+                }
+              }}
+            />
+            <button type='button' onClick={handleJoinRoom}>
+              Join
+            </button>
+          </div>
+          <div className='control-row muted'>
+            <span>Share the room name to invite players.</span>
+          </div>
+          <div className='control-row'>
+            <label className='control-label' htmlFor='player-name'>
+              Pilot name
+            </label>
+            <input
+              id='player-name'
+              value={playerName}
+              onChange={(event) => setPlayerName(event.target.value)}
+              onBlur={() => socketRef.current && sendJoin(socketRef.current)}
+            />
+            <button
+              type='button'
+              onClick={() => socketRef.current && sendJoin(socketRef.current)}
+            >
+              Update
+            </button>
+          </div>
+          <div className='control-row muted'>
+            <span>Point to steer. Scroll to zoom. Press space to boost.</span>
+          </div>
+          <div className='control-row muted'>
+            <span>Best this run: {bestScore}</span>
+          </div>
+        </div>
+      </div>
+
+      <aside className='leaderboard'>
+        <div className='leaderboard-header'>
+          <h2>Global leaderboard</h2>
+          <button type='button' onClick={handleSubmitBestScore}>
+            Submit best
+          </button>
+        </div>
+        {leaderboardStatus && <div className='leaderboard-status'>{leaderboardStatus}</div>}
+        <ol>
+          {leaderboard.length === 0 && <li className='muted'>No scores yet.</li>}
+          {leaderboard.map((entry, index) => (
+            <li key={`${entry.name}-${entry.created_at}-${index}`}>
+              <span>{entry.name}</span>
+              <span>{entry.score}</span>
+            </li>
+          ))}
+        </ol>
+      </aside>
+    </div>
+  )
+}
