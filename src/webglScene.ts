@@ -72,6 +72,8 @@ const TAIL_EXTEND_MAX_SHRINK_SPEED = 0.35
 const TAIL_EXTEND_MAX_SHRINK_SPEED_ADD = 0.25
 const TAIL_GROWTH_RATE_UP = 0.35
 const TAIL_GROWTH_RATE_DOWN = 1.2
+const TAIL_GROWTH_EASE = 2.5
+const TAIL_EXTEND_CURVE_BLEND = 0.65
 const DEBUG_TAIL = false
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
@@ -595,6 +597,55 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     return extended
   }
 
+  const computeTailExtendDirection = (
+    curvePoints: THREE.Vector3[],
+    preferFallbackBelow: number,
+  ) => {
+    if (curvePoints.length < 2) return null
+    const tailPos = curvePoints[curvePoints.length - 1]
+    const prevPos = curvePoints[curvePoints.length - 2]
+    const tailNormal = tailPos.clone().normalize()
+
+    const projectToTangent = (dir: THREE.Vector3) => {
+      dir.addScaledVector(tailNormal, -dir.dot(tailNormal))
+      return dir
+    }
+
+    const lastDir = projectToTangent(tailPos.clone().sub(prevPos))
+    const lastLen = lastDir.length()
+
+    let prevDir: THREE.Vector3 | null = null
+    let prevLen = 0
+    if (curvePoints.length >= 3) {
+      const prevPrev = curvePoints[curvePoints.length - 3]
+      prevDir = projectToTangent(prevPos.clone().sub(prevPrev))
+      prevLen = prevDir.length()
+    }
+
+    if (lastLen < preferFallbackBelow && prevDir && prevLen > 1e-8) {
+      return prevDir.multiplyScalar(1 / prevLen)
+    }
+
+    if (lastLen > 1e-8 && prevDir && prevLen > 1e-8) {
+      lastDir.multiplyScalar(1 / lastLen)
+      prevDir.multiplyScalar(1 / prevLen)
+      if (prevDir.dot(lastDir) < 0) {
+        prevDir.multiplyScalar(-1)
+      }
+      return prevDir.lerp(lastDir, TAIL_EXTEND_CURVE_BLEND).normalize()
+    }
+
+    if (lastLen > 1e-8) {
+      return lastDir.multiplyScalar(1 / lastLen)
+    }
+
+    if (prevDir && prevLen > 1e-8) {
+      return prevDir.multiplyScalar(1 / prevLen)
+    }
+
+    return null
+  }
+
 
   const updateSnake = (player: PlayerSnapshot, isLocal: boolean, deltaSeconds: number) => {
     let visual = snakes.get(player.id)
@@ -767,7 +818,8 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
         ? Math.max(0, referenceLength * TAIL_DIR_MIN_RATIO)
         : 0
       const baseLength = tailSegmentLength
-      const growthExtra = referenceLength * smoothedTailGrowth
+      const easedGrowth = Math.pow(clamp(smoothedTailGrowth, 0, 1), TAIL_GROWTH_EASE)
+      const growthExtra = referenceLength * easedGrowth
       let extraLengthTarget = growthExtra
       let minExtraLength = 0
       if (tailAddState) {
@@ -843,11 +895,13 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       tailExtraTarget = extraTargetClamped
       tailExtensionDistance = extensionDistance
       lastTailExtensionDistances.set(player.id, extensionDistance)
-      if (tailSegmentDir) {
-        tailExtendOverride = tailSegmentDir.clone()
+      const extendDir = computeTailExtendDirection(curvePoints, tailDirMinLen)
+      if (extendDir) {
+        tailExtendOverride = extendDir
       }
       if (debug && (extensionDistance > 0 || extraTargetClamped > 0 || tailAddState)) {
         tailDirDebug =
+          tailExtendOverride ??
           tailSegmentDir ??
           computeTailDirection(
             curvePoints,
