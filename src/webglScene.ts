@@ -62,11 +62,15 @@ const DIGESTION_MAX_BULGE = 0.7
 const DIGESTION_START_RINGS = 3
 const DIGESTION_START_MAX = 0.18
 const TAIL_ADD_SMOOTH_MS = 180
-const TAIL_EXTEND_RATE_UP = 12
+const TAIL_EXTEND_RATE_UP = 0.14
 const TAIL_EXTEND_RATE_DOWN = 2.6
-const TAIL_EXTEND_RATE_UP_ADD = 10
+const TAIL_EXTEND_RATE_UP_ADD = 0.12
 const TAIL_EXTEND_RATE_DOWN_ADD = 1.6
-const TAIL_GROWTH_RATE_UP = 0.6
+const TAIL_EXTEND_MAX_GROW_SPEED = 0.12
+const TAIL_EXTEND_MAX_GROW_SPEED_ADD = 0.08
+const TAIL_EXTEND_MAX_SHRINK_SPEED = 0.35
+const TAIL_EXTEND_MAX_SHRINK_SPEED_ADD = 0.25
+const TAIL_GROWTH_RATE_UP = 0.35
 const TAIL_GROWTH_RATE_DOWN = 1.2
 const DEBUG_TAIL = false
 
@@ -644,13 +648,16 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     const digestionState = buildDigestionVisuals(player.digestions)
     const previousGrowth = tailGrowthStates.get(player.id)
     const growthSeed = previousGrowth ?? digestionState.tailGrowth
-    const smoothedTailGrowth = smoothValue(
+    let smoothedTailGrowth = smoothValue(
       growthSeed,
       digestionState.tailGrowth,
       deltaSeconds,
       TAIL_GROWTH_RATE_UP,
       TAIL_GROWTH_RATE_DOWN,
     )
+    if (digestionState.tailGrowth > 0) {
+      smoothedTailGrowth = Math.max(previousGrowth ?? 0, smoothedTailGrowth)
+    }
     tailGrowthStates.set(player.id, smoothedTailGrowth)
     const radius = isLocal ? SNAKE_RADIUS * 1.1 : SNAKE_RADIUS
     const centerlineRadius = PLANET_RADIUS + radius * SNAKE_LIFT_FACTOR
@@ -804,6 +811,26 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
           clampState.value = extensionDistance
         }
       }
+      const prevExtension = lastTailExtensionDistances.get(player.id)
+      if (prevExtension !== undefined) {
+        const maxGrow =
+          (tailAddState ? TAIL_EXTEND_MAX_GROW_SPEED_ADD : TAIL_EXTEND_MAX_GROW_SPEED) *
+          deltaSeconds
+        const maxShrink =
+          (tailAddState
+            ? TAIL_EXTEND_MAX_SHRINK_SPEED_ADD
+            : TAIL_EXTEND_MAX_SHRINK_SPEED) * deltaSeconds
+        extensionDistance = clamp(
+          extensionDistance,
+          prevExtension - maxShrink,
+          prevExtension + maxGrow,
+        )
+        const limitedState = tailExtraStates.get(player.id)
+        if (limitedState) {
+          limitedState.value = extensionDistance
+        }
+      }
+      extensionDistance = Math.min(extensionDistance, extraTargetClamped)
       if (seedOverride !== null) {
         lastTailExtensionDistances.set(player.id, extensionDistance)
       }
