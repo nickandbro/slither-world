@@ -29,6 +29,13 @@ pub struct Room {
   running: AtomicBool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum DebugKillTarget {
+  Any,
+  Bot,
+  Human,
+}
+
 #[derive(Debug)]
 struct SessionEntry {
   sender: UnboundedSender<String>,
@@ -116,6 +123,11 @@ impl Room {
         state.handle_input(session_id, axis, boost);
       }
     }
+  }
+
+  pub async fn debug_kill(&self, target: DebugKillTarget) -> Option<String> {
+    let mut state = self.state.lock().await;
+    state.debug_kill(target)
   }
 
   fn ensure_loop(self: &Arc<Self>) {
@@ -232,6 +244,27 @@ impl RoomState {
     player.last_seen = Self::now_millis();
   }
 
+  fn debug_kill(&mut self, target: DebugKillTarget) -> Option<String> {
+    let target_id = self
+      .players
+      .iter()
+      .filter(|(_, player)| player.alive)
+      .filter(|(_, player)| match target {
+        DebugKillTarget::Any => true,
+        DebugKillTarget::Bot => player.is_bot,
+        DebugKillTarget::Human => !player.is_bot && player.connected,
+      })
+      .map(|(id, _)| id.clone())
+      .next();
+
+    if let Some(id) = target_id {
+      self.handle_death(&id);
+      return Some(id);
+    }
+
+    None
+  }
+
   fn session_player_id(&self, session_id: &str) -> Option<String> {
     self
       .sessions
@@ -293,7 +326,6 @@ impl RoomState {
     if self.bot_count() == 0 {
       return;
     }
-    let now = Self::now_millis();
     let pellets = self.pellets.clone();
     let bot_ids: Vec<String> = self
       .players
@@ -302,56 +334,68 @@ impl RoomState {
       .collect();
 
     for bot_id in bot_ids {
-      let mut should_respawn = false;
-      {
-        let Some(player) = self.players.get_mut(&bot_id) else { continue };
-        if !player.alive {
-          if let Some(respawn_at) = player.respawn_at {
-            if now >= respawn_at {
-              should_respawn = true;
-            }
-          }
-        } else {
-          let Some(head) = player.snake.first() else { continue };
-          let head_point = Point {
-            x: head.x,
-            y: head.y,
-            z: head.z,
-          };
+      let Some(player) = self.players.get_mut(&bot_id) else { continue };
+      if !player.alive {
+        continue;
+      }
 
-          let mut nearest: Option<(Point, f64)> = None;
-          for pellet in &pellets {
-            let delta = Point {
-              x: pellet.x - head_point.x,
-              y: pellet.y - head_point.y,
-              z: pellet.z - head_point.z,
-            };
-            let dist = length(delta);
-            match nearest {
-              Some((_, best)) if dist >= best => {}
-              _ => nearest = Some((*pellet, dist)),
-            }
-          }
+      let Some(head) = player.snake.first() else { continue };
+      let head_point = Point {
+        x: head.x,
+        y: head.y,
+        z: head.z,
+      };
 
-          if let Some((target_pellet, dist)) = nearest {
-            let axis_raw = cross(head_point, target_pellet);
-            let axis = if length(axis_raw) < 1e-6 {
-              random_axis()
-            } else {
-              normalize(axis_raw)
-            };
-            player.target_axis = axis;
-            player.boost = dist > BOT_BOOST_DISTANCE && player.stamina > BOT_MIN_STAMINA_TO_BOOST;
-          } else {
-            player.target_axis = random_axis();
-            player.boost = false;
-          }
+      let mut nearest: Option<(Point, f64)> = None;
+      for pellet in &pellets {
+        let delta = Point {
+          x: pellet.x - head_point.x,
+          y: pellet.y - head_point.y,
+          z: pellet.z - head_point.z,
+        };
+        let dist = length(delta);
+        match nearest {
+          Some((_, best)) if dist >= best => {}
+          _ => nearest = Some((*pellet, dist)),
         }
       }
 
-      if should_respawn {
-        self.respawn_player(&bot_id);
+      if let Some((target_pellet, dist)) = nearest {
+        let axis_raw = cross(head_point, target_pellet);
+        let axis = if length(axis_raw) < 1e-6 {
+          random_axis()
+        } else {
+          normalize(axis_raw)
+        };
+        player.target_axis = axis;
+        player.boost = dist > BOT_BOOST_DISTANCE && player.stamina > BOT_MIN_STAMINA_TO_BOOST;
+      } else {
+        player.target_axis = random_axis();
+        player.boost = false;
       }
+    }
+  }
+
+  fn auto_respawn_players(&mut self, now: i64) {
+    let respawn_ids: Vec<String> = self
+      .players
+      .iter()
+      .filter_map(|(id, player)| {
+        if player.alive {
+          return None;
+        }
+        if !player.is_bot && !player.connected {
+          return None;
+        }
+        match player.respawn_at {
+          Some(respawn_at) if now >= respawn_at => Some(id.clone()),
+          _ => None,
+        }
+      })
+      .collect();
+
+    for id in respawn_ids {
+      self.respawn_player(&id);
     }
   }
 
@@ -454,6 +498,7 @@ impl RoomState {
 
     self.ensure_bots();
     self.update_bots();
+    self.auto_respawn_players(now);
 
     let player_ids: Vec<String> = self.players.keys().cloned().collect();
     for id in &player_ids {
@@ -579,6 +624,7 @@ impl RoomState {
     if !player.alive {
       return;
     }
+    tracing::debug!(player_id, is_bot = player.is_bot, "player died");
     player.alive = false;
     player.respawn_at = Some(Self::now_millis() + RESPAWN_COOLDOWN_MS);
     player.digestions.clear();
@@ -610,6 +656,7 @@ impl RoomState {
     player.respawn_at = None;
     player.snake = spawned.snake;
     player.digestions.clear();
+    tracing::debug!(player_id, is_bot = player.is_bot, "player respawned");
   }
 
   fn build_state_snapshot(&self) -> GameStateSnapshot {

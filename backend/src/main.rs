@@ -3,7 +3,7 @@ use axum::{
   extract::ws::{Message, WebSocket},
   http::{Method, StatusCode},
   response::IntoResponse,
-  routing::get,
+  routing::{get, post},
   Json, Router,
 };
 use dashmap::DashMap;
@@ -22,6 +22,7 @@ mod game;
 mod shared;
 
 use game::room::Room;
+use game::room::DebugKillTarget;
 
 const MAX_SCORE: i64 = 1_000_000;
 const DEFAULT_LIMIT: i64 = 10;
@@ -31,6 +32,7 @@ const MAX_LIMIT: i64 = 50;
 struct AppState {
   rooms: DashMap<String, Arc<Room>>,
   db: SqlitePool,
+  debug_commands: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -62,6 +64,19 @@ struct ErrorResponse {
   error: String,
 }
 
+#[derive(Debug, Serialize)]
+struct DebugKillResponse {
+  ok: bool,
+  #[serde(rename = "playerId")]
+  player_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DebugKillQuery {
+  room: Option<String>,
+  target: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
   tracing_subscriber::fmt()
@@ -81,9 +96,14 @@ async fn main() -> anyhow::Result<()> {
     .await?;
   sqlx::migrate!("./migrations").run(&db).await?;
 
+  let debug_commands = env::var("ENABLE_DEBUG_COMMANDS")
+    .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+    .unwrap_or(false);
+
   let state = Arc::new(AppState {
     rooms: DashMap::new(),
     db,
+    debug_commands,
   });
 
   let cors = CorsLayer::new()
@@ -91,12 +111,17 @@ async fn main() -> anyhow::Result<()> {
     .allow_methods([Method::GET, Method::POST])
     .allow_headers(Any);
 
-  let app = Router::new()
+  let mut app: Router<Arc<AppState>> = Router::new()
     .route("/api/health", get(health))
     .route("/api/leaderboard", get(leaderboard_get).post(leaderboard_post))
     .route("/api/room/:room", get(ws_handler))
-    .layer(cors)
-    .with_state(state);
+    .layer(cors);
+
+  if debug_commands {
+    app = app.route("/api/debug/kill", post(debug_kill));
+  }
+
+  let app: Router = app.with_state(state);
 
   let port: u16 = env::var("PORT")
     .ok()
@@ -200,6 +225,46 @@ async fn leaderboard_get(
     .collect::<Vec<_>>();
 
   (StatusCode::OK, Json(LeaderboardResponse { scores })).into_response()
+}
+
+async fn debug_kill(
+  State(state): State<Arc<AppState>>,
+  Query(params): Query<DebugKillQuery>,
+) -> impl IntoResponse {
+  if !state.debug_commands {
+    return (
+      StatusCode::FORBIDDEN,
+      Json(ErrorResponse {
+        ok: false,
+        error: "Debug commands disabled".to_string(),
+      }),
+    )
+      .into_response();
+  }
+
+  let room_name = params.room.unwrap_or_else(|| "main".to_string());
+  let target = match params.target.as_deref() {
+    Some("bot") => DebugKillTarget::Bot,
+    Some("human") => DebugKillTarget::Human,
+    _ => DebugKillTarget::Any,
+  };
+  let room = state.room(room_name);
+
+  match room.debug_kill(target).await {
+    Some(player_id) => Json(DebugKillResponse {
+      ok: true,
+      player_id: Some(player_id),
+    })
+    .into_response(),
+    None => (
+      StatusCode::NOT_FOUND,
+      Json(ErrorResponse {
+        ok: false,
+        error: "No matching player to kill".to_string(),
+      }),
+    )
+      .into_response(),
+  }
 }
 
 async fn leaderboard_post(

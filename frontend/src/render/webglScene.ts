@@ -65,6 +65,10 @@ type TailDebugState = {
   lastDirAngleBucket: number
 }
 
+type DeathState = {
+  start: number
+}
+
 type Lake = {
   center: THREE.Vector3
   radius: number
@@ -118,6 +122,9 @@ const LAKE_CENTER_PIT_RATIO = 0.35
 const LAKE_SURFACE_INSET_RATIO = 0.5
 const LAKE_SURFACE_EXTRA_INSET = PLANET_RADIUS * 0.01
 const LAKE_SURFACE_DEPTH_EPS = PLANET_RADIUS * 0.0015
+const DEATH_FADE_DURATION = 3
+  const DEATH_START_OPACITY = 0.8
+const DEATH_VISIBILITY_CUTOFF = 0.02
 const LAKE_WATER_OVERDRAW = PLANET_RADIUS * 0.01
 const LAKE_TERRAIN_CLAMP_EPS = PLANET_RADIUS * 0.0008
 const LAKE_WATER_MASK_THRESHOLD = 0
@@ -1054,6 +1061,8 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   let lastFrameTime = performance.now()
 
   const snakes = new Map<string, SnakeVisual>()
+  const deathStates = new Map<string, DeathState>()
+  const lastAliveStates = new Map<string, boolean>()
   const lastHeadPositions = new Map<string, THREE.Vector3>()
   const lastForwardDirections = new Map<string, THREE.Vector3>()
   const lastTailDirections = new Map<string, THREE.Vector3>()
@@ -1076,6 +1085,51 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   const tempVectorG = new THREE.Vector3()
   const tempQuat = new THREE.Quaternion()
   const tongueUp = new THREE.Vector3(0, 1, 0)
+  const debugEnabled = import.meta.env.DEV || import.meta.env.VITE_E2E_DEBUG === '1'
+
+  const attachDebugApi = () => {
+    if (!debugEnabled || typeof window === 'undefined') return
+    const debugWindow = window as Window & {
+      __SNAKE_DEBUG__?: {
+        getSnakeOpacity: (id: string) => number | null
+        getSnakeHeadPosition: (id: string) => { x: number; y: number; z: number } | null
+        isSnakeVisible: (id: string) => boolean | null
+      }
+    }
+    debugWindow.__SNAKE_DEBUG__ = {
+      getSnakeOpacity: (id: string) => {
+        const visual = snakes.get(id)
+        return visual ? visual.tube.material.opacity : null
+      },
+      getSnakeHeadPosition: (id: string) => {
+        const visual = snakes.get(id)
+        if (!visual) return null
+        const pos = visual.head.position
+        return { x: pos.x, y: pos.y, z: pos.z }
+      },
+      isSnakeVisible: (id: string) => {
+        const visual = snakes.get(id)
+        return visual ? visual.group.visible : null
+      },
+    }
+  }
+
+  attachDebugApi()
+
+  const resetSnakeTransientState = (id: string) => {
+    lastHeadPositions.delete(id)
+    lastForwardDirections.delete(id)
+    lastTailDirections.delete(id)
+    lastSnakeLengths.delete(id)
+    tailAddStates.delete(id)
+    tailExtraStates.delete(id)
+    lastTailBasePositions.delete(id)
+    lastTailExtensionDistances.delete(id)
+    lastTailTotalLengths.delete(id)
+    tailGrowthStates.delete(id)
+    tailDebugStates.delete(id)
+    tongueStates.delete(id)
+  }
 
   {
     const rng = createSeededRandom(0x6f35d2a1)
@@ -1360,14 +1414,17 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     const tail = new THREE.Mesh(tailGeometry, tubeMaterial)
     group.add(tail)
 
-    const eyeLeft = new THREE.Mesh(eyeGeometry, eyeMaterial)
-    const eyeRight = new THREE.Mesh(eyeGeometry, eyeMaterial)
-    const pupilLeft = new THREE.Mesh(pupilGeometry, pupilMaterial)
-    const pupilRight = new THREE.Mesh(pupilGeometry, pupilMaterial)
+    const eyeMaterialLocal = eyeMaterial.clone()
+    const pupilMaterialLocal = pupilMaterial.clone()
+    const tongueMaterialLocal = tongueMaterial.clone()
+    const eyeLeft = new THREE.Mesh(eyeGeometry, eyeMaterialLocal)
+    const eyeRight = new THREE.Mesh(eyeGeometry, eyeMaterialLocal)
+    const pupilLeft = new THREE.Mesh(pupilGeometry, pupilMaterialLocal)
+    const pupilRight = new THREE.Mesh(pupilGeometry, pupilMaterialLocal)
     const tongue = new THREE.Group()
-    const tongueBase = new THREE.Mesh(tongueBaseGeometry, tongueMaterial)
-    const tongueForkLeft = new THREE.Mesh(tongueForkGeometry, tongueMaterial)
-    const tongueForkRight = new THREE.Mesh(tongueForkGeometry, tongueMaterial)
+    const tongueBase = new THREE.Mesh(tongueBaseGeometry, tongueMaterialLocal)
+    const tongueForkLeft = new THREE.Mesh(tongueForkGeometry, tongueMaterialLocal)
+    const tongueForkRight = new THREE.Mesh(tongueForkGeometry, tongueMaterialLocal)
     tongueForkLeft.rotation.z = TONGUE_FORK_SPREAD
     tongueForkRight.rotation.z = -TONGUE_FORK_SPREAD
     tongue.add(tongueBase)
@@ -1397,11 +1454,24 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     }
   }
 
-  const updateSnakeMaterial = (material: THREE.MeshStandardMaterial, color: string, isLocal: boolean) => {
+  const updateSnakeMaterial = (
+    material: THREE.MeshStandardMaterial,
+    color: string,
+    isLocal: boolean,
+    opacity: number,
+    emissiveIntensity?: number,
+  ) => {
     const base = new THREE.Color(color)
     material.color.copy(base)
     material.emissive.copy(base)
-    material.emissiveIntensity = isLocal ? 0.3 : 0.12
+    material.emissiveIntensity = emissiveIntensity ?? (isLocal ? 0.3 : 0.12)
+    material.opacity = opacity
+    const shouldBeTransparent = opacity < 0.999
+    if (material.transparent !== shouldBeTransparent) {
+      material.transparent = shouldBeTransparent
+      material.needsUpdate = true
+    }
+    material.depthWrite = !shouldBeTransparent
   }
 
   const buildTailCapGeometry = (
@@ -1985,8 +2055,38 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       visual.color = player.color
     }
 
-    updateSnakeMaterial(visual.tube.material, visual.color, isLocal)
-    updateSnakeMaterial(visual.head.material, visual.color, isLocal)
+    const wasAlive = lastAliveStates.get(player.id)
+    if (wasAlive === undefined || wasAlive !== player.alive) {
+      if (!player.alive) {
+        deathStates.set(player.id, { start: performance.now() })
+      } else {
+        deathStates.delete(player.id)
+        resetSnakeTransientState(player.id)
+      }
+      lastAliveStates.set(player.id, player.alive)
+    }
+
+    let opacity = 1
+    if (!player.alive) {
+      const deathState = deathStates.get(player.id)
+      const start = deathState?.start ?? performance.now()
+      const elapsed = (performance.now() - start) / 1000
+      const t = clamp(elapsed / DEATH_FADE_DURATION, 0, 1)
+      opacity = DEATH_START_OPACITY * (1 - t)
+    }
+
+    visual.group.visible = opacity > DEATH_VISIBILITY_CUTOFF
+
+    updateSnakeMaterial(visual.tube.material, visual.color, isLocal, opacity)
+    updateSnakeMaterial(visual.head.material, visual.color, isLocal, opacity)
+    updateSnakeMaterial(visual.tail.material, visual.color, isLocal, opacity)
+    updateSnakeMaterial(visual.eyeLeft.material, '#ffffff', false, opacity, 0)
+    updateSnakeMaterial(visual.eyeRight.material, '#ffffff', false, opacity, 0)
+    updateSnakeMaterial(visual.pupilLeft.material, '#1b1b1b', false, opacity, 0)
+    updateSnakeMaterial(visual.pupilRight.material, '#1b1b1b', false, opacity, 0)
+    updateSnakeMaterial(visual.tongueBase.material, '#ff6f9f', false, opacity, 0.3)
+    updateSnakeMaterial(visual.tongueForkLeft.material, '#ff6f9f', false, opacity, 0.3)
+    updateSnakeMaterial(visual.tongueForkRight.material, '#ff6f9f', false, opacity, 0.3)
 
     const nodes = player.snake
     const debug = isTailDebugEnabled() && isLocal
@@ -2514,16 +2614,16 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     }
     visual.tube.material.dispose()
     visual.head.material.dispose()
-    lastSnakeLengths.delete(id)
-    lastTailDirections.delete(id)
-    tailAddStates.delete(id)
-    tailExtraStates.delete(id)
-    lastTailBasePositions.delete(id)
-    lastTailExtensionDistances.delete(id)
-    lastTailTotalLengths.delete(id)
-    tailGrowthStates.delete(id)
-    tailDebugStates.delete(id)
-    tongueStates.delete(id)
+    visual.eyeLeft.material.dispose()
+    visual.eyeRight.material.dispose()
+    visual.pupilLeft.material.dispose()
+    visual.pupilRight.material.dispose()
+    visual.tongueBase.material.dispose()
+    visual.tongueForkLeft.material.dispose()
+    visual.tongueForkRight.material.dispose()
+    resetSnakeTransientState(id)
+    deathStates.delete(id)
+    lastAliveStates.delete(id)
   }
 
   const updateSnakes = (
@@ -2750,6 +2850,11 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       removeSnake(visual, id)
     }
     snakes.clear()
+
+    if (debugEnabled && typeof window !== 'undefined') {
+      const debugWindow = window as Window & { __SNAKE_DEBUG__?: unknown }
+      delete debugWindow.__SNAKE_DEBUG__
+    }
   }
 
   return {

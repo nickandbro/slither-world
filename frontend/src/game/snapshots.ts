@@ -25,6 +25,9 @@ function blendDigestions(a: number[], b: number[], t: number) {
 }
 
 function blendPlayers(a: PlayerSnapshot, b: PlayerSnapshot, t: number): PlayerSnapshot {
+  if (a.alive !== b.alive) {
+    return b
+  }
   const maxLength = Math.max(a.snake.length, b.snake.length)
   const snake: Point[] = []
   const tailA = a.snake[a.snake.length - 1]

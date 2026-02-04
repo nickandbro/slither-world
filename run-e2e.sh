@@ -43,7 +43,7 @@ fi
 
 (
   cd "${ROOT_DIR}/backend"
-  PORT="${BACKEND_PORT}" DATABASE_URL="${DATABASE_URL}" cargo run
+  PORT="${BACKEND_PORT}" DATABASE_URL="${DATABASE_URL}" ENABLE_DEBUG_COMMANDS=1 cargo run
 ) &
 BACKEND_PID=$!
 
@@ -60,7 +60,7 @@ fi
 
 (
   cd "${ROOT_DIR}/frontend"
-  VITE_BACKEND_URL="${BACKEND_URL}" npm run dev -- --port "${FRONTEND_PORT}" --strictPort
+  VITE_BACKEND_URL="${BACKEND_URL}" VITE_E2E_DEBUG=1 npm run dev -- --port "${FRONTEND_PORT}" --strictPort
 ) &
 FRONTEND_PID=$!
 
