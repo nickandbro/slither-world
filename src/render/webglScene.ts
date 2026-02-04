@@ -98,6 +98,9 @@ type WebGLScene = {
 
 const PLANET_RADIUS = 1
 const PLANET_FIBONACCI_POINTS = 2048
+const LAKE_SURFACE_POINTS = PLANET_FIBONACCI_POINTS * 3
+const LAKE_SURFACE_SEGMENTS = 96
+const LAKE_SURFACE_RINGS = 64
 const LAKE_COUNT = 2
 const LAKE_MIN_ANGLE = 0.9
 const LAKE_MAX_ANGLE = 1.3
@@ -114,7 +117,11 @@ const LAKE_CENTER_PIT_START = 0.72
 const LAKE_CENTER_PIT_RATIO = 0.35
 const LAKE_SURFACE_INSET_RATIO = 0.5
 const LAKE_SURFACE_EXTRA_INSET = PLANET_RADIUS * 0.01
-const LAKE_SURFACE_THRESHOLD = 0.12
+const LAKE_SURFACE_DEPTH_EPS = PLANET_RADIUS * 0.0015
+const LAKE_WATER_OVERDRAW = PLANET_RADIUS * 0.01
+const LAKE_TERRAIN_CLAMP_EPS = PLANET_RADIUS * 0.0008
+const LAKE_WATER_MASK_THRESHOLD = 0
+const LAKE_GRID_MASK_THRESHOLD = LAKE_WATER_MASK_THRESHOLD
 const LAKE_EXCLUSION_THRESHOLD = 0.18
 const SNAKE_RADIUS = 0.045
 const HEAD_RADIUS = SNAKE_RADIUS * 1.35
@@ -385,32 +392,152 @@ const applyLakeDepressions = (geometry: THREE.BufferGeometry, lakes: Lake[]) => 
   for (let i = 0; i < positions.count; i += 1) {
     normal.set(positions.getX(i), positions.getY(i), positions.getZ(i)).normalize()
     const sample = sampleLakes(normal, lakes, temp)
-    const radius = PLANET_RADIUS - sample.depth
+    let depth = sample.depth
+    if (sample.lake && sample.boundary > LAKE_WATER_MASK_THRESHOLD) {
+      const surfaceDepth = sample.lake.surfaceInset
+      // Keep lake beds below the rendered water surface to avoid visible seams.
+      depth = Math.max(depth, surfaceDepth + LAKE_TERRAIN_CLAMP_EPS)
+    }
+    const radius = PLANET_RADIUS - depth
     positions.setXYZ(i, normal.x * radius, normal.y * radius, normal.z * radius)
   }
   positions.needsUpdate = true
   geometry.computeVertexNormals()
   geometry.computeBoundingSphere()
 }
-const createLakeSurfaceGeometry = (baseGeometry: THREE.BufferGeometry, lakes: Lake[]) => {
-  const positions = baseGeometry.attributes.position
+const createLakeSurfaceGeometry = (sampleGeometry: THREE.BufferGeometry, lakes: Lake[]) => {
+  const basePositions = sampleGeometry.attributes.position
   const lakePositions: number[] = []
   const lakeNormals: number[] = []
   const a = new THREE.Vector3()
   const b = new THREE.Vector3()
   const c = new THREE.Vector3()
+  const ab = new THREE.Vector3()
+  const bc = new THREE.Vector3()
+  const ca = new THREE.Vector3()
   const centroid = new THREE.Vector3()
   const normal = new THREE.Vector3()
   const temp = new THREE.Vector3()
-  for (let i = 0; i < positions.count; i += 3) {
-    a.set(positions.getX(i), positions.getY(i), positions.getZ(i))
-    b.set(positions.getX(i + 1), positions.getY(i + 1), positions.getZ(i + 1))
-    c.set(positions.getX(i + 2), positions.getY(i + 2), positions.getZ(i + 2))
-    centroid.copy(a).add(b).add(c).multiplyScalar(1 / 3).normalize()
-    const sample = sampleLakes(centroid, lakes, temp)
-    if (sample.boundary <= LAKE_SURFACE_THRESHOLD || !sample.lake) continue
+  const debug = isLakeDebugEnabled()
+  const stats = debug
+    ? {
+        total: 0,
+        included: 0,
+        excludedNoLake: 0,
+        excludedShallow: 0,
+        boundary: 0,
+        includedByDepth: 0,
+        includedByBoundary: 0,
+        maxBoundary: 0,
+        minBoundary: Number.POSITIVE_INFINITY,
+        minDepth: Number.POSITIVE_INFINITY,
+        maxDepth: 0,
+        minWaterLevel: Number.POSITIVE_INFINITY,
+        maxWaterLevel: 0,
+      }
+    : null
+  const samples: Array<{ sample: ReturnType<typeof sampleLakes>; depth: number }> = []
+  const pushSample = (point: THREE.Vector3) => {
+    normal.copy(point).normalize()
+    const sample = sampleLakes(normal, lakes, temp)
+    samples.push({ sample, depth: sample.depth })
+  }
+  for (let i = 0; i < basePositions.count; i += 3) {
+    if (stats) stats.total += 1
+    a.set(basePositions.getX(i), basePositions.getY(i), basePositions.getZ(i))
+    b.set(basePositions.getX(i + 1), basePositions.getY(i + 1), basePositions.getZ(i + 1))
+    c.set(basePositions.getX(i + 2), basePositions.getY(i + 2), basePositions.getZ(i + 2))
+    samples.length = 0
 
-    const surfaceRadius = PLANET_RADIUS - sample.lake.surfaceInset
+    pushSample(a)
+    pushSample(b)
+    pushSample(c)
+
+    ab.copy(a).lerp(b, 0.5)
+    pushSample(ab)
+    bc.copy(b).lerp(c, 0.5)
+    pushSample(bc)
+    ca.copy(c).lerp(a, 0.5)
+    pushSample(ca)
+
+    ab.copy(a).lerp(b, 1 / 3)
+    pushSample(ab)
+    ab.copy(a).lerp(b, 2 / 3)
+    pushSample(ab)
+    bc.copy(b).lerp(c, 1 / 3)
+    pushSample(bc)
+    bc.copy(b).lerp(c, 2 / 3)
+    pushSample(bc)
+    ca.copy(c).lerp(a, 1 / 3)
+    pushSample(ca)
+    ca.copy(c).lerp(a, 2 / 3)
+    pushSample(ca)
+
+    centroid.copy(a).add(b).add(c).multiplyScalar(1 / 3)
+    pushSample(centroid)
+
+    let bestSample = samples[0]
+    let maxDepth = samples[0].depth
+    let maxBoundary = samples[0].sample.boundary
+    for (let s = 1; s < samples.length; s += 1) {
+      if (samples[s].depth > maxDepth) maxDepth = samples[s].depth
+      if (samples[s].sample.boundary > maxBoundary) {
+        maxBoundary = samples[s].sample.boundary
+        bestSample = samples[s]
+      }
+    }
+
+    if (!bestSample.sample.lake) {
+      if (stats) stats.excludedNoLake += 1
+      continue
+    }
+
+    let minDepth = samples[0].depth
+    let minBoundary = samples[0].sample.boundary
+    let minWaterLevel = Number.POSITIVE_INFINITY
+    let maxWaterLevel = 0
+    let includedByDepth = false
+    let includedByBoundary = false
+    for (let s = 1; s < samples.length; s += 1) {
+      if (samples[s].depth < minDepth) minDepth = samples[s].depth
+      if (samples[s].sample.boundary < minBoundary) minBoundary = samples[s].sample.boundary
+    }
+    for (let s = 0; s < samples.length; s += 1) {
+      const lake = samples[s].sample.lake
+      if (lake) {
+        const waterLevel = lake.surfaceInset + LAKE_SURFACE_DEPTH_EPS - LAKE_WATER_OVERDRAW
+        minWaterLevel = Math.min(minWaterLevel, waterLevel)
+        maxWaterLevel = Math.max(maxWaterLevel, waterLevel)
+        if (samples[s].depth > waterLevel) includedByDepth = true
+      }
+      if (samples[s].sample.boundary > LAKE_WATER_MASK_THRESHOLD) {
+        includedByBoundary = true
+      }
+    }
+    const waterLevel =
+      bestSample.sample.lake.surfaceInset + LAKE_SURFACE_DEPTH_EPS - LAKE_WATER_OVERDRAW
+    if (stats) {
+      stats.minDepth = Math.min(stats.minDepth, minDepth)
+      stats.maxDepth = Math.max(stats.maxDepth, maxDepth)
+      stats.minBoundary = Math.min(stats.minBoundary, minBoundary)
+      stats.maxBoundary = Math.max(stats.maxBoundary, maxBoundary)
+      stats.minWaterLevel = Math.min(stats.minWaterLevel, minWaterLevel)
+      stats.maxWaterLevel = Math.max(stats.maxWaterLevel, maxWaterLevel)
+      if (minDepth < waterLevel && maxDepth > waterLevel) {
+        stats.boundary += 1
+      }
+    }
+    if (!includedByDepth && !includedByBoundary) {
+      if (stats) stats.excludedShallow += 1
+      continue
+    }
+    if (stats) {
+      stats.included += 1
+      if (includedByDepth) stats.includedByDepth += 1
+      if (includedByBoundary) stats.includedByBoundary += 1
+    }
+
+    const surfaceRadius = PLANET_RADIUS - bestSample.sample.lake.surfaceInset
     normal.copy(a).normalize()
     lakePositions.push(normal.x * surfaceRadius, normal.y * surfaceRadius, normal.z * surfaceRadius)
     lakeNormals.push(normal.x, normal.y, normal.z)
@@ -426,6 +553,142 @@ const createLakeSurfaceGeometry = (baseGeometry: THREE.BufferGeometry, lakes: La
   if (lakePositions.length > 0) {
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(lakePositions, 3))
     geometry.setAttribute('normal', new THREE.Float32BufferAttribute(lakeNormals, 3))
+    geometry.computeBoundingSphere()
+  }
+  if (stats) {
+    console.info('[LakeDebug]', stats)
+    dumpLakeGeometry(geometry)
+  }
+  return geometry
+}
+
+const createLakeMaskMaterial = (lake: Lake) => {
+  const material = new THREE.MeshStandardMaterial({
+    color: '#2aa9ff',
+    roughness: 0.18,
+    metalness: 0.05,
+    emissive: '#0a386b',
+    emissiveIntensity: 0.32,
+    transparent: true,
+  })
+  const extensions =
+    (material as THREE.Material & { extensions?: { derivatives?: boolean } }).extensions ?? {}
+  extensions.derivatives = true
+  ;(material as THREE.Material & { extensions?: { derivatives?: boolean } }).extensions = extensions
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.lakeCenter = { value: lake.center }
+    shader.uniforms.lakeTangent = { value: lake.tangent }
+    shader.uniforms.lakeBitangent = { value: lake.bitangent }
+    shader.uniforms.lakeRadius = { value: lake.radius }
+    shader.uniforms.lakeEdgeFalloff = { value: lake.edgeFalloff }
+    shader.uniforms.lakeEdgeSharpness = { value: LAKE_EDGE_SHARPNESS }
+    shader.uniforms.lakeNoiseAmplitude = { value: lake.noiseAmplitude }
+    shader.uniforms.lakeNoiseFrequency = { value: lake.noiseFrequency }
+    shader.uniforms.lakeNoiseFrequencyB = { value: lake.noiseFrequencyB }
+    shader.uniforms.lakeNoiseFrequencyC = { value: lake.noiseFrequencyC }
+    shader.uniforms.lakeNoisePhase = { value: lake.noisePhase }
+    shader.uniforms.lakeNoisePhaseB = { value: lake.noisePhaseB }
+    shader.uniforms.lakeNoisePhaseC = { value: lake.noisePhaseC }
+    shader.uniforms.lakeWarpAmplitude = { value: lake.warpAmplitude }
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\n varying vec3 vLakeLocalPosition;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\n vLakeLocalPosition = position;')
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+varying vec3 vLakeLocalPosition;
+uniform vec3 lakeCenter;
+uniform vec3 lakeTangent;
+uniform vec3 lakeBitangent;
+uniform float lakeRadius;
+uniform float lakeEdgeFalloff;
+uniform float lakeEdgeSharpness;
+uniform float lakeNoiseAmplitude;
+uniform float lakeNoiseFrequency;
+uniform float lakeNoiseFrequencyB;
+uniform float lakeNoiseFrequencyC;
+uniform float lakeNoisePhase;
+uniform float lakeNoisePhaseB;
+uniform float lakeNoisePhaseC;
+uniform float lakeWarpAmplitude;
+
+float lakeEdgeBlend(vec3 normal) {
+  float dotValue = clamp(dot(lakeCenter, normal), -1.0, 1.0);
+  float angle = acos(dotValue);
+  if (angle >= lakeRadius + lakeEdgeFalloff) return 0.0;
+  vec3 temp = normal - lakeCenter * dotValue;
+  float x = dot(temp, lakeTangent);
+  float y = dot(temp, lakeBitangent);
+  float warp = sin((x + y) * lakeNoiseFrequencyC + lakeNoisePhaseC) * lakeWarpAmplitude;
+  float u = x * lakeNoiseFrequency + lakeNoisePhase + warp;
+  float v = y * lakeNoiseFrequencyB + lakeNoisePhaseB - warp;
+  float w = (x - y) * lakeNoiseFrequencyC + lakeNoisePhaseC * 0.7;
+  float noise = sin(u) + sin(v) + 0.6 * sin(2.0 * u + v * 0.6)
+    + 0.45 * sin(2.3 * v - 0.7 * u) + 0.35 * sin(w);
+  float noiseNormalized = noise / 3.15;
+  float edgeRadius = clamp(
+    lakeRadius * (1.0 + lakeNoiseAmplitude * noiseNormalized),
+    lakeRadius * 0.65,
+    lakeRadius * 1.35
+  );
+  if (angle >= edgeRadius) return 0.0;
+  float shelfRadius = max(1e-3, edgeRadius - lakeEdgeFalloff);
+  float edgeT = clamp((edgeRadius - angle) / lakeEdgeFalloff, 0.0, 1.0);
+  return pow(edgeT, lakeEdgeSharpness);
+}
+`,
+      )
+      .replace(
+        '#include <dithering_fragment>',
+        `
+float lakeEdge = lakeEdgeBlend(normalize(vLakeLocalPosition));
+if (lakeEdge <= 0.0) discard;
+float lakeAa = fwidth(lakeEdge) * 1.5;
+float lakeAlpha = smoothstep(0.0, lakeAa, lakeEdge);
+diffuseColor.a *= lakeAlpha;
+#include <dithering_fragment>`,
+      )
+  }
+  return material
+}
+const createFilteredGridGeometry = (gridGeometry: THREE.BufferGeometry, lakes: Lake[]) => {
+  const positions = gridGeometry.attributes.position
+  const filtered: number[] = []
+  const a = new THREE.Vector3()
+  const b = new THREE.Vector3()
+  const samplePoint = new THREE.Vector3()
+  const normal = new THREE.Vector3()
+  const temp = new THREE.Vector3()
+  const shouldHide = (point: THREE.Vector3) => {
+    if (point.lengthSq() < 1e-8) return false
+    normal.copy(point).normalize()
+    const sample = sampleLakes(normal, lakes, temp)
+    if (!sample.lake) return false
+    return true
+  }
+  for (let i = 0; i < positions.count; i += 2) {
+    a.set(positions.getX(i), positions.getY(i), positions.getZ(i))
+    b.set(positions.getX(i + 1), positions.getY(i + 1), positions.getZ(i + 1))
+    let hide = shouldHide(a) || shouldHide(b)
+    if (!hide) {
+      samplePoint.copy(a).lerp(b, 0.25)
+      hide = shouldHide(samplePoint)
+    }
+    if (!hide) {
+      samplePoint.copy(a).lerp(b, 0.5)
+      hide = shouldHide(samplePoint)
+    }
+    if (!hide) {
+      samplePoint.copy(a).lerp(b, 0.75)
+      hide = shouldHide(samplePoint)
+    }
+    if (hide) continue
+    filtered.push(a.x, a.y, a.z, b.x, b.y, b.z)
+  }
+  const geometry = new THREE.BufferGeometry()
+  if (filtered.length > 0) {
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(filtered, 3))
     geometry.computeBoundingSphere()
   }
   return geometry
@@ -465,6 +728,30 @@ const isTailDebugEnabled = () => {
   } catch {
     return false
   }
+}
+const isLakeDebugEnabled = () => {
+  if (typeof window === 'undefined') return false
+  try {
+    if ((window as { __LAKE_DEBUG__?: boolean }).__LAKE_DEBUG__ === true) return true
+    return window.localStorage.getItem('spherical_snake_lake_debug') === '1'
+  } catch {
+    return false
+  }
+}
+const dumpLakeGeometry = (geometry: THREE.BufferGeometry) => {
+  if (typeof window === 'undefined') return
+  const positionAttr = geometry.getAttribute('position') as THREE.BufferAttribute | undefined
+  const normalAttr = geometry.getAttribute('normal') as THREE.BufferAttribute | undefined
+  if (!positionAttr || !normalAttr) return
+  const positions = Array.from(positionAttr.array as Iterable<number>)
+  const normals = Array.from(normalAttr.array as Iterable<number>)
+  const payload = {
+    vertexCount: positionAttr.count,
+    positions,
+    normals,
+  }
+  ;(window as { __LAKE_GEOMETRY__?: typeof payload }).__LAKE_GEOMETRY__ = payload
+  console.info('[LakeGeometry]', payload)
 }
 
 function pointToVector(point: Point, radius: number) {
@@ -527,7 +814,9 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   const planetMesh = new THREE.Mesh(planetGeometry, planetMaterial)
   world.add(planetMesh)
 
-  const gridGeometry = new THREE.WireframeGeometry(planetGeometry)
+  const rawGridGeometry = new THREE.WireframeGeometry(planetGeometry)
+  const gridGeometry = createFilteredGridGeometry(rawGridGeometry, lakes)
+  rawGridGeometry.dispose()
   const gridMaterial = new THREE.LineBasicMaterial({
     color: '#1b4965',
     transparent: true,
@@ -538,20 +827,24 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   gridMesh.scale.setScalar(1.002)
   world.add(gridMesh)
 
-  const lakeGeometry = createLakeSurfaceGeometry(basePlanetGeometry, lakes)
-  const lakeMaterial = new THREE.MeshStandardMaterial({
-    color: '#2aa9ff',
-    roughness: 0.15,
-    metalness: 0.05,
-    transparent: true,
-    opacity: 0.9,
-    emissive: '#0a386b',
-    emissiveIntensity: 0.35,
-  })
-  lakeMaterial.depthWrite = false
-  const lakeMesh = new THREE.Mesh(lakeGeometry, lakeMaterial)
-  lakeMesh.renderOrder = 2
-  world.add(lakeMesh)
+  const lakeSurfaceGeometry = new THREE.SphereGeometry(1, LAKE_SURFACE_SEGMENTS, LAKE_SURFACE_RINGS)
+  const lakeMeshes: THREE.Mesh[] = []
+  const lakeMaterials: THREE.MeshStandardMaterial[] = []
+  for (const lake of lakes) {
+    const lakeMaterial = createLakeMaskMaterial(lake)
+    const lakeMesh = new THREE.Mesh(lakeSurfaceGeometry, lakeMaterial)
+    lakeMesh.scale.setScalar(PLANET_RADIUS - lake.surfaceInset)
+    lakeMesh.renderOrder = 2
+    world.add(lakeMesh)
+    lakeMeshes.push(lakeMesh)
+    lakeMaterials.push(lakeMaterial)
+  }
+  if (isLakeDebugEnabled()) {
+    const lakeBaseGeometry = createFibonacciSphereGeometry(PLANET_RADIUS, LAKE_SURFACE_POINTS)
+    const lakeGeometry = createLakeSurfaceGeometry(lakeBaseGeometry, lakes)
+    lakeGeometry.dispose()
+    lakeBaseGeometry.dispose()
+  }
   basePlanetGeometry.dispose()
 
   const environmentGroup = new THREE.Group()
@@ -2250,9 +2543,13 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     planetMaterial.dispose()
     gridGeometry.dispose()
     gridMaterial.dispose()
-    world.remove(lakeMesh)
-    lakeGeometry.dispose()
-    lakeMaterial.dispose()
+    for (const mesh of lakeMeshes) {
+      world.remove(mesh)
+    }
+    for (const material of lakeMaterials) {
+      material.dispose()
+    }
+    lakeSurfaceGeometry.dispose()
     for (const mesh of treeTierMeshes) {
       environmentGroup.remove(mesh)
     }
