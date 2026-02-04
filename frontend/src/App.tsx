@@ -28,9 +28,9 @@ const MAX_SNAPSHOT_BUFFER = 20
 const MIN_INTERP_DELAY_MS = 60
 const MAX_EXTRAPOLATION_MS = 70
 const OFFSET_SMOOTHING = 0.12
-const CAMERA_DISTANCE_DEFAULT = 3
-const CAMERA_DISTANCE_MIN = 2.2
-const CAMERA_DISTANCE_MAX = 5
+const CAMERA_DISTANCE_DEFAULT = 5.2
+const CAMERA_DISTANCE_MIN = 4.2
+const CAMERA_DISTANCE_MAX = 9
 const CAMERA_ZOOM_SENSITIVITY = 0.0015
 
 export default function App() {
@@ -521,9 +521,6 @@ export default function App() {
               Join
             </button>
           </div>
-          <div className='control-row muted'>
-            <span>Share the room name to invite players.</span>
-          </div>
           <div className='control-row'>
             <label className='control-label' htmlFor='player-name'>
               Pilot name
@@ -541,12 +538,11 @@ export default function App() {
               Update
             </button>
           </div>
-          <div className='control-row muted'>
-            <span>Point to steer. Scroll to zoom. Press space to boost.</span>
-          </div>
-          <div className='control-row muted'>
-            <span>Best this run: {bestScore}</span>
-          </div>
+        </div>
+
+        <div className='info-panel'>
+          <div className='info-line'>Point to steer. Scroll to zoom. Press space to boost.</div>
+          <div className='info-line'>Best this run: {bestScore}</div>
         </div>
       </div>
 

@@ -1,21 +1,27 @@
 .app {
-  max-width: 1120px;
-  margin: 0 auto;
-  padding: 2.5rem 1.5rem 3rem;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
-  gap: 2rem;
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
 }
 
 .game-card {
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.9);
-  box-shadow: 0 30px 60px rgba(10, 32, 54, 0.18);
-  border: 1px solid rgba(7, 26, 43, 0.08);
+  position: absolute;
+  inset: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  border: 0;
   overflow: hidden;
 }
 
 .scorebar {
+  position: absolute;
+  top: 1rem;
+  left: 1rem;
+  z-index: 5;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -25,6 +31,11 @@
   font-family: 'Space Mono', monospace;
   letter-spacing: 0.02em;
   font-size: 0.95rem;
+  border-radius: 12px;
+  box-shadow: 0 16px 34px rgba(10, 32, 54, 0.3);
+  max-width: min(520px, calc(100vw - 2rem));
+  flex-wrap: wrap;
+  gap: 0.35rem 0.9rem;
 }
 
 .score {
@@ -37,22 +48,23 @@
 }
 
 .play-area {
-  position: relative;
-  padding: 1.2rem;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  background: #ffffff;
+  position: absolute;
+  inset: 0;
+  padding: 0;
+  display: block;
+  background: transparent;
+  z-index: 1;
 }
 
 .game-surface {
-  position: relative;
-  width: min(92vw, 360px);
-  aspect-ratio: 1;
-  border-radius: 12px;
-  border: 1px solid rgba(11, 19, 32, 0.5);
-  background: #ffffff;
-  box-shadow: inset 0 0 0 1px rgba(11, 19, 32, 0.04);
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
   overflow: hidden;
 }
 
@@ -75,10 +87,11 @@
 
 .stamina-panel {
   position: absolute;
-  right: 0.65rem;
-  bottom: 0.65rem;
+  left: 1rem;
+  right: auto;
+  bottom: 6.5rem;
   min-width: 150px;
-  max-width: 55%;
+  max-width: min(55%, 240px);
   display: flex;
   flex-direction: column;
   gap: 0.45rem;
@@ -143,6 +156,7 @@
 .overlay {
   position: absolute;
   inset: 0;
+  z-index: 6;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -172,10 +186,43 @@
 }
 
 .control-panel {
-  padding: 1.2rem 1.4rem 1.4rem;
+  position: absolute;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 5;
+  padding: 1rem 1.2rem 1.1rem;
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: 0.65rem;
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: 16px;
+  border: 1px solid rgba(7, 26, 43, 0.1);
+  box-shadow: 0 20px 40px rgba(10, 32, 54, 0.18);
+  width: min(320px, calc(100vw - 2rem));
+  backdrop-filter: blur(10px);
+}
+
+.info-panel {
+  position: absolute;
+  left: 1rem;
+  bottom: 1rem;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.6rem 0.8rem;
+  background: rgba(11, 19, 32, 0.78);
+  color: #f2f7ff;
+  font-family: 'Space Mono', monospace;
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
+  border-radius: 12px;
+  box-shadow: 0 18px 32px rgba(10, 32, 54, 0.25);
+  max-width: min(360px, calc(100vw - 2rem));
+}
+
+.info-line {
+  line-height: 1.2;
 }
 
 .control-row {
@@ -226,12 +273,19 @@ button:active {
 }
 
 .leaderboard {
-  align-self: start;
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  z-index: 5;
   background: rgba(255, 255, 255, 0.9);
   border-radius: 18px;
   border: 1px solid rgba(7, 26, 43, 0.1);
   box-shadow: 0 20px 50px rgba(10, 32, 54, 0.15);
   padding: 1.4rem;
+  width: min(320px, calc(100vw - 2rem));
+  max-height: 45vh;
+  overflow: auto;
+  backdrop-filter: blur(10px);
 }
 
 .leaderboard-header {
@@ -273,29 +327,46 @@ button:active {
   font-family: 'Space Mono', monospace;
 }
 
-@media (max-width: 960px) {
-  .app {
-    grid-template-columns: 1fr;
-  }
-
-  .leaderboard {
-    order: 2;
-  }
-}
-
-@media (max-width: 600px) {
-  .app {
-    padding: 1.5rem 1rem 2rem;
-  }
-
+@media (max-width: 720px) {
   .scorebar {
     flex-direction: column;
     align-items: flex-start;
     gap: 0.25rem;
+    max-width: calc(100vw - 2rem);
+  }
+
+  .leaderboard,
+  .control-panel,
+  .info-panel {
+    width: calc(100vw - 2rem);
+    max-width: none;
+  }
+
+  .leaderboard {
+    max-height: 38vh;
+  }
+
+  .stamina-panel {
+    max-width: 70vw;
+    bottom: 8.5rem;
   }
 
   .leaderboard-header {
     flex-direction: column;
     align-items: flex-start;
+  }
+}
+
+@media (max-width: 480px) {
+  .scorebar {
+    font-size: 0.85rem;
+  }
+
+  .score {
+    font-size: 1rem;
+  }
+
+  .status {
+    font-size: 0.75rem;
   }
 }
