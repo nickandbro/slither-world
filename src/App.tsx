@@ -374,7 +374,7 @@ export default function App() {
   const hudCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const socketRef = useRef<WebSocket | null>(null)
   const renderConfigRef = useRef<RenderConfig | null>(null)
-  const pointerRef = useRef({ angle: 0, boost: false, active: false })
+  const pointerRef = useRef({ angle: 0, boost: false, active: false, screenX: 0, screenY: 0 })
   const sendIntervalRef = useRef<number | null>(null)
   const snapshotBufferRef = useRef<TimedSnapshot[]>([])
   const serverOffsetRef = useRef<number | null>(null)
@@ -513,7 +513,7 @@ export default function App() {
           snapshot?.players.find((player) => player.id === localId)?.snake[0] ?? null
         const camera = updateCamera(localHead, cameraRef.current, cameraUpRef)
         cameraRef.current = camera
-        const headScreen = webgl.render(snapshot, camera, localId)
+        const headScreen = webgl.render(snapshot, camera, localId, pointerRef.current)
         drawHud(
           hudCtx,
           config,
@@ -655,9 +655,13 @@ export default function App() {
     const canvas = glCanvasRef.current
     if (!canvas) return
     const rect = canvas.getBoundingClientRect()
-    const dx = event.clientX - rect.left - rect.width / 2
-    const dy = event.clientY - rect.top - rect.height / 2
+    const localX = event.clientX - rect.left
+    const localY = event.clientY - rect.top
+    const dx = localX - rect.width / 2
+    const dy = localY - rect.height / 2
     pointerRef.current.angle = Math.atan2(dy, dx)
+    pointerRef.current.screenX = localX
+    pointerRef.current.screenY = localY
     pointerRef.current.active = true
   }
 

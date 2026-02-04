@@ -10,7 +10,34 @@ type SnakeVisual = {
   eyeRight: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
   pupilLeft: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
   pupilRight: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
+  tongue: THREE.Group
+  tongueBase: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
+  tongueForkLeft: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
+  tongueForkRight: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
   color: string
+}
+
+type PointerState = {
+  screenX: number
+  screenY: number
+  active: boolean
+}
+
+type GazeRay = {
+  origin: THREE.Vector3
+  direction: THREE.Vector3
+}
+
+type TongueState = {
+  length: number
+  mode: 'idle' | 'extend' | 'retract'
+  targetPosition: THREE.Vector3 | null
+  cooldown: number
+}
+
+type PelletOverride = {
+  index: number
+  position: THREE.Vector3
 }
 
 type DigestionVisual = {
@@ -42,6 +69,7 @@ type WebGLScene = {
     snapshot: GameStateSnapshot | null,
     camera: Camera,
     localPlayerId: string | null,
+    pointer: PointerState | null,
   ) => { x: number; y: number } | null
   dispose: () => void
 }
@@ -50,10 +78,29 @@ const PLANET_RADIUS = 1
 const SNAKE_RADIUS = 0.045
 const HEAD_RADIUS = SNAKE_RADIUS * 1.35
 const SNAKE_LIFT_FACTOR = 0.85
-const EYE_RADIUS = SNAKE_RADIUS * 0.45
-const PUPIL_RADIUS = EYE_RADIUS * 0.5
+const EYE_RADIUS = SNAKE_RADIUS * 0.65
+const PUPIL_RADIUS = EYE_RADIUS * 0.55
+const PUPIL_OFFSET = EYE_RADIUS * 0.6
 const PELLET_RADIUS = SNAKE_RADIUS * 0.75
 const PELLET_OFFSET = 0.035
+const GAZE_FOCUS_DISTANCE = 6
+const GAZE_MIN_DOT = 0.2
+const TONGUE_MAX_LENGTH = HEAD_RADIUS * 2.8
+const TONGUE_MAX_RANGE = HEAD_RADIUS * 3.1
+const TONGUE_NEAR_RANGE = HEAD_RADIUS * 2.4
+const TONGUE_RADIUS = SNAKE_RADIUS * 0.2
+const TONGUE_FORK_LENGTH = HEAD_RADIUS * 0.45
+const TONGUE_FORK_SPREAD = 0.55
+const TONGUE_MOUTH_FORWARD = HEAD_RADIUS * 0.6
+const TONGUE_MOUTH_OUT = HEAD_RADIUS * 0.1
+const TONGUE_ANGLE_LIMIT = Math.PI / 6
+const TONGUE_EXTEND_RATE = 10
+const TONGUE_RETRACT_RATE = 14
+const TONGUE_HIDE_THRESHOLD = HEAD_RADIUS * 0.12
+const TONGUE_REACQUIRE_THRESHOLD = HEAD_RADIUS * 0.2
+const TONGUE_GRAB_EPS = HEAD_RADIUS * 0.12
+const TONGUE_PELLET_MATCH = HEAD_RADIUS * 1.6
+const TONGUE_COOLDOWN = 0.35
 const TAIL_CAP_SEGMENTS = 5
 const TAIL_DIR_MIN_RATIO = 0.35
 const DIGESTION_BULGE = 0.55
@@ -210,6 +257,31 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   const pupilGeometry = new THREE.SphereGeometry(PUPIL_RADIUS, 10, 10)
   const eyeMaterial = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.2 })
   const pupilMaterial = new THREE.MeshStandardMaterial({ color: '#1b1b1b', roughness: 0.4 })
+  const tongueBaseGeometry = new THREE.CylinderGeometry(
+    TONGUE_RADIUS,
+    TONGUE_RADIUS * 0.9,
+    1,
+    10,
+    1,
+    true,
+  )
+  tongueBaseGeometry.translate(0, 0.5, 0)
+  const tongueForkGeometry = new THREE.CylinderGeometry(
+    TONGUE_RADIUS * 0.7,
+    TONGUE_RADIUS * 0.25,
+    1,
+    8,
+    1,
+    true,
+  )
+  tongueForkGeometry.translate(0, 0.5, 0)
+  const tongueMaterial = new THREE.MeshStandardMaterial({
+    color: '#ff6f9f',
+    roughness: 0.25,
+    metalness: 0.05,
+    emissive: '#ff4f8a',
+    emissiveIntensity: 0.3,
+  })
 
   const pelletGeometry = new THREE.SphereGeometry(PELLET_RADIUS, 14, 14)
   const pelletMaterial = new THREE.MeshStandardMaterial({
@@ -236,10 +308,17 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   const lastTailTotalLengths = new Map<string, number>()
   const tailGrowthStates = new Map<string, number>()
   const tailDebugStates = new Map<string, TailDebugState>()
+  const tongueStates = new Map<string, TongueState>()
   const tempMatrix = new THREE.Matrix4()
   const tempVector = new THREE.Vector3()
   const tempVectorB = new THREE.Vector3()
   const tempVectorC = new THREE.Vector3()
+  const tempVectorD = new THREE.Vector3()
+  const tempVectorE = new THREE.Vector3()
+  const tempVectorF = new THREE.Vector3()
+  const tempVectorG = new THREE.Vector3()
+  const tempQuat = new THREE.Quaternion()
+  const tongueUp = new THREE.Vector3(0, 1, 0)
 
   const createSnakeVisual = (color: string): SnakeVisual => {
     const group = new THREE.Group()
@@ -268,10 +347,21 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     const eyeRight = new THREE.Mesh(eyeGeometry, eyeMaterial)
     const pupilLeft = new THREE.Mesh(pupilGeometry, pupilMaterial)
     const pupilRight = new THREE.Mesh(pupilGeometry, pupilMaterial)
+    const tongue = new THREE.Group()
+    const tongueBase = new THREE.Mesh(tongueBaseGeometry, tongueMaterial)
+    const tongueForkLeft = new THREE.Mesh(tongueForkGeometry, tongueMaterial)
+    const tongueForkRight = new THREE.Mesh(tongueForkGeometry, tongueMaterial)
+    tongueForkLeft.rotation.z = TONGUE_FORK_SPREAD
+    tongueForkRight.rotation.z = -TONGUE_FORK_SPREAD
+    tongue.add(tongueBase)
+    tongue.add(tongueForkLeft)
+    tongue.add(tongueForkRight)
+    tongue.visible = false
     group.add(eyeLeft)
     group.add(eyeRight)
     group.add(pupilLeft)
     group.add(pupilRight)
+    group.add(tongue)
 
     return {
       group,
@@ -282,6 +372,10 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       eyeRight,
       pupilLeft,
       pupilRight,
+      tongue,
+      tongueBase,
+      tongueForkLeft,
+      tongueForkRight,
       color,
     }
   }
@@ -652,8 +746,190 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     return null
   }
 
+  const updateTongue = (
+    playerId: string,
+    visual: SnakeVisual,
+    headPosition: THREE.Vector3,
+    headNormal: THREE.Vector3,
+    forward: THREE.Vector3,
+    pellets: Point[] | null,
+    deltaSeconds: number,
+  ): PelletOverride | null => {
+    let state = tongueStates.get(playerId)
+    if (!state) {
+      state = { length: 0, mode: 'idle', targetPosition: null, cooldown: 0 }
+      tongueStates.set(playerId, state)
+    }
+    state.cooldown = Math.max(0, state.cooldown - deltaSeconds)
 
-  const updateSnake = (player: PlayerSnapshot, isLocal: boolean, deltaSeconds: number) => {
+    const mouthPosition = tempVectorD
+      .copy(headPosition)
+      .addScaledVector(forward, TONGUE_MOUTH_FORWARD)
+      .addScaledVector(headNormal, TONGUE_MOUTH_OUT)
+
+    let desiredLength = 0
+    let candidatePosition: THREE.Vector3 | null = null
+    let candidateDistance = Infinity
+    let hasCandidate = false
+
+    if (!pellets || pellets.length === 0) {
+      if (state.mode !== 'idle') {
+        state.mode = 'retract'
+      }
+    } else {
+      const canAcquire =
+        state.cooldown <= 0 &&
+        (state.mode === 'idle' || (state.mode === 'retract' && state.length < TONGUE_REACQUIRE_THRESHOLD))
+
+      if (state.mode === 'extend' && state.targetPosition) {
+        tempVectorF.copy(state.targetPosition).sub(mouthPosition)
+        const distance = tempVectorF.length()
+        tempVectorG.copy(tempVectorF).addScaledVector(headNormal, -tempVectorF.dot(headNormal))
+        const tangentLen = tempVectorG.length()
+        if (tangentLen > 1e-6) {
+          tempVectorG.multiplyScalar(1 / tangentLen)
+        }
+        const angle = tangentLen > 1e-6 ? Math.acos(clamp(forward.dot(tempVectorG), -1, 1)) : Math.PI
+        if (distance <= TONGUE_MAX_RANGE && angle <= TONGUE_ANGLE_LIMIT) {
+          candidatePosition = state.targetPosition
+          candidateDistance = distance
+          desiredLength = Math.min(distance, TONGUE_MAX_LENGTH)
+          hasCandidate = true
+        } else {
+          state.mode = 'retract'
+        }
+      }
+
+      if (!hasCandidate && canAcquire) {
+        for (let i = 0; i < pellets.length; i += 1) {
+          const pellet = pellets[i]
+          tempVectorE
+            .set(pellet.x, pellet.y, pellet.z)
+            .normalize()
+            .multiplyScalar(PLANET_RADIUS + PELLET_OFFSET)
+          tempVectorF.copy(tempVectorE).sub(mouthPosition)
+          const distance = tempVectorF.length()
+          tempVectorG.copy(tempVectorF).addScaledVector(headNormal, -tempVectorF.dot(headNormal))
+          const tangentLen = tempVectorG.length()
+          if (tangentLen < 1e-6) continue
+          tempVectorG.multiplyScalar(1 / tangentLen)
+          const angle = Math.acos(clamp(forward.dot(tempVectorG), -1, 1))
+          if (angle > TONGUE_ANGLE_LIMIT) continue
+          if (distance > TONGUE_MAX_RANGE) continue
+          if (distance > TONGUE_NEAR_RANGE) continue
+          if (distance < candidateDistance) {
+            candidateDistance = distance
+            candidatePosition = tempVectorE.clone()
+          }
+        }
+      }
+
+      if (candidatePosition) {
+        desiredLength = Math.min(candidateDistance, TONGUE_MAX_LENGTH)
+        state.targetPosition = candidatePosition
+        state.mode = 'extend'
+        hasCandidate = true
+      } else if (state.mode === 'extend') {
+        state.mode = 'retract'
+      }
+    }
+
+    const targetLength = state.mode === 'extend' && hasCandidate ? desiredLength : 0
+    state.length = smoothValue(
+      state.length,
+      targetLength,
+      deltaSeconds,
+      TONGUE_EXTEND_RATE,
+      TONGUE_RETRACT_RATE,
+    )
+
+    if (state.mode === 'extend' && hasCandidate && state.length >= desiredLength - TONGUE_GRAB_EPS) {
+      state.mode = 'retract'
+    }
+
+    if (state.mode === 'retract' && state.length <= TONGUE_HIDE_THRESHOLD) {
+      state.mode = 'idle'
+      state.targetPosition = null
+      state.cooldown = TONGUE_COOLDOWN
+    }
+
+    let override: PelletOverride | null = null
+    let targetPosition = state.targetPosition
+
+    if (state.mode === 'retract' && targetPosition && pellets && pellets.length > 0) {
+      let bestIndex = -1
+      let bestDistanceSq = Infinity
+      let bestPosition: THREE.Vector3 | null = null
+      for (let i = 0; i < pellets.length; i += 1) {
+        const pellet = pellets[i]
+        tempVectorE
+          .set(pellet.x, pellet.y, pellet.z)
+          .normalize()
+          .multiplyScalar(PLANET_RADIUS + PELLET_OFFSET)
+        const distSq = tempVectorE.distanceToSquared(targetPosition)
+        if (distSq < bestDistanceSq) {
+          bestDistanceSq = distSq
+          bestIndex = i
+          bestPosition = tempVectorE.clone()
+        }
+      }
+      const matchThresholdSq = TONGUE_PELLET_MATCH * TONGUE_PELLET_MATCH
+      if (bestIndex >= 0 && bestPosition && bestDistanceSq <= matchThresholdSq) {
+        if (state.targetPosition) {
+          state.targetPosition.copy(bestPosition)
+        } else {
+          state.targetPosition = bestPosition
+        }
+        targetPosition = state.targetPosition
+        tempVectorF.copy(targetPosition).sub(mouthPosition)
+        if (tempVectorF.lengthSq() > 1e-6) {
+          tempVectorF.normalize()
+        } else {
+          tempVectorF.copy(forward)
+        }
+        const grabbedPos = mouthPosition.clone().addScaledVector(tempVectorF, state.length)
+        override = { index: bestIndex, position: grabbedPos }
+      }
+    }
+
+    const isVisible = state.length > TONGUE_HIDE_THRESHOLD
+    visual.tongue.visible = isVisible
+    if (!isVisible) {
+      return override
+    }
+
+    let tongueDir = forward
+    if (targetPosition) {
+      tempVectorF.copy(targetPosition).sub(mouthPosition)
+      if (tempVectorF.lengthSq() > 1e-6) {
+        tempVectorF.normalize()
+        tongueDir = tempVectorF
+      }
+    }
+
+    visual.tongue.position.copy(mouthPosition)
+    tempQuat.setFromUnitVectors(tongueUp, tongueDir)
+    visual.tongue.quaternion.copy(tempQuat)
+
+    const tongueLength = Math.max(state.length, 0.001)
+    visual.tongueBase.scale.set(1, tongueLength, 1)
+    const forkLength = Math.min(TONGUE_FORK_LENGTH, tongueLength * 0.6)
+    visual.tongueForkLeft.scale.set(1, forkLength, 1)
+    visual.tongueForkRight.scale.set(1, forkLength, 1)
+    visual.tongueForkLeft.position.set(0, tongueLength, 0)
+    visual.tongueForkRight.position.set(0, tongueLength, 0)
+
+    return override
+  }
+
+
+  const updateSnake = (
+    player: PlayerSnapshot,
+    isLocal: boolean,
+    deltaSeconds: number,
+    gazeRay: GazeRay | null,
+    pellets: Point[] | null,
+  ): PelletOverride | null => {
     let visual = snakes.get(player.id)
     if (!visual) {
       visual = createSnakeVisual(player.color)
@@ -973,6 +1249,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       visual.eyeRight.visible = false
       visual.pupilLeft.visible = false
       visual.pupilRight.visible = false
+      visual.tongue.visible = false
       lastHeadPositions.delete(player.id)
       lastForwardDirections.delete(player.id)
       lastTailDirections.delete(player.id)
@@ -984,7 +1261,8 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       lastTailTotalLengths.delete(player.id)
       tailGrowthStates.delete(player.id)
       tailDebugStates.delete(player.id)
-      return
+      tongueStates.delete(player.id)
+      return null
     }
 
     visual.head.visible = true
@@ -1090,9 +1368,9 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     }
     right.normalize()
 
-    const eyeOut = HEAD_RADIUS * 0.2
-    const eyeForward = HEAD_RADIUS * 0.28
-    const eyeSpacing = HEAD_RADIUS * 0.6
+    const eyeOut = HEAD_RADIUS * 0.24
+    const eyeForward = HEAD_RADIUS * 0.32
+    const eyeSpacing = HEAD_RADIUS * 0.72
 
     const leftEyePosition = headPosition
       .clone()
@@ -1108,9 +1386,41 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     visual.eyeLeft.position.copy(leftEyePosition)
     visual.eyeRight.position.copy(rightEyePosition)
 
-    const pupilForward = HEAD_RADIUS * 0.18
-    visual.pupilLeft.position.copy(leftEyePosition).addScaledVector(forward, pupilForward)
-    visual.pupilRight.position.copy(rightEyePosition).addScaledVector(forward, pupilForward)
+    const gazeTarget =
+      isLocal && gazeRay
+        ? tempVectorD.copy(gazeRay.origin).addScaledVector(gazeRay.direction, GAZE_FOCUS_DISTANCE)
+        : null
+
+    const updatePupil = (eyePosition: THREE.Vector3, eyeNormal: THREE.Vector3, output: THREE.Vector3) => {
+      if (gazeTarget) {
+        tempVectorE.copy(gazeTarget).sub(eyePosition)
+        if (tempVectorE.lengthSq() < 1e-6) {
+          tempVectorE.copy(forward)
+        }
+      } else {
+        tempVectorE.copy(forward)
+      }
+      tempVectorE.normalize()
+      const dot = tempVectorE.dot(eyeNormal)
+      if (dot < GAZE_MIN_DOT) {
+        const blend = clamp((GAZE_MIN_DOT - dot) / (1 - GAZE_MIN_DOT), 0, 1)
+        tempVectorE.lerp(eyeNormal, blend).normalize()
+      }
+      output.copy(eyePosition).addScaledVector(tempVectorE, PUPIL_OFFSET)
+    }
+
+    tempVectorF.copy(leftEyePosition).sub(headPosition).normalize()
+    updatePupil(leftEyePosition, tempVectorF, visual.pupilLeft.position)
+    tempVectorG.copy(rightEyePosition).sub(headPosition).normalize()
+    updatePupil(rightEyePosition, tempVectorG, visual.pupilRight.position)
+
+    let tongueOverride: PelletOverride | null = null
+    if (isLocal) {
+      tongueOverride = updateTongue(player.id, visual, headPosition, headNormal, forward, pellets, deltaSeconds)
+    } else {
+      visual.tongue.visible = false
+      tongueStates.delete(player.id)
+    }
 
     if (nodes.length > 1) {
       const tailPos = tailCurveTail ?? pointToVector(nodes[nodes.length - 1], centerlineRadius)
@@ -1148,6 +1458,8 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       visual.tail.quaternion.identity()
       visual.tail.scale.setScalar(1)
     }
+
+    return tongueOverride
   }
 
   const removeSnake = (visual: SnakeVisual, id: string) => {
@@ -1167,17 +1479,30 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     lastTailTotalLengths.delete(id)
     tailGrowthStates.delete(id)
     tailDebugStates.delete(id)
+    tongueStates.delete(id)
   }
 
   const updateSnakes = (
     players: PlayerSnapshot[],
     localPlayerId: string | null,
     deltaSeconds: number,
-  ) => {
+    gazeRay: GazeRay | null,
+    pellets: Point[] | null,
+  ): PelletOverride | null => {
     const activeIds = new Set<string>()
+    let pelletOverride: PelletOverride | null = null
     for (const player of players) {
       activeIds.add(player.id)
-      updateSnake(player, player.id === localPlayerId, deltaSeconds)
+      const override = updateSnake(
+        player,
+        player.id === localPlayerId,
+        deltaSeconds,
+        gazeRay,
+        pellets,
+      )
+      if (override) {
+        pelletOverride = override
+      }
     }
 
     for (const [id, visual] of snakes) {
@@ -1188,9 +1513,11 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
         lastForwardDirections.delete(id)
       }
     }
+
+    return pelletOverride
   }
 
-  const updatePellets = (pellets: Point[]) => {
+  const updatePellets = (pellets: Point[], override: PelletOverride | null) => {
     const count = pellets.length
     if (!pelletMesh || pelletCapacity !== Math.max(count, 1)) {
       if (pelletMesh) {
@@ -1206,15 +1533,27 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     pelletMesh.visible = count > 0
 
     for (let i = 0; i < count; i += 1) {
-      const pellet = pellets[i]
-      tempVector.set(pellet.x, pellet.y, pellet.z).normalize().multiplyScalar(PLANET_RADIUS + PELLET_OFFSET)
+      if (override && override.index === i) {
+        tempVector.copy(override.position)
+      } else {
+        const pellet = pellets[i]
+        tempVector
+          .set(pellet.x, pellet.y, pellet.z)
+          .normalize()
+          .multiplyScalar(PLANET_RADIUS + PELLET_OFFSET)
+      }
       tempMatrix.makeTranslation(tempVector.x, tempVector.y, tempVector.z)
       pelletMesh.setMatrixAt(i, tempMatrix)
     }
     pelletMesh.instanceMatrix.needsUpdate = true
   }
 
-  const render = (snapshot: GameStateSnapshot | null, cameraState: Camera, localPlayerId: string | null) => {
+  const render = (
+    snapshot: GameStateSnapshot | null,
+    cameraState: Camera,
+    localPlayerId: string | null,
+    pointer: PointerState | null,
+  ) => {
     const now = performance.now()
     const deltaSeconds = Math.min(0.1, Math.max(0, (now - lastFrameTime) / 1000))
     lastFrameTime = now
@@ -1227,10 +1566,33 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     camera.updateMatrixWorld()
 
     let localHeadScreen: { x: number; y: number } | null = null
+    let gazeRay: GazeRay | null = null
+
+    if (pointer?.active && viewportWidth > 0 && viewportHeight > 0) {
+      const ndcX = (pointer.screenX / viewportWidth) * 2 - 1
+      const ndcY = -(pointer.screenY / viewportHeight) * 2 + 1
+      if (Number.isFinite(ndcX) && Number.isFinite(ndcY)) {
+        tempVectorD.set(ndcX, ndcY, 0.5).unproject(camera)
+        tempQuat.copy(world.quaternion).invert()
+        tempVectorD.applyQuaternion(tempQuat)
+        tempVectorE.copy(camera.position).applyQuaternion(tempQuat)
+        tempVectorF.copy(tempVectorD).sub(tempVectorE)
+        if (tempVectorF.lengthSq() > 1e-8) {
+          tempVectorF.normalize()
+          gazeRay = { origin: tempVectorE.clone(), direction: tempVectorF.clone() }
+        }
+      }
+    }
 
     if (snapshot) {
-      updateSnakes(snapshot.players, localPlayerId, deltaSeconds)
-      updatePellets(snapshot.pellets)
+      const pelletOverride = updateSnakes(
+        snapshot.players,
+        localPlayerId,
+        deltaSeconds,
+        gazeRay,
+        snapshot.pellets,
+      )
+      updatePellets(snapshot.pellets, pelletOverride)
 
       if (localPlayerId) {
         const localPlayer = snapshot.players.find((player) => player.id === localPlayerId)
@@ -1251,8 +1613,8 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
         }
       }
     } else {
-      updateSnakes([], localPlayerId, deltaSeconds)
-      updatePellets([])
+      updateSnakes([], localPlayerId, deltaSeconds, gazeRay, null)
+      updatePellets([], null)
     }
 
     renderer.render(scene, camera)
@@ -1280,6 +1642,9 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     pupilGeometry.dispose()
     eyeMaterial.dispose()
     pupilMaterial.dispose()
+    tongueBaseGeometry.dispose()
+    tongueForkGeometry.dispose()
+    tongueMaterial.dispose()
     pelletGeometry.dispose()
     pelletMaterial.dispose()
     if (pelletMesh) {
