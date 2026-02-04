@@ -69,6 +69,7 @@ type Lake = {
   center: THREE.Vector3
   radius: number
   depth: number
+  shelfDepth: number
   edgeFalloff: number
   noiseAmplitude: number
   noiseFrequency: number
@@ -102,12 +103,16 @@ const LAKE_MIN_ANGLE = 0.9
 const LAKE_MAX_ANGLE = 1.3
 const LAKE_MIN_DEPTH = PLANET_RADIUS * 0.07
 const LAKE_MAX_DEPTH = PLANET_RADIUS * 0.12
-const LAKE_EDGE_FALLOFF = 0.2
+const LAKE_EDGE_FALLOFF = 0.08
+const LAKE_EDGE_SHARPNESS = 1.8
 const LAKE_NOISE_AMPLITUDE = 0.55
 const LAKE_NOISE_FREQ_MIN = 3
 const LAKE_NOISE_FREQ_MAX = 6
-const LAKE_SURFACE_INSET_RATIO = 0.6
-const LAKE_SURFACE_THRESHOLD = 0.15
+const LAKE_SHELF_DEPTH_RATIO = 0.45
+const LAKE_SHELF_CORE = 0.55
+const LAKE_SURFACE_INSET_RATIO = 0.5
+const LAKE_SURFACE_EXTRA_INSET = PLANET_RADIUS * 0.01
+const LAKE_SURFACE_THRESHOLD = 0.12
 const LAKE_EXCLUSION_THRESHOLD = 0.18
 const SNAKE_RADIUS = 0.045
 const HEAD_RADIUS = SNAKE_RADIUS * 1.35
@@ -288,6 +293,7 @@ const createLakes = (seed: number, count: number) => {
   for (let i = 0; i < count; i += 1) {
     const radius = randRange(LAKE_MIN_ANGLE, LAKE_MAX_ANGLE)
     const depth = randRange(LAKE_MIN_DEPTH, LAKE_MAX_DEPTH)
+    const shelfDepth = depth * LAKE_SHELF_DEPTH_RATIO
     const center = new THREE.Vector3()
     pickCenter(radius, center)
     const up = Math.abs(center.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0)
@@ -304,6 +310,7 @@ const createLakes = (seed: number, count: number) => {
       center,
       radius,
       depth,
+      shelfDepth,
       edgeFalloff: LAKE_EDGE_FALLOFF,
       noiseAmplitude: LAKE_NOISE_AMPLITUDE,
       noiseFrequency,
@@ -315,7 +322,7 @@ const createLakes = (seed: number, count: number) => {
       warpAmplitude,
       tangent,
       bitangent,
-      surfaceInset: depth * LAKE_SURFACE_INSET_RATIO,
+      surfaceInset: shelfDepth * LAKE_SURFACE_INSET_RATIO + LAKE_SURFACE_EXTRA_INSET,
     })
   }
   return lakes
@@ -350,12 +357,12 @@ const sampleLakes = (normal: THREE.Vector3, lakes: Lake[], temp: THREE.Vector3) 
     )
     if (angle >= edgeRadius) continue
 
-    const inner = Math.max(0, edgeRadius - lake.edgeFalloff)
-    const edgeBlend =
-      angle <= inner ? 1 : smoothstep(0, 1, (edgeRadius - angle) / lake.edgeFalloff)
-    const core = clamp(1 - angle / edgeRadius, 0, 1)
-    const basin = Math.pow(core, 0.6)
-    const depth = edgeBlend * basin * lake.depth
+    const shelfRadius = Math.max(1e-3, edgeRadius - lake.edgeFalloff)
+    const edgeT = clamp((edgeRadius - angle) / lake.edgeFalloff, 0, 1)
+    const edgeBlend = Math.pow(edgeT, LAKE_EDGE_SHARPNESS)
+    const core = clamp(1 - angle / shelfRadius, 0, 1)
+    const basinFactor = smoothstep(LAKE_SHELF_CORE, 1, core)
+    const depth = edgeBlend * (lake.shelfDepth + basinFactor * (lake.depth - lake.shelfDepth))
 
     if (edgeBlend > maxBoundary) {
       maxBoundary = edgeBlend
