@@ -198,7 +198,7 @@ function addSnakeNode(snake: SnakeNode[], axis: Point) {
   snake.push(snakeNode)
 }
 
-function applySnakeRotation(snake: SnakeNode[], axis: Point, velocity: number) {
+function applySnakeRotationStep(snake: SnakeNode[], axis: Point, velocity: number) {
   let nextPosition: Point | null = null
 
   for (let i = 0; i < snake.length; i += 1) {
@@ -217,6 +217,18 @@ function applySnakeRotation(snake: SnakeNode[], axis: Point, velocity: number) {
 
     node.posQueue.unshift(oldPosition)
     nextPosition = node.posQueue.pop() ?? null
+  }
+}
+
+function applySnakeRotation(
+  snake: SnakeNode[],
+  axis: Point,
+  stepVelocity: number,
+  steps = 1,
+) {
+  const stepCount = Math.max(1, Math.floor(steps))
+  for (let i = 0; i < stepCount; i += 1) {
+    applySnakeRotationStep(snake, axis, stepVelocity)
   }
 }
 
@@ -471,8 +483,10 @@ export class GameRoom {
     for (const player of this.players.values()) {
       if (!player.alive) continue
       player.axis = rotateToward(player.axis, player.targetAxis, TURN_RATE)
-      const speed = BASE_SPEED * (player.boost ? BOOST_MULTIPLIER : 1)
-      applySnakeRotation(player.snake, player.axis, speed)
+      const speedFactor = player.boost ? BOOST_MULTIPLIER : 1
+      const stepCount = Math.max(1, Math.round(speedFactor))
+      const stepVelocity = (BASE_SPEED * speedFactor) / stepCount
+      applySnakeRotation(player.snake, player.axis, stepVelocity, stepCount)
     }
 
     const dead: Player[] = []
