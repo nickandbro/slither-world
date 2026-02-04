@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import { ConvexGeometry } from 'three/examples/jsm/geometries/ConvexGeometry'
 import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils'
 import type { Camera, GameStateSnapshot, PlayerSnapshot, Point } from '../game/types'
 
@@ -77,6 +78,7 @@ type WebGLScene = {
 }
 
 const PLANET_RADIUS = 1
+const PLANET_FIBONACCI_POINTS = 2048
 const SNAKE_RADIUS = 0.045
 const HEAD_RADIUS = SNAKE_RADIUS * 1.35
 const SNAKE_LIFT_FACTOR = 0.85
@@ -215,6 +217,21 @@ const createSeededRandom = (seed: number) => {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296
   }
 }
+const createFibonacciSphereGeometry = (radius: number, count: number) => {
+  const points: THREE.Vector3[] = []
+  const offset = 2 / count
+  const increment = Math.PI * (3 - Math.sqrt(5))
+  for (let i = 0; i < count; i += 1) {
+    const y = i * offset - 1 + offset * 0.5
+    const r = Math.sqrt(Math.max(0, 1 - y * y))
+    const phi = i * increment
+    points.push(new THREE.Vector3(Math.cos(phi) * r, y, Math.sin(phi) * r).multiplyScalar(radius))
+  }
+  const geometry = new ConvexGeometry(points)
+  geometry.computeVertexNormals()
+  geometry.computeBoundingSphere()
+  return geometry
+}
 const randomOnSphere = (rand: () => number, target = new THREE.Vector3()) => {
   const theta = rand() * Math.PI * 2
   const z = rand() * 2 - 1
@@ -300,7 +317,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   camera.add(keyLight)
   camera.add(rimLight)
 
-  const planetGeometry = new THREE.SphereGeometry(PLANET_RADIUS, 64, 64)
+  const planetGeometry = createFibonacciSphereGeometry(PLANET_RADIUS, PLANET_FIBONACCI_POINTS)
   const planetMaterial = new THREE.MeshStandardMaterial({
     color: '#7ddf6a',
     roughness: 0.9,
