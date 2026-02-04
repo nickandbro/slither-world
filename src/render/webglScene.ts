@@ -571,6 +571,11 @@ const createLakeMaskMaterial = (lake: Lake) => {
     emissiveIntensity: 0.32,
     transparent: true,
   })
+  material.depthWrite = true
+  material.depthTest = true
+  material.polygonOffset = true
+  material.polygonOffsetFactor = -1
+  material.polygonOffsetUnits = -1
   const extensions =
     (material as THREE.Material & { extensions?: { derivatives?: boolean } }).extensions ?? {}
   extensions.derivatives = true
