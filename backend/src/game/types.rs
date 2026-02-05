@@ -26,6 +26,7 @@ pub struct Digestion {
 #[derive(Debug, Clone)]
 pub struct Player {
   pub id: String,
+  pub id_bytes: [u8; 16],
   pub name: String,
   pub color: String,
   pub is_bot: bool,
@@ -40,23 +41,4 @@ pub struct Player {
   pub respawn_at: Option<i64>,
   pub snake: Vec<SnakeNode>,
   pub digestions: Vec<Digestion>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct PlayerSnapshot {
-  pub id: String,
-  pub name: String,
-  pub color: String,
-  pub score: i64,
-  pub stamina: f64,
-  pub alive: bool,
-  pub snake: Vec<Point>,
-  pub digestions: Vec<f64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct GameStateSnapshot {
-  pub now: i64,
-  pub pellets: Vec<Point>,
-  pub players: Vec<PlayerSnapshot>,
 }

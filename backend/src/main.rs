@@ -19,6 +19,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::EnvFilter;
 
 mod game;
+mod protocol;
 mod shared;
 
 use game::room::Room;
@@ -352,12 +353,12 @@ async fn ws_handler(
 
 async fn handle_socket(socket: WebSocket, room: Arc<Room>) {
   let (mut sender, mut receiver) = socket.split();
-  let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+  let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
   let session_id = room.add_session(tx).await;
 
   let send_task = tokio::spawn(async move {
     while let Some(payload) = rx.recv().await {
-      if sender.send(Message::Text(payload)).await.is_err() {
+      if sender.send(Message::Binary(payload)).await.is_err() {
         break;
       }
     }
@@ -366,6 +367,9 @@ async fn handle_socket(socket: WebSocket, room: Arc<Room>) {
   while let Some(result) = receiver.next().await {
     let Ok(message) = result else { break };
     match message {
+      Message::Binary(data) => {
+        room.handle_binary_message(&session_id, &data).await;
+      }
       Message::Text(text) => {
         room.handle_text_message(&session_id, &text).await;
       }

@@ -17,6 +17,7 @@ import {
   storePlayerName,
   storeRoomName,
 } from './game/storage'
+import { decodeServerMessage, encodeInput, encodeJoin, encodeRespawn, type PlayerMeta } from './game/wsProtocol'
 import {
   fetchLeaderboard as fetchLeaderboardRequest,
   submitBestScore as submitBestScoreRequest,
@@ -43,8 +44,8 @@ export default function App() {
     angle: 0,
     boost: false,
     active: false,
-    screenX: 0,
-    screenY: 0,
+    screenX: Number.NaN,
+    screenY: Number.NaN,
     distance: 0,
     maxRange: 0,
   })
@@ -57,6 +58,7 @@ export default function App() {
   const cameraUpRef = useRef<Point>({ x: 0, y: 1, z: 0 })
   const cameraDistanceRef = useRef(CAMERA_DISTANCE_DEFAULT)
   const headScreenRef = useRef<{ x: number; y: number } | null>(null)
+  const playerMetaRef = useRef<Map<string, PlayerMeta>>(new Map())
 
   const [gameState, setGameState] = useState<GameStateSnapshot | null>(null)
   const [playerId, setPlayerId] = useState<string | null>(getStoredPlayerId())
@@ -229,11 +231,13 @@ export default function App() {
       const socket = new WebSocket(
         resolveWebSocketUrl(`/api/room/${encodeURIComponent(roomName)}`),
       )
+      socket.binaryType = 'arraybuffer'
       socketRef.current = socket
       snapshotBufferRef.current = []
       serverOffsetRef.current = null
       lastSnapshotTimeRef.current = null
       tickIntervalRef.current = 50
+      playerMetaRef.current = new Map()
       setConnectionStatus('Connecting')
       setGameState(null)
 
@@ -244,35 +248,19 @@ export default function App() {
       })
 
       socket.addEventListener('message', (event) => {
-        if (typeof event.data !== 'string') return
-        let payload: unknown
-        try {
-          payload = JSON.parse(event.data)
-        } catch {
+        if (!(event.data instanceof ArrayBuffer)) return
+        const decoded = decodeServerMessage(event.data, playerMetaRef.current)
+        if (!decoded) return
+        if (decoded.type === 'init') {
+          setPlayerId(decoded.playerId)
+          storePlayerId(decoded.playerId)
+          pushSnapshot(decoded.state)
+          setGameState(decoded.state)
           return
         }
-        if (!payload || typeof payload !== 'object') return
-        const message = payload as {
-          type?: string
-          playerId?: string
-          state?: GameStateSnapshot
-        }
-        if (message.type === 'init') {
-          if (message.playerId) {
-            setPlayerId(message.playerId)
-            storePlayerId(message.playerId)
-          }
-          if (message.state) {
-            pushSnapshot(message.state)
-            setGameState(message.state)
-          }
-          return
-        }
-        if (message.type === 'state') {
-          if (message.state) {
-            pushSnapshot(message.state)
-            setGameState(message.state)
-          }
+        if (decoded.type === 'state') {
+          pushSnapshot(decoded.state)
+          setGameState(decoded.state)
         }
       })
 
@@ -375,25 +363,13 @@ export default function App() {
       const axis = pointerRef.current.active
         ? axisFromPointer(pointerRef.current.angle, cameraRef.current)
         : null
-      socket.send(
-        JSON.stringify({
-          type: 'input',
-          axis,
-          boost: pointerRef.current.boost,
-        }),
-      )
+      socket.send(encodeInput(axis, pointerRef.current.boost))
     }, 50)
   }
 
   const sendJoin = (socket: WebSocket) => {
     if (socket.readyState !== WebSocket.OPEN) return
-    socket.send(
-      JSON.stringify({
-        type: 'join',
-        name: playerNameRef.current,
-        playerId: playerIdRef.current,
-      }),
-    )
+    socket.send(encodeJoin(playerNameRef.current, playerIdRef.current))
   }
 
   const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -411,6 +387,8 @@ export default function App() {
 
   const handlePointerLeave = () => {
     pointerRef.current.active = false
+    pointerRef.current.screenX = Number.NaN
+    pointerRef.current.screenY = Number.NaN
   }
 
   const handleWheel = (event: WheelEvent) => {
@@ -429,7 +407,7 @@ export default function App() {
   const requestRespawn = () => {
     const socket = socketRef.current
     if (!socket || socket.readyState !== WebSocket.OPEN) return
-    socket.send(JSON.stringify({ type: 'respawn' }))
+    socket.send(encodeRespawn())
   }
 
   const handleJoinRoom = () => {

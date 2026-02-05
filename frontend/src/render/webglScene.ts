@@ -25,11 +25,6 @@ type PointerState = {
   active: boolean
 }
 
-type GazeRay = {
-  origin: THREE.Vector3
-  direction: THREE.Vector3
-}
-
 type TongueState = {
   length: number
   mode: 'idle' | 'extend' | 'retract'
@@ -139,13 +134,12 @@ const SHORE_SAND_COLOR = '#d8c48a'
 const SNAKE_RADIUS = 0.045
 const HEAD_RADIUS = SNAKE_RADIUS * 1.35
 const SNAKE_LIFT_FACTOR = 0.85
-const EYE_RADIUS = SNAKE_RADIUS * 0.65
-const PUPIL_RADIUS = EYE_RADIUS * 0.55
-const PUPIL_OFFSET = EYE_RADIUS * 0.6
+const EYE_RADIUS = SNAKE_RADIUS * 0.62
+const PUPIL_RADIUS = EYE_RADIUS * 0.4
+const PUPIL_OFFSET = EYE_RADIUS - PUPIL_RADIUS * 0.6
 const PELLET_RADIUS = SNAKE_RADIUS * 0.75
 const PELLET_OFFSET = 0.035
-const GAZE_FOCUS_DISTANCE = 6
-const GAZE_MIN_DOT = 0.2
+const GAZE_SIDE_MAX_ANGLE = Math.PI / 4
 const TONGUE_MAX_LENGTH = HEAD_RADIUS * 2.8
 const TONGUE_MAX_RANGE = HEAD_RADIUS * 3.1
 const TONGUE_NEAR_RANGE = HEAD_RADIUS * 2.4
@@ -1085,6 +1079,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   const tempVectorE = new THREE.Vector3()
   const tempVectorF = new THREE.Vector3()
   const tempVectorG = new THREE.Vector3()
+  const tempVectorH = new THREE.Vector3()
   const tempQuat = new THREE.Quaternion()
   const tongueUp = new THREE.Vector3(0, 1, 0)
   const debugEnabled = import.meta.env.DEV || import.meta.env.VITE_E2E_DEBUG === '1'
@@ -2043,7 +2038,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     player: PlayerSnapshot,
     isLocal: boolean,
     deltaSeconds: number,
-    gazeRay: GazeRay | null,
+    gazeYaw: number | null,
     pellets: Point[] | null,
   ): PelletOverride | null => {
     let visual = snakes.get(player.id)
@@ -2514,9 +2509,9 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     }
     right.normalize()
 
-    const eyeOut = HEAD_RADIUS * 0.24
-    const eyeForward = HEAD_RADIUS * 0.32
-    const eyeSpacing = HEAD_RADIUS * 0.72
+    const eyeOut = HEAD_RADIUS * 0.16
+    const eyeForward = HEAD_RADIUS * 0.28
+    const eyeSpacing = HEAD_RADIUS * 0.52
 
     const leftEyePosition = headPosition
       .clone()
@@ -2532,27 +2527,24 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     visual.eyeLeft.position.copy(leftEyePosition)
     visual.eyeRight.position.copy(rightEyePosition)
 
-    const gazeTarget =
-      isLocal && gazeRay
-        ? tempVectorD.copy(gazeRay.origin).addScaledVector(gazeRay.direction, GAZE_FOCUS_DISTANCE)
-        : null
+    const clampedYaw = 0
+    const pupilSurfaceDistance = PUPIL_OFFSET
 
     const updatePupil = (eyePosition: THREE.Vector3, eyeNormal: THREE.Vector3, output: THREE.Vector3) => {
-      if (gazeTarget) {
-        tempVectorE.copy(gazeTarget).sub(eyePosition)
-        if (tempVectorE.lengthSq() < 1e-6) {
-          tempVectorE.copy(forward)
-        }
+      tempVectorH.copy(right)
+      tempVectorH.addScaledVector(eyeNormal, -tempVectorH.dot(eyeNormal))
+      if (tempVectorH.lengthSq() > 1e-6) {
+        tempVectorH.normalize()
       } else {
-        tempVectorE.copy(forward)
+        tempVectorH.copy(right)
       }
-      tempVectorE.normalize()
-      const dot = tempVectorE.dot(eyeNormal)
-      if (dot < GAZE_MIN_DOT) {
-        const blend = clamp((GAZE_MIN_DOT - dot) / (1 - GAZE_MIN_DOT), 0, 1)
-        tempVectorE.lerp(eyeNormal, blend).normalize()
-      }
-      output.copy(eyePosition).addScaledVector(tempVectorE, PUPIL_OFFSET)
+
+      const yawCos = Math.cos(clampedYaw)
+      const yawSin = Math.sin(clampedYaw)
+      output
+        .copy(eyePosition)
+        .addScaledVector(eyeNormal, pupilSurfaceDistance * yawCos)
+        .addScaledVector(tempVectorH, pupilSurfaceDistance * yawSin)
     }
 
     tempVectorF.copy(leftEyePosition).sub(headPosition).normalize()
@@ -2632,7 +2624,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     players: PlayerSnapshot[],
     localPlayerId: string | null,
     deltaSeconds: number,
-    gazeRay: GazeRay | null,
+    gazeYaw: number | null,
     pellets: Point[] | null,
   ): PelletOverride | null => {
     const activeIds = new Set<string>()
@@ -2643,7 +2635,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
         player,
         player.id === localPlayerId,
         deltaSeconds,
-        gazeRay,
+        player.id === localPlayerId ? gazeYaw : null,
         pellets,
       )
       if (override) {
@@ -2716,54 +2708,40 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     camera.updateMatrixWorld()
 
     let localHeadScreen: { x: number; y: number } | null = null
-    let gazeRay: GazeRay | null = null
+    let gazeYaw: number | null = null
 
-    if (pointer?.active && viewportWidth > 0 && viewportHeight > 0) {
-      const ndcX = (pointer.screenX / viewportWidth) * 2 - 1
-      const ndcY = -(pointer.screenY / viewportHeight) * 2 + 1
-      if (Number.isFinite(ndcX) && Number.isFinite(ndcY)) {
-        tempVectorD.set(ndcX, ndcY, 0.5).unproject(camera)
-        tempQuat.copy(world.quaternion).invert()
-        tempVectorD.applyQuaternion(tempQuat)
-        tempVectorE.copy(camera.position).applyQuaternion(tempQuat)
-        tempVectorF.copy(tempVectorD).sub(tempVectorE)
-        if (tempVectorF.lengthSq() > 1e-8) {
-          tempVectorF.normalize()
-          gazeRay = { origin: tempVectorE.clone(), direction: tempVectorF.clone() }
+    if (snapshot && localPlayerId) {
+      const localPlayer = snapshot.players.find((player) => player.id === localPlayerId)
+      const head = localPlayer?.snake[0]
+      if (head) {
+        const radius = SNAKE_RADIUS * 1.1
+        const centerlineRadius = PLANET_RADIUS + radius * SNAKE_LIFT_FACTOR
+        const headNormal = tempVectorC.set(head.x, head.y, head.z).normalize()
+        const headPosition = headNormal.clone().multiplyScalar(centerlineRadius)
+        headPosition.applyQuaternion(world.quaternion)
+        headPosition.project(camera)
+
+        const screenX = (headPosition.x * 0.5 + 0.5) * viewportWidth
+        const screenY = (-headPosition.y * 0.5 + 0.5) * viewportHeight
+        if (Number.isFinite(screenX) && Number.isFinite(screenY)) {
+          localHeadScreen = { x: screenX, y: screenY }
         }
       }
     }
+
+    // gazeYaw stays null so pupils remain fixed forward.
 
     if (snapshot) {
       const pelletOverride = updateSnakes(
         snapshot.players,
         localPlayerId,
         deltaSeconds,
-        gazeRay,
+        gazeYaw,
         snapshot.pellets,
       )
       updatePellets(snapshot.pellets, pelletOverride)
-
-      if (localPlayerId) {
-        const localPlayer = snapshot.players.find((player) => player.id === localPlayerId)
-        const head = localPlayer?.snake[0]
-        if (head) {
-          const radius = SNAKE_RADIUS * 1.1
-          const centerlineRadius = PLANET_RADIUS + radius * SNAKE_LIFT_FACTOR
-          const headNormal = tempVectorC.set(head.x, head.y, head.z).normalize()
-          const headPosition = headNormal.clone().multiplyScalar(centerlineRadius)
-          headPosition.applyQuaternion(world.quaternion)
-          headPosition.project(camera)
-
-          const screenX = (headPosition.x * 0.5 + 0.5) * viewportWidth
-          const screenY = (-headPosition.y * 0.5 + 0.5) * viewportHeight
-          if (Number.isFinite(screenX) && Number.isFinite(screenY)) {
-            localHeadScreen = { x: screenX, y: screenY }
-          }
-        }
-      }
     } else {
-      updateSnakes([], localPlayerId, deltaSeconds, gazeRay, null)
+      updateSnakes([], localPlayerId, deltaSeconds, gazeYaw, null)
       updatePellets([], null)
     }
 

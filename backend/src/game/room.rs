@@ -11,7 +11,8 @@ use super::math::{
   rotate_z,
 };
 use super::snake::{apply_snake_rotation, create_snake, rotate_snake};
-use super::types::{GameStateSnapshot, Player, PlayerSnapshot, Point, SnakeNode};
+use super::types::{Player, Point, SnakeNode};
+use crate::protocol;
 use crate::shared::names::sanitize_player_name;
 use rand::Rng;
 use serde::Deserialize;
@@ -38,7 +39,7 @@ pub enum DebugKillTarget {
 
 #[derive(Debug)]
 struct SessionEntry {
-  sender: UnboundedSender<String>,
+  sender: UnboundedSender<Vec<u8>>,
   player_id: Option<String>,
 }
 
@@ -51,7 +52,7 @@ struct RoomState {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
-enum ClientMessage {
+enum JsonClientMessage {
   #[serde(rename = "join")]
   Join {
     name: Option<String>,
@@ -62,19 +63,6 @@ enum ClientMessage {
   Respawn,
   #[serde(rename = "input")]
   Input { axis: Option<Point>, boost: Option<bool> },
-}
-
-#[derive(Debug, serde::Serialize)]
-#[serde(tag = "type")]
-enum ServerMessage {
-  #[serde(rename = "init")]
-  Init {
-    #[serde(rename = "playerId")]
-    player_id: String,
-    state: GameStateSnapshot,
-  },
-  #[serde(rename = "state")]
-  State { state: GameStateSnapshot },
 }
 
 impl Room {
@@ -89,7 +77,7 @@ impl Room {
     }
   }
 
-  pub async fn add_session(&self, sender: UnboundedSender<String>) -> String {
+  pub async fn add_session(&self, sender: UnboundedSender<Vec<u8>>) -> String {
     let session_id = Uuid::new_v4().to_string();
     let mut state = self.state.lock().await;
     state.sessions.insert(
@@ -108,18 +96,40 @@ impl Room {
   }
 
   pub async fn handle_text_message(self: &Arc<Self>, session_id: &str, text: &str) {
-    let Ok(message) = serde_json::from_str::<ClientMessage>(text) else { return };
+    let Ok(message) = serde_json::from_str::<JsonClientMessage>(text) else { return };
+    let message = match message {
+      JsonClientMessage::Join { name, player_id } => {
+        let player_id = player_id.and_then(|value| Uuid::parse_str(&value).ok());
+        protocol::ClientMessage::Join { name, player_id }
+      }
+      JsonClientMessage::Respawn => protocol::ClientMessage::Respawn,
+      JsonClientMessage::Input { axis, boost } => {
+        protocol::ClientMessage::Input {
+          axis,
+          boost: boost.unwrap_or(false),
+        }
+      }
+    };
+    self.handle_client_message(session_id, message).await;
+  }
+
+  pub async fn handle_binary_message(self: &Arc<Self>, session_id: &str, data: &[u8]) {
+    let Some(message) = protocol::decode_client_message(data) else { return };
+    self.handle_client_message(session_id, message).await;
+  }
+
+  async fn handle_client_message(self: &Arc<Self>, session_id: &str, message: protocol::ClientMessage) {
     let mut state = self.state.lock().await;
     match message {
-      ClientMessage::Join { name, player_id } => {
+      protocol::ClientMessage::Join { name, player_id } => {
         state.handle_join(session_id, name, player_id);
         drop(state);
         self.ensure_loop();
       }
-      ClientMessage::Respawn => {
+      protocol::ClientMessage::Respawn => {
         state.handle_respawn(session_id);
       }
-      ClientMessage::Input { axis, boost } => {
+      protocol::ClientMessage::Input { axis, boost } => {
         state.handle_input(session_id, axis, boost);
       }
     }
@@ -176,41 +186,36 @@ impl RoomState {
     }
   }
 
-  fn handle_join(&mut self, session_id: &str, name: Option<String>, player_id: Option<String>) {
+  fn handle_join(&mut self, session_id: &str, name: Option<String>, player_id: Option<Uuid>) {
     let raw_name = name.unwrap_or_else(|| "Player".to_string());
     let sanitized_name = sanitize_player_name(&raw_name, "Player");
-    let requested_id = player_id.and_then(|value| if value.is_empty() { None } else { Some(value) });
 
-    let player_id = if let Some(id) = requested_id {
-      if let Some(player) = self.players.get_mut(&id) {
+    let player_id = if let Some(id) = player_id {
+      let id_string = id.to_string();
+      if let Some(player) = self.players.get_mut(&id_string) {
         player.name = sanitized_name.clone();
         player.connected = true;
         player.last_seen = Self::now_millis();
-        id
+        id_string
       } else {
-        let new_player = self.create_player(id.clone(), sanitized_name.clone(), false);
-        self.players.insert(id.clone(), new_player);
-        id
+        let new_player = self.create_player(id, sanitized_name.clone(), false);
+        self.players.insert(id_string.clone(), new_player);
+        id_string
       }
     } else {
-      let id = Uuid::new_v4().to_string();
-      let new_player = self.create_player(id.clone(), sanitized_name.clone(), false);
-      self.players.insert(id.clone(), new_player);
-      id
+      let id = Uuid::new_v4();
+      let id_string = id.to_string();
+      let new_player = self.create_player(id, sanitized_name.clone(), false);
+      self.players.insert(id_string.clone(), new_player);
+      id_string
     };
 
-    let snapshot = self.build_state_snapshot();
-    let payload = serde_json::to_string(&ServerMessage::Init {
-      player_id: player_id.clone(),
-      state: snapshot,
-    });
-
+    let payload = self.build_init_payload(&player_id);
     if let Some(session) = self.sessions.get_mut(session_id) {
-      session.player_id = Some(player_id);
-      if let Ok(payload) = payload {
-        let _ = session.sender.send(payload);
-      }
+      session.player_id = Some(player_id.clone());
+      let _ = session.sender.send(payload);
     }
+    self.broadcast_player_meta(&[player_id]);
   }
 
   fn handle_respawn(&mut self, session_id: &str) {
@@ -232,7 +237,7 @@ impl RoomState {
     }
   }
 
-  fn handle_input(&mut self, session_id: &str, axis: Option<Point>, boost: Option<bool>) {
+  fn handle_input(&mut self, session_id: &str, axis: Option<Point>, boost: bool) {
     let Some(player_id) = self.session_player_id(session_id) else { return };
     let Some(player) = self.players.get_mut(&player_id) else { return };
 
@@ -240,7 +245,7 @@ impl RoomState {
       player.target_axis = axis;
     }
 
-    player.boost = boost.unwrap_or(false);
+    player.boost = boost;
     player.last_seen = Self::now_millis();
   }
 
@@ -312,13 +317,19 @@ impl RoomState {
     }
 
     let mut index = self.next_bot_index();
+    let mut new_bot_ids: Vec<String> = Vec::new();
     while current < BOT_COUNT {
-      let id = format!("bot-{}", Uuid::new_v4());
+      let id = Uuid::new_v4();
+      let id_string = id.to_string();
       let name = format!("Bot-{}", index);
-      let bot = self.create_player(id.clone(), name, true);
-      self.players.insert(id, bot);
+      let bot = self.create_player(id, name, true);
+      self.players.insert(id_string.clone(), bot);
+      new_bot_ids.push(id_string);
       current += 1;
       index += 1;
+    }
+    if !new_bot_ids.is_empty() {
+      self.broadcast_player_meta(&new_bot_ids);
     }
   }
 
@@ -399,7 +410,7 @@ impl RoomState {
     }
   }
 
-  fn create_player(&self, id: String, name: String, is_bot: bool) -> Player {
+  fn create_player(&self, id: Uuid, name: String, is_bot: bool) -> Player {
     let base_axis = random_axis();
     let spawned = self.spawn_snake(base_axis);
     let (alive, axis, snake, respawn_at) = match spawned {
@@ -412,8 +423,11 @@ impl RoomState {
       ),
     };
 
+    let id_string = id.to_string();
+
     Player {
-      id,
+      id: id_string,
+      id_bytes: *id.as_bytes(),
       name,
       color: COLOR_POOL[self.players.len() % COLOR_POOL.len()].to_string(),
       is_bot,
@@ -682,44 +696,147 @@ impl RoomState {
     tracing::debug!(player_id, is_bot = player.is_bot, "player respawned");
   }
 
-  fn build_state_snapshot(&self) -> GameStateSnapshot {
-    GameStateSnapshot {
-      now: Self::now_millis(),
-      pellets: self.pellets.iter().copied().collect(),
-      players: self
-        .players
-        .values()
-        .map(|player| PlayerSnapshot {
-          id: player.id.clone(),
-          name: player.name.clone(),
-          color: player.color.clone(),
-          score: player.score,
-          stamina: player.stamina,
-          alive: player.alive,
-          snake: player
-            .snake
-            .iter()
-            .map(|node| Point {
-              x: node.x,
-              y: node.y,
-              z: node.z,
-            })
-            .collect(),
-          digestions: player
-            .digestions
-            .iter()
-            .map(get_digestion_progress)
-            .collect(),
-        })
-        .collect(),
+  fn build_init_payload(&self, player_id: &str) -> Vec<u8> {
+    let player_bytes = self
+      .players
+      .get(player_id)
+      .map(|player| player.id_bytes)
+      .unwrap_or([0u8; 16]);
+    let now = Self::now_millis();
+    let mut capacity = 4 + 16 + 8 + 2 + self.pellets.len() * 12 + 2;
+    for player in self.players.values() {
+      capacity += 16;
+      capacity += 1 + Self::truncated_len(&player.name);
+      capacity += 1 + Self::truncated_len(&player.color);
+    }
+    capacity += 2;
+    for player in self.players.values() {
+      capacity += 16 + 1 + 4 + 4 + 2 + player.snake.len() * 12 + 1 + player.digestions.len() * 4;
+    }
+
+    let mut encoder = protocol::Encoder::with_capacity(capacity);
+    encoder.write_header(protocol::TYPE_INIT, 0);
+    encoder.write_uuid(&player_bytes);
+    encoder.write_i64(now);
+    encoder.write_u16(self.pellets.len() as u16);
+    for pellet in &self.pellets {
+      encoder.write_f32(pellet.x as f32);
+      encoder.write_f32(pellet.y as f32);
+      encoder.write_f32(pellet.z as f32);
+    }
+
+    encoder.write_u16(self.players.len() as u16);
+    for player in self.players.values() {
+      encoder.write_uuid(&player.id_bytes);
+      encoder.write_string(&player.name);
+      encoder.write_string(&player.color);
+    }
+
+    encoder.write_u16(self.players.len() as u16);
+    for player in self.players.values() {
+      self.write_player_state(&mut encoder, player);
+    }
+
+    encoder.into_vec()
+  }
+
+  fn build_state_payload(&self, now: i64) -> Vec<u8> {
+    let mut capacity = 4 + 8 + 2 + self.pellets.len() * 12 + 2;
+    for player in self.players.values() {
+      capacity += 16 + 1 + 4 + 4 + 2 + player.snake.len() * 12 + 1 + player.digestions.len() * 4;
+    }
+
+    let mut encoder = protocol::Encoder::with_capacity(capacity);
+    encoder.write_header(protocol::TYPE_STATE, 0);
+    encoder.write_i64(now);
+    encoder.write_u16(self.pellets.len() as u16);
+    for pellet in &self.pellets {
+      encoder.write_f32(pellet.x as f32);
+      encoder.write_f32(pellet.y as f32);
+      encoder.write_f32(pellet.z as f32);
+    }
+
+    encoder.write_u16(self.players.len() as u16);
+    for player in self.players.values() {
+      self.write_player_state(&mut encoder, player);
+    }
+
+    encoder.into_vec()
+  }
+
+  fn build_player_meta_payload(&self, player_ids: &[String]) -> Option<Vec<u8>> {
+    let mut players: Vec<&Player> = Vec::new();
+    for id in player_ids {
+      if let Some(player) = self.players.get(id) {
+        players.push(player);
+      }
+    }
+    if players.is_empty() {
+      return None;
+    }
+
+    let mut capacity = 4 + 2;
+    for player in &players {
+      capacity += 16;
+      capacity += 1 + Self::truncated_len(&player.name);
+      capacity += 1 + Self::truncated_len(&player.color);
+    }
+
+    let mut encoder = protocol::Encoder::with_capacity(capacity);
+    encoder.write_header(protocol::TYPE_PLAYER_META, 0);
+    encoder.write_u16(players.len() as u16);
+    for player in players {
+      encoder.write_uuid(&player.id_bytes);
+      encoder.write_string(&player.name);
+      encoder.write_string(&player.color);
+    }
+    Some(encoder.into_vec())
+  }
+
+  fn broadcast_player_meta(&mut self, player_ids: &[String]) {
+    let Some(payload) = self.build_player_meta_payload(player_ids) else { return };
+    let mut stale = Vec::new();
+    for (session_id, session) in &self.sessions {
+      if session.sender.send(payload.clone()).is_err() {
+        stale.push(session_id.clone());
+      }
+    }
+    for session_id in stale {
+      self.disconnect_session(&session_id);
     }
   }
 
+  fn write_player_state(&self, encoder: &mut protocol::Encoder, player: &Player) {
+    encoder.write_uuid(&player.id_bytes);
+    encoder.write_u8(if player.alive { 1 } else { 0 });
+    encoder.write_i32(player.score as i32);
+    encoder.write_f32(player.stamina as f32);
+    let snake_len = player.snake.len().min(u16::MAX as usize) as u16;
+    encoder.write_u16(snake_len);
+    for node in player.snake.iter().take(snake_len as usize) {
+      encoder.write_f32(node.x as f32);
+      encoder.write_f32(node.y as f32);
+      encoder.write_f32(node.z as f32);
+    }
+    let digestion_len = player.digestions.len().min(u8::MAX as usize) as u8;
+    encoder.write_u8(digestion_len);
+    for digestion in player.digestions.iter().take(digestion_len as usize) {
+      encoder.write_f32(get_digestion_progress(digestion) as f32);
+    }
+  }
+
+  fn truncated_len(value: &str) -> usize {
+    let bytes = value.as_bytes();
+    let mut end = bytes.len().min(u8::MAX as usize);
+    while !value.is_char_boundary(end) {
+      end = end.saturating_sub(1);
+    }
+    end
+  }
+
   fn broadcast_state(&mut self) {
-    let snapshot = self.build_state_snapshot();
-    let Ok(payload) = serde_json::to_string(&ServerMessage::State { state: snapshot }) else {
-      return;
-    };
+    let now = Self::now_millis();
+    let payload = self.build_state_payload(now);
     let mut stale = Vec::new();
     for (session_id, session) in &self.sessions {
       if session.sender.send(payload.clone()).is_err() {

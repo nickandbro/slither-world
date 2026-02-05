@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_PORT="${BACKEND_PORT:-8788}"
 BACKEND_URL="${BACKEND_URL:-http://localhost:${BACKEND_PORT}}"
+BACKEND_PORT_RANGE="${BACKEND_PORT_RANGE:-8788-8798}"
+BACKEND_PORT_FALLBACK_RANGE="${BACKEND_PORT_FALLBACK_RANGE:-8800-8899}"
 
 pick_port() {
   local start_port="$1"
@@ -18,12 +20,54 @@ pick_port() {
   return 1
 }
 
+pick_port_range() {
+  local range="$1"
+  local start_port
+  local end_port
+  IFS='-' read -r start_port end_port <<<"${range}"
+  if [[ -z "${start_port}" || -z "${end_port}" ]]; then
+    return 1
+  fi
+  pick_port "${start_port}" "${end_port}"
+}
+
+pick_random_port() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+    return 0
+  fi
+  if command -v python >/dev/null 2>&1; then
+    python - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+    return 0
+  fi
+  return 1
+}
+
 if lsof -iTCP:"${BACKEND_PORT}" -sTCP:LISTEN -Pn >/dev/null 2>&1; then
-  if picked="$(pick_port 8788 8798)"; then
+  if picked="$(pick_port_range "${BACKEND_PORT_RANGE}")"; then
+    BACKEND_PORT="${picked}"
+    BACKEND_URL="http://localhost:${BACKEND_PORT}"
+  elif picked="$(pick_port_range "${BACKEND_PORT_FALLBACK_RANGE}")"; then
+    BACKEND_PORT="${picked}"
+    BACKEND_URL="http://localhost:${BACKEND_PORT}"
+  elif picked="$(pick_random_port)"; then
     BACKEND_PORT="${picked}"
     BACKEND_URL="http://localhost:${BACKEND_PORT}"
   else
-    echo "No free backend port found in 8788-8798." >&2
+    echo "No free backend port found in ${BACKEND_PORT_RANGE}." >&2
+    echo "Tried fallback range ${BACKEND_PORT_FALLBACK_RANGE} and dynamic port selection." >&2
     exit 1
   fi
 fi
