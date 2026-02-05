@@ -1,7 +1,8 @@
 use super::constants::{
   BASE_PELLET_COUNT, BASE_SPEED, BOOST_MULTIPLIER, BOT_BOOST_DISTANCE, BOT_COUNT,
-  BOT_MIN_STAMINA_TO_BOOST, COLOR_POOL, MAX_PELLETS, MAX_SPAWN_ATTEMPTS, OXYGEN_DRAIN_PER_SEC,
-  OXYGEN_MAX, PLAYER_TIMEOUT_MS, RESPAWN_COOLDOWN_MS, RESPAWN_RETRY_MS, SPAWN_CONE_ANGLE,
+  BOT_MIN_STAMINA_TO_BOOST, COLOR_POOL, MAX_PELLETS, MAX_SPAWN_ATTEMPTS, MIN_SURVIVAL_LENGTH,
+  OXYGEN_DAMAGE_NODE_INTERVAL_SEC, OXYGEN_DRAIN_PER_SEC, OXYGEN_MAX, PLAYER_TIMEOUT_MS,
+  RESPAWN_COOLDOWN_MS, RESPAWN_RETRY_MS, SPAWN_CONE_ANGLE,
   STAMINA_DRAIN_PER_SEC, STAMINA_MAX, STAMINA_RECHARGE_PER_SEC, TICK_MS, TURN_RATE,
 };
 use super::digestion::{add_digestion, advance_digestions, get_digestion_progress};
@@ -457,6 +458,7 @@ impl RoomState {
       boost: false,
       stamina: STAMINA_MAX,
       oxygen: OXYGEN_MAX,
+      oxygen_damage_accumulator: 0.0,
       score: 0,
       alive,
       connected: true,
@@ -601,11 +603,28 @@ impl RoomState {
       if sample.boundary > LAKE_WATER_MASK_THRESHOLD {
         player.oxygen = (player.oxygen - OXYGEN_DRAIN_PER_SEC * dt_seconds).max(0.0);
         if player.oxygen <= 0.0 {
-          oxygen_dead.insert(player.id.clone());
-          death_reasons.entry(player.id.clone()).or_insert("oxygen");
+          player.oxygen_damage_accumulator += dt_seconds;
+          let mut drown_dead = false;
+          while player.oxygen_damage_accumulator >= OXYGEN_DAMAGE_NODE_INTERVAL_SEC {
+            player.oxygen_damage_accumulator -= OXYGEN_DAMAGE_NODE_INTERVAL_SEC;
+            if player.snake.len() > MIN_SURVIVAL_LENGTH {
+              player.snake.pop();
+            } else {
+              drown_dead = true;
+              break;
+            }
+          }
+          if drown_dead {
+            oxygen_dead.insert(player.id.clone());
+            death_reasons.entry(player.id.clone()).or_insert("oxygen");
+            player.oxygen_damage_accumulator = 0.0;
+          }
+        } else {
+          player.oxygen_damage_accumulator = 0.0;
         }
       } else {
         player.oxygen = OXYGEN_MAX;
+        player.oxygen_damage_accumulator = 0.0;
       }
     }
 
@@ -721,6 +740,7 @@ impl RoomState {
     player.respawn_at = Some(Self::now_millis() + RESPAWN_COOLDOWN_MS);
     player.digestions.clear();
     player.next_digestion_id = 0;
+    player.oxygen_damage_accumulator = 0.0;
 
     for node in player.snake.iter().skip(1) {
       self.pellets.push(Point {
@@ -754,6 +774,7 @@ impl RoomState {
     player.boost = false;
     player.stamina = STAMINA_MAX;
     player.oxygen = OXYGEN_MAX;
+    player.oxygen_damage_accumulator = 0.0;
     player.respawn_at = None;
     player.snake = spawned.snake;
     player.digestions.clear();
@@ -954,6 +975,7 @@ mod tests {
       boost: false,
       stamina: STAMINA_MAX,
       oxygen: OXYGEN_MAX,
+      oxygen_damage_accumulator: 0.0,
       score: 0,
       alive: true,
       connected: true,
@@ -1040,5 +1062,111 @@ mod tests {
     let encoded_progress = f32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
     let expected_progress = get_digestion_progress(&player.digestions[0]) as f32;
     assert!((encoded_progress - expected_progress).abs() < 1e-6);
+  }
+
+  fn make_full_lake_state() -> RoomState {
+    use crate::game::environment::Lake;
+    let mut state = make_state();
+    state.environment.lakes = vec![Lake {
+      center: Point { x: 1.0, y: 0.0, z: 0.0 },
+      radius: std::f64::consts::PI,
+      depth: 0.2,
+      shelf_depth: 0.1,
+      edge_falloff: 0.05,
+      noise_amplitude: 0.0,
+      noise_frequency: 1.0,
+      noise_frequency_b: 1.0,
+      noise_frequency_c: 1.0,
+      noise_phase: 0.0,
+      noise_phase_b: 0.0,
+      noise_phase_c: 0.0,
+      warp_amplitude: 0.0,
+      surface_inset: 0.08,
+      tangent: Point { x: 0.0, y: 1.0, z: 0.0 },
+      bitangent: Point { x: 0.0, y: 0.0, z: 1.0 },
+    }];
+    state
+  }
+
+  #[test]
+  fn oxygen_depletion_shrinks_snake_over_time() {
+    let mut state = make_full_lake_state();
+    let player_id = "player-oxygen-shrink".to_string();
+    let mut player = make_player(
+      &player_id,
+      create_snake(Point {
+        x: 1.0,
+        y: 0.0,
+        z: 0.0,
+      }),
+    );
+    player.oxygen = 0.0;
+    state.players.insert(player_id.clone(), player);
+
+    for _ in 0..20 {
+      state.tick();
+    }
+
+    let player = state.players.get(&player_id).expect("player");
+    assert!(player.alive);
+    assert_eq!(player.snake.len(), 7);
+  }
+
+  #[test]
+  fn oxygen_depletion_kills_at_min_survival_length() {
+    let mut state = make_full_lake_state();
+    let player_id = "player-oxygen-min".to_string();
+    let mut snake = create_snake(Point {
+      x: 1.0,
+      y: 0.0,
+      z: 0.0,
+    });
+    snake.truncate(MIN_SURVIVAL_LENGTH);
+    let mut player = make_player(&player_id, snake);
+    player.oxygen = 0.0;
+    state.players.insert(player_id.clone(), player);
+
+    for _ in 0..20 {
+      state.tick();
+    }
+
+    let player = state.players.get(&player_id).expect("player");
+    assert!(!player.alive);
+    assert_eq!(player.score, 0);
+  }
+
+  #[test]
+  fn oxygen_damage_accumulator_resets_when_not_underwater() {
+    let mut state = make_full_lake_state();
+    let player_id = "player-oxygen-reset".to_string();
+    let mut player = make_player(
+      &player_id,
+      create_snake(Point {
+        x: 1.0,
+        y: 0.0,
+        z: 0.0,
+      }),
+    );
+    player.oxygen = 0.0;
+    state.players.insert(player_id.clone(), player);
+
+    for _ in 0..10 {
+      state.tick();
+    }
+
+    let half_accumulated = state
+      .players
+      .get(&player_id)
+      .expect("player")
+      .oxygen_damage_accumulator;
+    assert!(half_accumulated > 0.0 && half_accumulated < OXYGEN_DAMAGE_NODE_INTERVAL_SEC);
+
+    state.environment.lakes.clear();
+    state.tick();
+
+    let player = state.players.get(&player_id).expect("player");
+    assert_eq!(player.oxygen, OXYGEN_MAX);
+    assert_eq!(player.oxygen_damage_accumulator, 0.0);
+    assert_eq!(player.snake.len(), 8);
   }
 }

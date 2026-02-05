@@ -91,6 +91,7 @@ mod tests {
       boost: false,
       stamina: 1.0,
       oxygen: 1.0,
+      oxygen_damage_accumulator: 0.0,
       score: 0,
       alive: true,
       connected: true,

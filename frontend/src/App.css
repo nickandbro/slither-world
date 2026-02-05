@@ -325,6 +325,27 @@ input {
   min-width: 160px;
 }
 
+select {
+  border: 1px solid rgba(11, 19, 32, 0.2);
+  border-radius: 999px;
+  padding: 0.45rem 0.9rem;
+  background: #f7fbfd;
+  min-width: 160px;
+}
+
+.renderer-status {
+  display: flex;
+  flex-direction: column;
+  gap: 0.18rem;
+  font-family: 'Space Mono', monospace;
+  font-size: 0.72rem;
+  color: rgba(11, 19, 32, 0.78);
+}
+
+.renderer-fallback {
+  color: rgba(11, 19, 32, 0.56);
+}
+
 button {
   border: none;
   border-radius: 999px;

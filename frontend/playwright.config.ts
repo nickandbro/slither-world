@@ -17,7 +17,18 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
+      grepInvert: /@webgpu/,
       use: { browserName: 'chromium' },
+    },
+    {
+      name: 'chromium-webgpu',
+      grep: /@webgpu/,
+      use: {
+        browserName: 'chromium',
+        launchOptions: {
+          args: ['--enable-unsafe-webgpu', '--use-angle=metal'],
+        },
+      },
     },
   ],
   webServer: {

@@ -2,8 +2,18 @@ const LOCAL_STORAGE_ID = 'spherical_snake_player_id'
 const LOCAL_STORAGE_NAME = 'spherical_snake_player_name'
 const LOCAL_STORAGE_BEST = 'spherical_snake_best_score'
 const LOCAL_STORAGE_ROOM = 'spherical_snake_room'
+const LOCAL_STORAGE_RENDERER = 'spherical_snake_renderer'
 
 export const DEFAULT_ROOM = 'main'
+export const DEFAULT_RENDERER = 'auto'
+export type RendererPreference = 'auto' | 'webgl' | 'webgpu'
+
+export function sanitizeRendererPreference(value: string | null | undefined): RendererPreference {
+  if (value === 'webgl' || value === 'webgpu' || value === 'auto') {
+    return value
+  }
+  return DEFAULT_RENDERER
+}
 
 export function getInitialName() {
   const stored = localStorage.getItem(LOCAL_STORAGE_NAME)
@@ -37,6 +47,20 @@ export function getInitialRoom() {
   return sanitizeRoomName(fromUrl ?? stored ?? DEFAULT_ROOM)
 }
 
+export function getStoredRendererPreference() {
+  const value = localStorage.getItem(LOCAL_STORAGE_RENDERER)
+  return sanitizeRendererPreference(value)
+}
+
+export function getInitialRendererPreference() {
+  const params = new URLSearchParams(window.location.search)
+  const fromUrl = params.get('renderer')
+  if (fromUrl) {
+    return sanitizeRendererPreference(fromUrl)
+  }
+  return getStoredRendererPreference()
+}
+
 export function storePlayerName(name: string) {
   localStorage.setItem(LOCAL_STORAGE_NAME, name)
 }
@@ -51,4 +75,8 @@ export function storeRoomName(roomName: string) {
 
 export function storePlayerId(playerId: string) {
   localStorage.setItem(LOCAL_STORAGE_ID, playerId)
+}
+
+export function storeRendererPreference(renderer: RendererPreference) {
+  localStorage.setItem(LOCAL_STORAGE_RENDERER, renderer)
 }

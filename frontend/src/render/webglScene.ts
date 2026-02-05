@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import { WebGPURenderer } from 'three/webgpu'
 import { ConvexGeometry } from 'three/examples/jsm/geometries/ConvexGeometry'
 import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils'
 import type {
@@ -87,6 +88,14 @@ type Lake = {
   surfaceInset: number
 }
 
+type LakeWaterUniforms = {
+  time: { value: number }
+}
+
+type LakeMaterialUserData = {
+  lakeWaterUniforms?: LakeWaterUniforms
+}
+
 type TreeInstance = {
   normal: THREE.Vector3
   widthScale: number
@@ -105,7 +114,10 @@ type MountainInstance = {
   bitangent: THREE.Vector3
 }
 
-export type WebGLScene = {
+export type RendererPreference = 'auto' | 'webgl' | 'webgpu'
+export type RendererBackend = 'webgl' | 'webgpu'
+
+export type RenderScene = {
   resize: (width: number, height: number, dpr: number) => void
   render: (
     snapshot: GameStateSnapshot | null,
@@ -122,6 +134,14 @@ export type WebGLScene = {
   dispose: () => void
 }
 
+export type WebGLScene = RenderScene
+
+export type CreateRenderSceneResult = {
+  scene: RenderScene
+  activeBackend: RendererBackend
+  fallbackReason: string | null
+}
+
 const BASE_PLANET_RADIUS = 1
 const PLANET_RADIUS = 3
 const PLANET_SCALE = PLANET_RADIUS / BASE_PLANET_RADIUS
@@ -132,8 +152,8 @@ const LAKE_SURFACE_RINGS = 64
 const LAKE_COUNT = 2
 const LAKE_MIN_ANGLE = 0.9 / PLANET_SCALE
 const LAKE_MAX_ANGLE = 1.3 / PLANET_SCALE
-const LAKE_MIN_DEPTH = BASE_PLANET_RADIUS * 0.07
-const LAKE_MAX_DEPTH = BASE_PLANET_RADIUS * 0.12
+const LAKE_MIN_DEPTH = BASE_PLANET_RADIUS * 0.1
+const LAKE_MAX_DEPTH = BASE_PLANET_RADIUS * 0.17
 const LAKE_EDGE_FALLOFF = 0.08
 const LAKE_EDGE_SHARPNESS = 1.8
 const LAKE_NOISE_AMPLITUDE = 0.55
@@ -142,7 +162,7 @@ const LAKE_NOISE_FREQ_MAX = 6
 const LAKE_SHELF_DEPTH_RATIO = 0.45
 const LAKE_SHELF_CORE = 0.55
 const LAKE_CENTER_PIT_START = 0.72
-const LAKE_CENTER_PIT_RATIO = 0.35
+const LAKE_CENTER_PIT_RATIO = 0.5
 const LAKE_SURFACE_INSET_RATIO = 0.5
 const LAKE_SURFACE_EXTRA_INSET = BASE_PLANET_RADIUS * 0.01
 const LAKE_SURFACE_DEPTH_EPS = BASE_PLANET_RADIUS * 0.0015
@@ -156,8 +176,22 @@ const DEATH_VISIBILITY_CUTOFF = 0.02
 
 const WORLD_UP = new THREE.Vector3(0, 1, 0)
 const WORLD_RIGHT = new THREE.Vector3(1, 0, 0)
+const OXYGEN_DAMAGE_COLOR = new THREE.Color('#ff2d2d')
+const OXYGEN_DAMAGE_EMISSIVE = new THREE.Color('#ff0000')
 const LAKE_WATER_OVERDRAW = BASE_PLANET_RADIUS * 0.01
-const LAKE_TERRAIN_CLAMP_EPS = BASE_PLANET_RADIUS * 0.0008
+const LAKE_TERRAIN_CLAMP_EPS = BASE_PLANET_RADIUS * 0.0012
+const LAKE_WATER_OPACITY = 0.65
+const LAKE_WATER_WAVE_SPEED = 0.65
+const LAKE_WATER_WAVE_SCALE = 22
+const LAKE_WATER_WAVE_STRENGTH = 0.18
+const LAKE_WATER_FRESNEL_STRENGTH = 0.35
+const LAKE_WATER_ALPHA_PULSE = 0.1
+const LAKE_WATER_EMISSIVE_BASE = 0.38
+const LAKE_WATER_EMISSIVE_PULSE = 0.08
+const OXYGEN_DAMAGE_ACTIVE_THRESHOLD = 1e-4
+const OXYGEN_DAMAGE_BLINK_SPEED = 14
+const OXYGEN_DAMAGE_BLINK_STRENGTH = 0.78
+const OXYGEN_DAMAGE_BLINK_EMISSIVE_BOOST = 0.95
 const LAKE_WATER_MASK_THRESHOLD = 0
 const LAKE_GRID_MASK_THRESHOLD = LAKE_WATER_MASK_THRESHOLD
 const LAKE_EXCLUSION_THRESHOLD = 0.18
@@ -484,6 +518,13 @@ const sampleLakes = (normal: THREE.Vector3, lakes: Lake[], temp: THREE.Vector3) 
   }
   return { boundary: maxBoundary, depth: maxDepth, lake: boundaryLake }
 }
+
+const getLakeTerrainDepth = (sample: ReturnType<typeof sampleLakes>) => {
+  if (!sample.lake || sample.boundary <= LAKE_WATER_MASK_THRESHOLD) return 0
+  // Keep beds below water so moving actors follow the same terrain shape as the planet mesh.
+  return Math.max(sample.depth, sample.lake.surfaceInset + LAKE_TERRAIN_CLAMP_EPS)
+}
+
 const applyLakeDepressions = (geometry: THREE.BufferGeometry, lakes: Lake[]) => {
   const positions = geometry.attributes.position
   const normal = new THREE.Vector3()
@@ -491,12 +532,7 @@ const applyLakeDepressions = (geometry: THREE.BufferGeometry, lakes: Lake[]) => 
   for (let i = 0; i < positions.count; i += 1) {
     normal.set(positions.getX(i), positions.getY(i), positions.getZ(i)).normalize()
     const sample = sampleLakes(normal, lakes, temp)
-    let depth = sample.depth
-    if (sample.lake && sample.boundary > LAKE_WATER_MASK_THRESHOLD) {
-      const surfaceDepth = sample.lake.surfaceInset
-      // Keep lake beds below the rendered water surface to avoid visible seams.
-      depth = Math.max(depth, surfaceDepth + LAKE_TERRAIN_CLAMP_EPS)
-    }
+    const depth = getLakeTerrainDepth(sample)
     const radius = PLANET_RADIUS - depth
     positions.setXYZ(i, normal.x * radius, normal.y * radius, normal.z * radius)
   }
@@ -667,8 +703,9 @@ const createLakeMaskMaterial = (lake: Lake) => {
     roughness: 0.18,
     metalness: 0.05,
     emissive: '#0a386b',
-    emissiveIntensity: 0.32,
+    emissiveIntensity: LAKE_WATER_EMISSIVE_BASE,
     transparent: true,
+    opacity: LAKE_WATER_OPACITY,
   })
   material.depthWrite = true
   material.depthTest = true
@@ -680,6 +717,8 @@ const createLakeMaskMaterial = (lake: Lake) => {
   extensions.derivatives = true
   ;(material as THREE.Material & { extensions?: { derivatives?: boolean } }).extensions = extensions
   material.onBeforeCompile = (shader) => {
+    const timeUniform = { value: 0 }
+    shader.uniforms.lakeTime = timeUniform
     shader.uniforms.lakeCenter = { value: lake.center }
     shader.uniforms.lakeTangent = { value: lake.tangent }
     shader.uniforms.lakeBitangent = { value: lake.bitangent }
@@ -694,6 +733,11 @@ const createLakeMaskMaterial = (lake: Lake) => {
     shader.uniforms.lakeNoisePhaseB = { value: lake.noisePhaseB }
     shader.uniforms.lakeNoisePhaseC = { value: lake.noisePhaseC }
     shader.uniforms.lakeWarpAmplitude = { value: lake.warpAmplitude }
+    shader.uniforms.lakeWaveScale = { value: LAKE_WATER_WAVE_SCALE }
+    shader.uniforms.lakeWaveSpeed = { value: LAKE_WATER_WAVE_SPEED }
+    shader.uniforms.lakeWaveStrength = { value: LAKE_WATER_WAVE_STRENGTH }
+    shader.uniforms.lakeFresnelStrength = { value: LAKE_WATER_FRESNEL_STRENGTH }
+    shader.uniforms.lakeAlphaPulse = { value: LAKE_WATER_ALPHA_PULSE }
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\n varying vec3 vLakeLocalPosition;')
       .replace('#include <begin_vertex>', '#include <begin_vertex>\n vLakeLocalPosition = position;')
@@ -716,6 +760,23 @@ uniform float lakeNoisePhase;
 uniform float lakeNoisePhaseB;
 uniform float lakeNoisePhaseC;
 uniform float lakeWarpAmplitude;
+uniform float lakeTime;
+uniform float lakeWaveScale;
+uniform float lakeWaveSpeed;
+uniform float lakeWaveStrength;
+uniform float lakeFresnelStrength;
+uniform float lakeAlphaPulse;
+
+float lakeWavePattern(vec3 normal, float time) {
+  float dotValue = dot(lakeCenter, normal);
+  vec3 temp = normal - lakeCenter * dotValue;
+  float x = dot(temp, lakeTangent);
+  float y = dot(temp, lakeBitangent);
+  float phaseA = (x + y * 0.35) * lakeWaveScale + time * lakeWaveSpeed;
+  float phaseB = (y - x * 0.28) * (lakeWaveScale * 1.35) - time * lakeWaveSpeed * 1.27;
+  float wave = sin(phaseA) * 0.6 + sin(phaseB) * 0.4;
+  return wave * 0.5 + 0.5;
+}
 
 float lakeEdgeBlend(vec3 normal) {
   float dotValue = clamp(dot(lakeCenter, normal), -1.0, 1.0);
@@ -749,13 +810,41 @@ float lakeEdgeBlend(vec3 normal) {
 float lakeEdge = lakeEdgeBlend(normalize(vLakeLocalPosition));
 if (lakeEdge <= 0.0) discard;
 float lakeAa = fwidth(lakeEdge) * 1.5;
-float lakeAlpha = smoothstep(0.0, lakeAa, lakeEdge);
-diffuseColor.a *= lakeAlpha;
+float lakeMask = smoothstep(0.0, lakeAa, lakeEdge);
+float lakeWave = lakeWavePattern(normalize(vLakeLocalPosition), lakeTime);
+float lakeFresnel = pow(1.0 - clamp(dot(normalize(geometryNormal), normalize(geometryViewDir)), 0.0, 1.0), 2.2);
+float waveMix = lakeWave * lakeWaveStrength;
+diffuseColor.rgb += vec3(0.03, 0.08, 0.12) * (waveMix + lakeFresnel * lakeFresnelStrength);
+totalEmissiveRadiance += vec3(0.02, 0.05, 0.08) * (waveMix * 0.9 + lakeFresnel * lakeFresnelStrength);
+float alphaPulse = 1.0 + (lakeWave - 0.5) * lakeAlphaPulse;
+diffuseColor.a *= lakeMask * alphaPulse;
 #include <dithering_fragment>`,
       )
+    ;(material.userData as LakeMaterialUserData).lakeWaterUniforms = {
+      time: timeUniform,
+    }
   }
   return material
 }
+
+const createLakeMaterial = () => {
+  const material = new THREE.MeshStandardMaterial({
+    color: '#2aa9ff',
+    roughness: 0.2,
+    metalness: 0.04,
+    emissive: '#0b426f',
+    emissiveIntensity: LAKE_WATER_EMISSIVE_BASE,
+    transparent: true,
+    opacity: LAKE_WATER_OPACITY,
+  })
+  material.depthWrite = true
+  material.depthTest = true
+  material.polygonOffset = true
+  material.polygonOffsetFactor = -1
+  material.polygonOffsetUnits = -1
+  return material
+}
+
 const createShorelineFillGeometry = (planetGeometry: THREE.BufferGeometry, lakes: Lake[]) => {
   const positions = planetGeometry.attributes.position
   const shoreline: number[] = []
@@ -1003,16 +1092,56 @@ class SphericalCurveWithLakes extends THREE.Curve<THREE.Vector3> {
     let depth = 0
     if (this.lakes.length > 0) {
       const sample = sampleLakes(normal, this.lakes, this.temp)
-      if (sample.lake && sample.boundary > LAKE_WATER_MASK_THRESHOLD) {
-        depth = sample.depth
-      }
+      depth = getLakeTerrainDepth(sample)
     }
     const radius = PLANET_RADIUS - depth + this.radiusOffset
     return normal.multiplyScalar(radius)
   }
 }
 
-export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
+const formatRendererError = (error: unknown) => {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message.trim()
+  }
+  return 'WebGPU initialization failed'
+}
+
+const hasWebGpuSupport = async () => {
+  if (typeof navigator === 'undefined') return false
+  const nav = navigator as Navigator & {
+    gpu?: {
+      requestAdapter?: () => Promise<unknown>
+    }
+  }
+  if (!nav.gpu || typeof nav.gpu.requestAdapter !== 'function') {
+    return false
+  }
+  try {
+    const adapter = await nav.gpu.requestAdapter()
+    return !!adapter
+  } catch {
+    return false
+  }
+}
+
+const createRenderer = async (
+  canvas: HTMLCanvasElement,
+  backend: RendererBackend,
+): Promise<THREE.WebGLRenderer | WebGPURenderer> => {
+  if (backend === 'webgpu') {
+    const renderer = new WebGPURenderer({
+      canvas,
+      antialias: true,
+      alpha: true,
+    })
+    renderer.outputColorSpace = THREE.SRGBColorSpace
+    renderer.toneMapping = THREE.ACESFilmicToneMapping
+    renderer.toneMappingExposure = 1.05
+    renderer.setClearColor(0x000000, 0)
+    await renderer.init()
+    return renderer
+  }
+
   const renderer = new THREE.WebGLRenderer({
     canvas,
     antialias: true,
@@ -1022,6 +1151,17 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   renderer.toneMapping = THREE.ACESFilmicToneMapping
   renderer.toneMappingExposure = 1.05
   renderer.setClearColor(0x000000, 0)
+  return renderer
+}
+
+const createScene = async (
+  canvas: HTMLCanvasElement,
+  requestedBackend: RendererPreference,
+  activeBackend: RendererBackend,
+  fallbackReason: string | null,
+): Promise<RenderScene> => {
+  const renderer = await createRenderer(canvas, activeBackend)
+  const webglShaderHooksEnabled = activeBackend === 'webgl'
 
   const scene = new THREE.Scene()
   const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 20)
@@ -1047,7 +1187,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   let gridMesh: THREE.LineSegments | null = null
   let shorelineLineMesh: THREE.LineSegments | null = null
   let shorelineFillMesh: THREE.Mesh | null = null
-  let lakeSurfaceGeometry: THREE.SphereGeometry | null = null
+  let lakeSurfaceGeometry: THREE.BufferGeometry | null = null
   let lakeMeshes: THREE.Mesh[] = []
   let lakeMaterials: THREE.MeshStandardMaterial[] = []
   let mountainDebugGroup: THREE.Group | null = null
@@ -1154,6 +1294,19 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   const tempQuat = new THREE.Quaternion()
   const tongueUp = new THREE.Vector3(0, 1, 0)
   const debugEnabled = import.meta.env.DEV || import.meta.env.VITE_E2E_DEBUG === '1'
+  let debugApi:
+    | {
+        getSnakeOpacity: (id: string) => number | null
+        getSnakeHeadPosition: (id: string) => { x: number; y: number; z: number } | null
+        isSnakeVisible: (id: string) => boolean | null
+        getRendererInfo: () => {
+          requestedBackend: RendererPreference
+          activeBackend: RendererBackend
+          fallbackReason: string | null
+          webglShaderHooksEnabled: boolean
+        }
+      }
+    | null = null
 
   const attachDebugApi = () => {
     if (!debugEnabled || typeof window === 'undefined') return
@@ -1162,9 +1315,15 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
         getSnakeOpacity: (id: string) => number | null
         getSnakeHeadPosition: (id: string) => { x: number; y: number; z: number } | null
         isSnakeVisible: (id: string) => boolean | null
+        getRendererInfo: () => {
+          requestedBackend: RendererPreference
+          activeBackend: RendererBackend
+          fallbackReason: string | null
+          webglShaderHooksEnabled: boolean
+        }
       }
     }
-    debugWindow.__SNAKE_DEBUG__ = {
+    debugApi = {
       getSnakeOpacity: (id: string) => {
         const visual = snakes.get(id)
         return visual ? visual.tube.material.opacity : null
@@ -1179,7 +1338,14 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
         const visual = snakes.get(id)
         return visual ? visual.group.visible : null
       },
+      getRendererInfo: () => ({
+        requestedBackend,
+        activeBackend,
+        fallbackReason,
+        webglShaderHooksEnabled,
+      }),
     }
+    debugWindow.__SNAKE_DEBUG__ = debugApi
   }
 
   attachDebugApi()
@@ -1609,15 +1775,29 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     shorelineFillMesh.scale.setScalar(1.001)
     world.add(shorelineFillMesh)
 
-    lakeSurfaceGeometry = new THREE.SphereGeometry(1, LAKE_SURFACE_SEGMENTS, LAKE_SURFACE_RINGS)
-    for (const lake of lakes) {
-      const lakeMaterial = createLakeMaskMaterial(lake)
-      const lakeMesh = new THREE.Mesh(lakeSurfaceGeometry, lakeMaterial)
-      lakeMesh.scale.setScalar(PLANET_RADIUS - lake.surfaceInset)
-      lakeMesh.renderOrder = 2
-      world.add(lakeMesh)
-      lakeMeshes.push(lakeMesh)
-      lakeMaterials.push(lakeMaterial)
+    if (webglShaderHooksEnabled) {
+      lakeSurfaceGeometry = new THREE.SphereGeometry(1, LAKE_SURFACE_SEGMENTS, LAKE_SURFACE_RINGS)
+      for (const lake of lakes) {
+        const lakeMaterial = createLakeMaskMaterial(lake)
+        const lakeMesh = new THREE.Mesh(lakeSurfaceGeometry, lakeMaterial)
+        lakeMesh.scale.setScalar(PLANET_RADIUS - lake.surfaceInset)
+        lakeMesh.renderOrder = 2
+        world.add(lakeMesh)
+        lakeMeshes.push(lakeMesh)
+        lakeMaterials.push(lakeMaterial)
+      }
+    } else {
+      const lakeBaseGeometry = createFibonacciSphereGeometry(PLANET_RADIUS, LAKE_SURFACE_POINTS)
+      lakeSurfaceGeometry = createLakeSurfaceGeometry(lakeBaseGeometry, lakes)
+      lakeBaseGeometry.dispose()
+      if ((lakeSurfaceGeometry.attributes.position?.count ?? 0) > 0) {
+        const lakeMaterial = createLakeMaterial()
+        const lakeMesh = new THREE.Mesh(lakeSurfaceGeometry, lakeMaterial)
+        lakeMesh.renderOrder = 2
+        world.add(lakeMesh)
+        lakeMeshes.push(lakeMesh)
+        lakeMaterials.push(lakeMaterial)
+      }
     }
     if (isLakeDebugEnabled()) {
       const lakeBaseGeometry = createFibonacciSphereGeometry(PLANET_RADIUS, LAKE_SURFACE_POINTS)
@@ -1958,24 +2138,26 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       opacity: 0.45,
     })
     bowlMaterial.depthWrite = false
-    bowlMaterial.onBeforeCompile = (shader) => {
-      shader.uniforms.crackAmount = bowlCrackUniform
-      shader.fragmentShader = `uniform float crackAmount;\n${shader.fragmentShader}`
-      shader.fragmentShader = shader.fragmentShader.replace(
-        '#include <dithering_fragment>',
-        `
-        float crackMask = 0.0;
-        vec3 crackPos = normalize(vNormal);
-        float lineA = abs(sin(crackPos.x * 24.0) * sin(crackPos.y * 21.0));
-        float lineB = abs(sin(crackPos.y * 17.0 + crackPos.z * 11.0));
-        float lineC = abs(sin(crackPos.z * 19.0 - crackPos.x * 13.0));
-        float lines = max(lineA, max(lineB, lineC));
-        crackMask = smoothstep(0.92, 0.985, lines) * crackAmount;
-        diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.1, 0.16, 0.2), crackMask);
-        diffuseColor.a = max(diffuseColor.a, crackMask * 0.6);
-        #include <dithering_fragment>
-        `,
-      )
+    if (webglShaderHooksEnabled) {
+      bowlMaterial.onBeforeCompile = (shader) => {
+        shader.uniforms.crackAmount = bowlCrackUniform
+        shader.fragmentShader = `uniform float crackAmount;\n${shader.fragmentShader}`
+        shader.fragmentShader = shader.fragmentShader.replace(
+          '#include <dithering_fragment>',
+          `
+          float crackMask = 0.0;
+          vec3 crackPos = normalize(vNormal);
+          float lineA = abs(sin(crackPos.x * 24.0) * sin(crackPos.y * 21.0));
+          float lineB = abs(sin(crackPos.y * 17.0 + crackPos.z * 11.0));
+          float lineC = abs(sin(crackPos.z * 19.0 - crackPos.x * 13.0));
+          float lines = max(lineA, max(lineB, lineC));
+          crackMask = smoothstep(0.92, 0.985, lines) * crackAmount;
+          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.1, 0.16, 0.2), crackMask);
+          diffuseColor.a = max(diffuseColor.a, crackMask * 0.6);
+          #include <dithering_fragment>
+          `,
+        )
+      }
     }
     const bowl = new THREE.Mesh(bowlGeometry, bowlMaterial)
     bowl.renderOrder = 3
@@ -2051,9 +2233,8 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   const getSurfaceRadius = (normal: THREE.Vector3, radiusOffset: number) => {
     if (lakes.length === 0) return PLANET_RADIUS + radiusOffset
     const sample = sampleLakes(normal, lakes, lakeSampleTemp)
-    if (sample.lake && sample.boundary > LAKE_WATER_MASK_THRESHOLD) {
-      return PLANET_RADIUS - sample.depth + radiusOffset
-    }
+    const depth = getLakeTerrainDepth(sample)
+    if (depth > 0) return PLANET_RADIUS - depth + radiusOffset
     return PLANET_RADIUS + radiusOffset
   }
 
@@ -3057,8 +3238,42 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     }
     const crackAmount = underwater ? clamp((0.35 - player.oxygen) / 0.35, 0, 1) : 0
     visual.bowlCrackUniform.value = crackAmount
-    visual.bowlMaterial.opacity = 0.45 * opacity
+    if (webglShaderHooksEnabled) {
+      visual.bowlMaterial.color.set('#cfefff')
+      visual.bowlMaterial.emissive.set(0x000000)
+      visual.bowlMaterial.emissiveIntensity = 0
+      visual.bowlMaterial.opacity = 0.45 * opacity
+    } else {
+      const tint = crackAmount
+      visual.bowlMaterial.color.setRGB(
+        0.81 - 0.31 * tint,
+        0.94 - 0.44 * tint,
+        1.0 - 0.54 * tint,
+      )
+      visual.bowlMaterial.emissive.setRGB(0.08 * tint, 0.04 * tint, 0.03 * tint)
+      visual.bowlMaterial.emissiveIntensity = 1
+      visual.bowlMaterial.opacity = (0.45 + tint * 0.22) * opacity
+    }
     visual.bowl.visible = underwater && visual.group.visible
+
+    const oxygenDamageActive =
+      player.alive && underwater && player.oxygen <= OXYGEN_DAMAGE_ACTIVE_THRESHOLD
+    if (oxygenDamageActive) {
+      const blinkActive = Math.sin(performance.now() * 0.001 * OXYGEN_DAMAGE_BLINK_SPEED) > 0
+      if (blinkActive) {
+        const tint = OXYGEN_DAMAGE_BLINK_STRENGTH
+        const baseEmissive = isLocal ? 0.3 : 0.12
+        const baseColor = new THREE.Color(visual.color)
+        const applyDamageBlink = (material: THREE.MeshStandardMaterial) => {
+          material.color.lerpColors(baseColor, OXYGEN_DAMAGE_COLOR, tint)
+          material.emissive.lerpColors(baseColor, OXYGEN_DAMAGE_EMISSIVE, tint)
+          material.emissiveIntensity = baseEmissive + OXYGEN_DAMAGE_BLINK_EMISSIVE_BOOST * tint
+        }
+        applyDamageBlink(visual.tube.material)
+        applyDamageBlink(visual.head.material)
+        applyDamageBlink(visual.tail.material)
+      }
+    }
 
     let forward = tempVectorB
     let hasForward = false
@@ -3341,6 +3556,19 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       updatePellets([], null)
     }
 
+    const lakeTimeSeconds = now * 0.001
+    for (let i = 0; i < lakeMaterials.length; i += 1) {
+      const material = lakeMaterials[i]
+      const uniforms = (material.userData as LakeMaterialUserData).lakeWaterUniforms
+      if (uniforms) {
+        uniforms.time.value = lakeTimeSeconds
+      } else {
+        material.emissiveIntensity =
+          LAKE_WATER_EMISSIVE_BASE +
+          Math.sin(lakeTimeSeconds * LAKE_WATER_WAVE_SPEED + i * 0.73) * LAKE_WATER_EMISSIVE_PULSE
+      }
+    }
+
     renderer.render(scene, camera)
     return localHeadScreen
   }
@@ -3408,7 +3636,9 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
 
     if (debugEnabled && typeof window !== 'undefined') {
       const debugWindow = window as Window & { __SNAKE_DEBUG__?: unknown }
-      delete debugWindow.__SNAKE_DEBUG__
+      if (debugWindow.__SNAKE_DEBUG__ === debugApi) {
+        delete debugWindow.__SNAKE_DEBUG__
+      }
     }
   }
 
@@ -3419,4 +3649,50 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     setDebugFlags,
     dispose,
   }
+}
+
+export async function createRenderScene(
+  canvas: HTMLCanvasElement,
+  requestedBackend: RendererPreference = 'auto',
+): Promise<CreateRenderSceneResult> {
+  if (requestedBackend === 'webgl') {
+    const scene = await createScene(canvas, requestedBackend, 'webgl', null)
+    return {
+      scene,
+      activeBackend: 'webgl',
+      fallbackReason: null,
+    }
+  }
+
+  if (!(await hasWebGpuSupport())) {
+    const fallbackReason = 'WebGPU is unavailable in this browser/runtime'
+    const scene = await createScene(canvas, requestedBackend, 'webgl', fallbackReason)
+    return {
+      scene,
+      activeBackend: 'webgl',
+      fallbackReason,
+    }
+  }
+
+  try {
+    const scene = await createScene(canvas, requestedBackend, 'webgpu', null)
+    return {
+      scene,
+      activeBackend: 'webgpu',
+      fallbackReason: null,
+    }
+  } catch (error) {
+    const fallbackReason = formatRendererError(error)
+    const scene = await createScene(canvas, requestedBackend, 'webgl', fallbackReason)
+    return {
+      scene,
+      activeBackend: 'webgl',
+      fallbackReason,
+    }
+  }
+}
+
+export async function createWebGLScene(canvas: HTMLCanvasElement): Promise<WebGLScene> {
+  const { scene } = await createRenderScene(canvas, 'webgl')
+  return scene
 }

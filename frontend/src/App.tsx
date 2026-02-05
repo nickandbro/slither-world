@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
-import { createWebGLScene, type WebGLScene } from './render/webglScene'
+import {
+  createRenderScene,
+  type RenderScene,
+  type RendererBackend,
+  type RendererPreference,
+} from './render/webglScene'
 import type { Camera, Environment, GameStateSnapshot, Point } from './game/types'
 import { axisFromPointer, updateCamera } from './game/camera'
 import { IDENTITY_QUAT, clamp } from './game/math'
@@ -11,11 +16,13 @@ import {
   getStoredBestScore,
   getStoredPlayerId,
   getInitialRoom,
+  getInitialRendererPreference,
   sanitizeRoomName,
   storeBestScore,
   storePlayerId,
   storePlayerName,
   storeRoomName,
+  storeRendererPreference,
 } from './game/storage'
 import { decodeServerMessage, encodeInput, encodeJoin, encodeRespawn, type PlayerMeta } from './game/wsProtocol'
 import {
@@ -63,12 +70,18 @@ const CAMERA_DISTANCE_MIN = 4.2
 const CAMERA_DISTANCE_MAX = 9
 const CAMERA_ZOOM_SENSITIVITY = 0.0015
 const POINTER_MAX_RANGE_RATIO = 0.25
+const formatRendererError = (error: unknown) => {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message.trim()
+  }
+  return 'Renderer initialization failed'
+}
 
 export default function App() {
   const glCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const hudCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const socketRef = useRef<WebSocket | null>(null)
-  const webglRef = useRef<WebGLScene | null>(null)
+  const webglRef = useRef<RenderScene | null>(null)
   const renderConfigRef = useRef<RenderConfig | null>(null)
   const pointerRef = useRef({
     angle: 0,
@@ -96,13 +109,22 @@ export default function App() {
   const [playerName, setPlayerName] = useState(getInitialName)
   const [roomName, setRoomName] = useState(getInitialRoom)
   const [roomInput, setRoomInput] = useState(getInitialRoom)
+  const [rendererPreference] = useState<RendererPreference>(getInitialRendererPreference)
   const [bestScore, setBestScore] = useState(getStoredBestScore)
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([])
   const [connectionStatus, setConnectionStatus] = useState('Connecting')
   const [leaderboardStatus, setLeaderboardStatus] = useState('')
+  const [activeRenderer, setActiveRenderer] = useState<RendererBackend | null>(null)
+  const [rendererFallbackReason, setRendererFallbackReason] = useState<string | null>(null)
   const [mountainDebug, setMountainDebug] = useState(getMountainDebug)
   const [lakeDebug, setLakeDebug] = useState(getLakeDebug)
   const [treeDebug, setTreeDebug] = useState(getTreeDebug)
+  const environmentRef = useRef<Environment | null>(environment)
+  const debugFlagsRef = useRef({
+    mountainOutline: mountainDebug,
+    lakeCollider: lakeDebug,
+    treeCollider: treeDebug,
+  })
   const playerIdRef = useRef<string | null>(playerId)
   const playerNameRef = useRef(playerName)
 
@@ -123,6 +145,13 @@ export default function App() {
       return b.score - a.score
     })
   }, [gameState, playerId])
+  const rendererStatus = useMemo(() => {
+    if (!activeRenderer) return 'Renderer: Initializing...'
+    if (rendererFallbackReason) {
+      return `Renderer: ${activeRenderer.toUpperCase()} (WebGPU fallback)`
+    }
+    return `Renderer: ${activeRenderer.toUpperCase()}`
+  }, [activeRenderer, rendererFallbackReason])
 
   const pushSnapshot = (state: GameStateSnapshot) => {
     const now = Date.now()
@@ -170,6 +199,7 @@ export default function App() {
 
   useEffect(() => {
     const webgl = webglRef.current
+    environmentRef.current = environment
     if (webgl && environment) {
       webgl.setEnvironment?.(environment)
     }
@@ -183,12 +213,13 @@ export default function App() {
     } catch {
       // ignore persistence errors
     }
-    const webgl = webglRef.current
-    webgl?.setDebugFlags?.({
+    debugFlagsRef.current = {
       mountainOutline: mountainDebug,
       lakeCollider: lakeDebug,
       treeCollider: treeDebug,
-    })
+    }
+    const webgl = webglRef.current
+    webgl?.setDebugFlags?.(debugFlagsRef.current)
   }, [mountainDebug, lakeDebug, treeDebug])
 
   useEffect(() => {
@@ -210,85 +241,121 @@ export default function App() {
   }, [roomName])
 
   useEffect(() => {
+    storeRendererPreference(rendererPreference)
+    const url = new URL(window.location.href)
+    url.searchParams.set('renderer', rendererPreference)
+    window.history.replaceState({}, '', url)
+  }, [rendererPreference])
+
+  useEffect(() => {
     const glCanvas = glCanvasRef.current
     const hudCanvas = hudCanvasRef.current
     if (!glCanvas || !hudCanvas) return
     const hudCtx = hudCanvas.getContext('2d')
     if (!hudCtx) return
+    setActiveRenderer(null)
+    setRendererFallbackReason(null)
 
-    const webgl = createWebGLScene(glCanvas)
-    webglRef.current = webgl
-    if (environment) {
-      webgl.setEnvironment?.(environment)
-    }
-    webgl.setDebugFlags?.({
-      mountainOutline: mountainDebug,
-      lakeCollider: lakeDebug,
-      treeCollider: treeDebug,
-    })
-
-    const updateConfig = () => {
-      const rect = glCanvas.getBoundingClientRect()
-      if (!rect.width || !rect.height) return
-      const dpr = Math.min(window.devicePixelRatio || 1, 2)
-      webgl.resize(rect.width, rect.height, dpr)
-      hudCanvas.width = Math.round(rect.width * dpr)
-      hudCanvas.height = Math.round(rect.height * dpr)
-      hudCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
-      renderConfigRef.current = {
-        width: rect.width,
-        height: rect.height,
-        centerX: rect.width / 2,
-        centerY: rect.height / 2,
-      }
-    }
-
-    updateConfig()
-    const observer = new ResizeObserver(updateConfig)
-    observer.observe(glCanvas)
-    window.addEventListener('resize', updateConfig)
-    glCanvas.addEventListener('wheel', handleWheel, { passive: false })
-
+    let disposed = false
+    let webgl: RenderScene | null = null
+    let observer: ResizeObserver | null = null
+    let updateConfig: (() => void) | null = null
     let frameId = 0
-    const renderLoop = () => {
-      const config = renderConfigRef.current
-      if (config) {
-        const snapshot = getRenderSnapshot()
-        const localId = playerIdRef.current
-        const localHead =
-          snapshot?.players.find((player) => player.id === localId)?.snake[0] ?? null
-        const camera = updateCamera(localHead, cameraUpRef)
-        cameraRef.current = camera
-        const headScreen = webgl.render(
-          snapshot,
-          camera,
-          localId,
-          cameraDistanceRef.current,
-        )
-        headScreenRef.current = headScreen
-        drawHud(
-          hudCtx,
-          config,
-          pointerRef.current.active ? pointerRef.current.angle : null,
-          headScreen,
-          pointerRef.current.active ? pointerRef.current.distance : null,
-          pointerRef.current.active ? pointerRef.current.maxRange : null,
-        )
+
+    const setupScene = async () => {
+      try {
+        const created = await createRenderScene(glCanvas, rendererPreference)
+        if (disposed) {
+          created.scene.dispose()
+          return
+        }
+        webgl = created.scene
+        webglRef.current = webgl
+        setActiveRenderer(created.activeBackend)
+        setRendererFallbackReason(created.fallbackReason)
+
+        if (environmentRef.current) {
+          webgl.setEnvironment?.(environmentRef.current)
+        }
+        webgl.setDebugFlags?.(debugFlagsRef.current)
+
+        const handleResize = () => {
+          const rect = glCanvas.getBoundingClientRect()
+          if (!rect.width || !rect.height) return
+          const dpr = Math.min(window.devicePixelRatio || 1, 2)
+          webgl?.resize(rect.width, rect.height, dpr)
+          hudCanvas.width = Math.round(rect.width * dpr)
+          hudCanvas.height = Math.round(rect.height * dpr)
+          hudCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
+          renderConfigRef.current = {
+            width: rect.width,
+            height: rect.height,
+            centerX: rect.width / 2,
+            centerY: rect.height / 2,
+          }
+        }
+        updateConfig = handleResize
+
+        handleResize()
+        observer = new ResizeObserver(handleResize)
+        observer.observe(glCanvas)
+        window.addEventListener('resize', handleResize)
+        glCanvas.addEventListener('wheel', handleWheel, { passive: false })
+
+        const renderLoop = () => {
+          const config = renderConfigRef.current
+          if (config && webgl) {
+            const snapshot = getRenderSnapshot()
+            const localId = playerIdRef.current
+            const localHead =
+              snapshot?.players.find((player) => player.id === localId)?.snake[0] ?? null
+            const camera = updateCamera(localHead, cameraUpRef)
+            cameraRef.current = camera
+            const headScreen = webgl.render(
+              snapshot,
+              camera,
+              localId,
+              cameraDistanceRef.current,
+            )
+            headScreenRef.current = headScreen
+            drawHud(
+              hudCtx,
+              config,
+              pointerRef.current.active ? pointerRef.current.angle : null,
+              headScreen,
+              pointerRef.current.active ? pointerRef.current.distance : null,
+              pointerRef.current.active ? pointerRef.current.maxRange : null,
+            )
+          }
+          frameId = window.requestAnimationFrame(renderLoop)
+        }
+
+        renderLoop()
+      } catch (error) {
+        if (disposed) return
+        setActiveRenderer(null)
+        setRendererFallbackReason(formatRendererError(error))
       }
-      frameId = window.requestAnimationFrame(renderLoop)
     }
 
-    renderLoop()
+    void setupScene()
 
     return () => {
-      observer.disconnect()
-      window.removeEventListener('resize', updateConfig)
+      disposed = true
+      observer?.disconnect()
+      if (updateConfig) {
+        window.removeEventListener('resize', updateConfig)
+      }
       glCanvas.removeEventListener('wheel', handleWheel)
       window.cancelAnimationFrame(frameId)
-      webgl.dispose()
+      webgl?.dispose()
       webglRef.current = null
+      renderConfigRef.current = null
+      headScreenRef.current = null
     }
-  }, [])
+    // Renderer swaps are intentionally triggered by explicit backend preference only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rendererPreference])
 
   useEffect(() => {
     let reconnectTimer: number | null = null
@@ -490,6 +557,16 @@ export default function App() {
     }
   }
 
+  const handleRendererModeChange = (value: string) => {
+    const mode: RendererPreference =
+      value === 'webgl' || value === 'webgpu' || value === 'auto' ? value : 'auto'
+    if (mode === rendererPreference) return
+    storeRendererPreference(mode)
+    const url = new URL(window.location.href)
+    url.searchParams.set('renderer', mode)
+    window.location.replace(url.toString())
+  }
+
   const handleSubmitBestScore = async () => {
     if (!bestScore) return
     setLeaderboardStatus('Submitting...')
@@ -628,6 +705,24 @@ export default function App() {
             >
               Update
             </button>
+          </div>
+          <div className='control-row'>
+            <label className='control-label' htmlFor='renderer-mode'>
+              Renderer
+            </label>
+            <select
+              id='renderer-mode'
+              value={rendererPreference}
+              onChange={(event) => handleRendererModeChange(event.target.value)}
+            >
+              <option value='auto'>Auto</option>
+              <option value='webgpu'>WebGPU</option>
+              <option value='webgl'>WebGL</option>
+            </select>
+          </div>
+          <div className='renderer-status' aria-live='polite'>
+            <div>{rendererStatus}</div>
+            {rendererFallbackReason && <div className='renderer-fallback'>{rendererFallbackReason}</div>}
           </div>
           {DEBUG_UI_ENABLED && (
             <div className='control-row debug-controls'>
