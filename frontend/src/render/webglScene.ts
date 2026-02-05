@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { ConvexGeometry } from 'three/examples/jsm/geometries/ConvexGeometry'
 import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils'
-import type { Camera, GameStateSnapshot, PlayerSnapshot, Point } from '../game/types'
+import type { Camera, Environment, GameStateSnapshot, PlayerSnapshot, Point } from '../game/types'
 
 type SnakeVisual = {
   group: THREE.Group
@@ -16,13 +16,10 @@ type SnakeVisual = {
   tongueBase: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
   tongueForkLeft: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
   tongueForkRight: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
+  bowl: THREE.Mesh<THREE.BufferGeometry, THREE.MeshPhysicalMaterial>
+  bowlMaterial: THREE.MeshPhysicalMaterial
+  bowlCrackUniform: { value: number }
   color: string
-}
-
-type PointerState = {
-  screenX: number
-  screenY: number
-  active: boolean
 }
 
 type TongueState = {
@@ -83,15 +80,34 @@ type Lake = {
   surfaceInset: number
 }
 
-type WebGLScene = {
+type TreeInstance = {
+  normal: THREE.Vector3
+  widthScale: number
+  heightScale: number
+  twist: number
+}
+
+type MountainInstance = {
+  normal: THREE.Vector3
+  radius: number
+  height: number
+  variant: number
+  twist: number
+  outline: number[]
+  tangent: THREE.Vector3
+  bitangent: THREE.Vector3
+}
+
+export type WebGLScene = {
   resize: (width: number, height: number, dpr: number) => void
   render: (
     snapshot: GameStateSnapshot | null,
     camera: Camera,
     localPlayerId: string | null,
-    pointer: PointerState | null,
     cameraDistance: number,
   ) => { x: number; y: number } | null
+  setEnvironment: (environment: Environment) => void
+  setDebugFlags: (flags: { mountainOutline?: boolean }) => void
   dispose: () => void
 }
 
@@ -139,7 +155,6 @@ const PUPIL_RADIUS = EYE_RADIUS * 0.4
 const PUPIL_OFFSET = EYE_RADIUS - PUPIL_RADIUS * 0.6
 const PELLET_RADIUS = SNAKE_RADIUS * 0.75
 const PELLET_OFFSET = 0.035
-const GAZE_SIDE_MAX_ANGLE = Math.PI / 4
 const TONGUE_MAX_LENGTH = HEAD_RADIUS * 2.8
 const TONGUE_MAX_RANGE = HEAD_RADIUS * 3.1
 const TONGUE_NEAR_RANGE = HEAD_RADIUS * 2.4
@@ -191,6 +206,7 @@ const TREE_MIN_HEIGHT = SNAKE_RADIUS * 9.5
 const TREE_MAX_HEIGHT = TREE_MIN_HEIGHT * 1.5
 const MOUNTAIN_COUNT = 8
 const MOUNTAIN_VARIANTS = 3
+const MOUNTAIN_OUTLINE_SAMPLES = 64
 const MOUNTAIN_RADIUS_MIN = BASE_PLANET_RADIUS * 0.12
 const MOUNTAIN_RADIUS_MAX = BASE_PLANET_RADIUS * 0.22
 const MOUNTAIN_HEIGHT_MIN = BASE_PLANET_RADIUS * 0.12
@@ -342,6 +358,54 @@ const createLakes = (seed: number, count: number) => {
     })
   }
   return lakes
+}
+const buildLakeFromData = (data: Environment['lakes'][number]) => {
+  const center = new THREE.Vector3(data.center.x, data.center.y, data.center.z).normalize()
+  const up = Math.abs(center.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0)
+  const tangent = new THREE.Vector3().crossVectors(up, center).normalize()
+  const bitangent = new THREE.Vector3().crossVectors(center, tangent).normalize()
+  return {
+    center,
+    radius: data.radius,
+    depth: data.depth,
+    shelfDepth: data.shelfDepth,
+    edgeFalloff: data.edgeFalloff,
+    noiseAmplitude: data.noiseAmplitude,
+    noiseFrequency: data.noiseFrequency,
+    noiseFrequencyB: data.noiseFrequencyB,
+    noiseFrequencyC: data.noiseFrequencyC,
+    noisePhase: data.noisePhase,
+    noisePhaseB: data.noisePhaseB,
+    noisePhaseC: data.noisePhaseC,
+    warpAmplitude: data.warpAmplitude,
+    surfaceInset: data.surfaceInset,
+    tangent,
+    bitangent,
+  }
+}
+
+const buildTreeFromData = (data: Environment['trees'][number]): TreeInstance => ({
+  normal: new THREE.Vector3(data.normal.x, data.normal.y, data.normal.z).normalize(),
+  widthScale: data.widthScale,
+  heightScale: data.heightScale,
+  twist: data.twist,
+})
+
+const buildMountainFromData = (data: Environment['mountains'][number]): MountainInstance => {
+  const normal = new THREE.Vector3(data.normal.x, data.normal.y, data.normal.z).normalize()
+  const up = Math.abs(normal.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0)
+  const tangent = new THREE.Vector3().crossVectors(up, normal).normalize()
+  const bitangent = new THREE.Vector3().crossVectors(normal, tangent).normalize()
+  return {
+    normal,
+    radius: data.radius,
+    height: data.height,
+    variant: data.variant,
+    twist: data.twist,
+    outline: [...data.outline],
+    tangent,
+    bitangent,
+  }
 }
 const sampleLakes = (normal: THREE.Vector3, lakes: Lake[], temp: THREE.Vector3) => {
   let maxBoundary = 0
@@ -891,6 +955,35 @@ class SphericalCurve extends THREE.Curve<THREE.Vector3> {
   }
 }
 
+class SphericalCurveWithLakes extends THREE.Curve<THREE.Vector3> {
+  private base: THREE.CatmullRomCurve3
+  private radiusOffset: number
+  private lakes: Lake[]
+  private temp: THREE.Vector3
+
+  constructor(base: THREE.CatmullRomCurve3, radiusOffset: number, lakes: Lake[]) {
+    super()
+    this.base = base
+    this.radiusOffset = radiusOffset
+    this.lakes = lakes
+    this.temp = new THREE.Vector3()
+  }
+
+  getPoint(t: number, optionalTarget = new THREE.Vector3()) {
+    this.base.getPoint(t, optionalTarget)
+    const normal = optionalTarget.normalize()
+    let depth = 0
+    if (this.lakes.length > 0) {
+      const sample = sampleLakes(normal, this.lakes, this.temp)
+      if (sample.lake && sample.boundary > LAKE_WATER_MASK_THRESHOLD) {
+        depth = sample.depth
+      }
+    }
+    const radius = PLANET_RADIUS - depth + this.radiusOffset
+    return normal.multiplyScalar(radius)
+  }
+}
+
 export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   const renderer = new THREE.WebGLRenderer({
     canvas,
@@ -919,77 +1012,19 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   camera.add(keyLight)
   camera.add(rimLight)
 
-  const lakes = createLakes(0x91fcae12, LAKE_COUNT)
-  const basePlanetGeometry = createFibonacciSphereGeometry(PLANET_RADIUS, PLANET_FIBONACCI_POINTS)
-  const planetGeometry = basePlanetGeometry.clone()
-  applyLakeDepressions(planetGeometry, lakes)
-  const planetMaterial = new THREE.MeshStandardMaterial({
-    color: '#7ddf6a',
-    roughness: 0.9,
-    metalness: 0.05,
-  })
-  const planetMesh = new THREE.Mesh(planetGeometry, planetMaterial)
-  world.add(planetMesh)
-
-  const rawGridGeometry = new THREE.WireframeGeometry(planetGeometry)
-  const gridGeometry = createFilteredGridGeometry(rawGridGeometry, lakes)
-  const shorelineLineGeometry = createShorelineGeometry(rawGridGeometry, lakes)
-  rawGridGeometry.dispose()
-  const gridMaterial = new THREE.LineBasicMaterial({
-    color: GRID_LINE_COLOR,
-    transparent: true,
-    opacity: GRID_LINE_OPACITY,
-  })
-  gridMaterial.depthWrite = false
-  const gridMesh = new THREE.LineSegments(gridGeometry, gridMaterial)
-  gridMesh.scale.setScalar(1.002)
-  world.add(gridMesh)
-  const shorelineLineMaterial = new THREE.LineBasicMaterial({
-    color: GRID_LINE_COLOR,
-    transparent: true,
-    opacity: SHORELINE_LINE_OPACITY,
-  })
-  shorelineLineMaterial.depthWrite = false
-  const shorelineLineMesh = new THREE.LineSegments(shorelineLineGeometry, shorelineLineMaterial)
-  shorelineLineMesh.scale.setScalar(1.002)
-  world.add(shorelineLineMesh)
-
-  const shorelineFillGeometry = createShorelineFillGeometry(planetGeometry, lakes)
-  const shorelineFillMaterial = new THREE.MeshStandardMaterial({
-    color: SHORE_SAND_COLOR,
-    roughness: 0.92,
-    metalness: 0.05,
-    transparent: true,
-  })
-  shorelineFillMaterial.depthWrite = false
-  shorelineFillMaterial.depthTest = true
-  shorelineFillMaterial.polygonOffset = true
-  shorelineFillMaterial.polygonOffsetFactor = -1
-  shorelineFillMaterial.polygonOffsetUnits = -1
-  const shorelineFillMesh = new THREE.Mesh(shorelineFillGeometry, shorelineFillMaterial)
-  shorelineFillMesh.renderOrder = 1
-  shorelineFillMesh.scale.setScalar(1.001)
-  world.add(shorelineFillMesh)
-
-  const lakeSurfaceGeometry = new THREE.SphereGeometry(1, LAKE_SURFACE_SEGMENTS, LAKE_SURFACE_RINGS)
-  const lakeMeshes: THREE.Mesh[] = []
-  const lakeMaterials: THREE.MeshStandardMaterial[] = []
-  for (const lake of lakes) {
-    const lakeMaterial = createLakeMaskMaterial(lake)
-    const lakeMesh = new THREE.Mesh(lakeSurfaceGeometry, lakeMaterial)
-    lakeMesh.scale.setScalar(PLANET_RADIUS - lake.surfaceInset)
-    lakeMesh.renderOrder = 2
-    world.add(lakeMesh)
-    lakeMeshes.push(lakeMesh)
-    lakeMaterials.push(lakeMaterial)
-  }
-  if (isLakeDebugEnabled()) {
-    const lakeBaseGeometry = createFibonacciSphereGeometry(PLANET_RADIUS, LAKE_SURFACE_POINTS)
-    const lakeGeometry = createLakeSurfaceGeometry(lakeBaseGeometry, lakes)
-    lakeGeometry.dispose()
-    lakeBaseGeometry.dispose()
-  }
-  basePlanetGeometry.dispose()
+  let lakes: Lake[] = []
+  let trees: TreeInstance[] = []
+  let mountains: MountainInstance[] = []
+  let planetMesh: THREE.Mesh | null = null
+  let gridMesh: THREE.LineSegments | null = null
+  let shorelineLineMesh: THREE.LineSegments | null = null
+  let shorelineFillMesh: THREE.Mesh | null = null
+  let lakeSurfaceGeometry: THREE.SphereGeometry | null = null
+  let lakeMeshes: THREE.Mesh[] = []
+  let lakeMaterials: THREE.MeshStandardMaterial[] = []
+  let mountainDebugGroup: THREE.Group | null = null
+  let mountainDebugMaterial: THREE.LineBasicMaterial | null = null
+  let mountainDebugEnabled = false
 
   const environmentGroup = new THREE.Group()
   world.add(environmentGroup)
@@ -1000,6 +1035,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   world.add(pelletsGroup)
 
   const headGeometry = new THREE.SphereGeometry(HEAD_RADIUS, 18, 18)
+  const bowlGeometry = new THREE.SphereGeometry(HEAD_RADIUS * 1.45, 20, 20)
   const tailGeometry = new THREE.SphereGeometry(1, 18, 12, 0, Math.PI * 2, 0, Math.PI / 2)
   const eyeGeometry = new THREE.SphereGeometry(EYE_RADIUS, 12, 12)
   const pupilGeometry = new THREE.SphereGeometry(PUPIL_RADIUS, 10, 10)
@@ -1038,14 +1074,14 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     emissiveIntensity: 0.45,
     roughness: 0.25,
   })
-  const treeTierGeometries: THREE.BufferGeometry[] = []
-  const treeTierMeshes: THREE.InstancedMesh[] = []
+  let treeTierGeometries: THREE.BufferGeometry[] = []
+  let treeTierMeshes: THREE.InstancedMesh[] = []
   let treeTrunkGeometry: THREE.BufferGeometry | null = null
   let treeTrunkMesh: THREE.InstancedMesh | null = null
   let treeLeafMaterial: THREE.MeshStandardMaterial | null = null
   let treeTrunkMaterial: THREE.MeshStandardMaterial | null = null
-  const mountainGeometries: THREE.BufferGeometry[] = []
-  const mountainMeshes: THREE.InstancedMesh[] = []
+  let mountainGeometries: THREE.BufferGeometry[] = []
+  let mountainMeshes: THREE.InstancedMesh[] = []
   let mountainMaterial: THREE.MeshStandardMaterial | null = null
   let pebbleGeometry: THREE.BufferGeometry | null = null
   let pebbleMaterial: THREE.MeshStandardMaterial | null = null
@@ -1080,6 +1116,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   const tempVectorF = new THREE.Vector3()
   const tempVectorG = new THREE.Vector3()
   const tempVectorH = new THREE.Vector3()
+  const lakeSampleTemp = new THREE.Vector3()
   const tempQuat = new THREE.Quaternion()
   const tongueUp = new THREE.Vector3(0, 1, 0)
   const debugEnabled = import.meta.env.DEV || import.meta.env.VITE_E2E_DEBUG === '1'
@@ -1128,7 +1165,256 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     tongueStates.delete(id)
   }
 
-  {
+  const disposeMaterial = (material: THREE.Material | THREE.Material[] | null) => {
+    if (!material) return
+    if (Array.isArray(material)) {
+      for (const mat of material) {
+        mat.dispose()
+      }
+    } else {
+      material.dispose()
+    }
+  }
+
+  const disposeEnvironment = () => {
+    if (planetMesh) {
+      world.remove(planetMesh)
+      planetMesh.geometry.dispose()
+      disposeMaterial(planetMesh.material)
+      planetMesh = null
+    }
+    if (gridMesh) {
+      world.remove(gridMesh)
+      gridMesh.geometry.dispose()
+      disposeMaterial(gridMesh.material)
+      gridMesh = null
+    }
+    if (shorelineLineMesh) {
+      world.remove(shorelineLineMesh)
+      shorelineLineMesh.geometry.dispose()
+      disposeMaterial(shorelineLineMesh.material)
+      shorelineLineMesh = null
+    }
+    if (shorelineFillMesh) {
+      world.remove(shorelineFillMesh)
+      shorelineFillMesh.geometry.dispose()
+      disposeMaterial(shorelineFillMesh.material)
+      shorelineFillMesh = null
+    }
+    for (const mesh of lakeMeshes) {
+      world.remove(mesh)
+    }
+    for (const material of lakeMaterials) {
+      material.dispose()
+    }
+    lakeMeshes = []
+    lakeMaterials = []
+    if (lakeSurfaceGeometry) {
+      lakeSurfaceGeometry.dispose()
+      lakeSurfaceGeometry = null
+    }
+    if (mountainDebugGroup) {
+      world.remove(mountainDebugGroup)
+      mountainDebugGroup.traverse((child) => {
+        if (child instanceof THREE.LineLoop) {
+          child.geometry.dispose()
+        }
+      })
+      mountainDebugGroup = null
+    }
+    if (mountainDebugMaterial) {
+      mountainDebugMaterial.dispose()
+      mountainDebugMaterial = null
+    }
+
+    for (const mesh of treeTierMeshes) {
+      environmentGroup.remove(mesh)
+    }
+    if (treeTrunkMesh) {
+      environmentGroup.remove(treeTrunkMesh)
+    }
+    for (const mesh of mountainMeshes) {
+      environmentGroup.remove(mesh)
+    }
+    if (pebbleMesh) {
+      environmentGroup.remove(pebbleMesh)
+    }
+
+    for (const geometry of treeTierGeometries) {
+      geometry.dispose()
+    }
+    treeTierGeometries = []
+    treeTierMeshes = []
+    if (treeTrunkGeometry) {
+      treeTrunkGeometry.dispose()
+      treeTrunkGeometry = null
+    }
+    if (treeLeafMaterial) {
+      treeLeafMaterial.dispose()
+      treeLeafMaterial = null
+    }
+    if (treeTrunkMaterial) {
+      treeTrunkMaterial.dispose()
+      treeTrunkMaterial = null
+    }
+
+    for (const geometry of mountainGeometries) {
+      geometry.dispose()
+    }
+    mountainGeometries = []
+    mountainMeshes = []
+    if (mountainMaterial) {
+      mountainMaterial.dispose()
+      mountainMaterial = null
+    }
+
+    if (pebbleGeometry) {
+      pebbleGeometry.dispose()
+      pebbleGeometry = null
+    }
+    if (pebbleMaterial) {
+      pebbleMaterial.dispose()
+      pebbleMaterial = null
+    }
+    pebbleMesh = null
+
+    lakes = []
+    trees = []
+    mountains = []
+  }
+
+  const rebuildMountainDebug = () => {
+    if (mountainDebugGroup) {
+      world.remove(mountainDebugGroup)
+      mountainDebugGroup.traverse((child) => {
+        if (child instanceof THREE.LineLoop) {
+          child.geometry.dispose()
+        }
+      })
+      mountainDebugGroup = null
+    }
+    if (mountainDebugMaterial) {
+      mountainDebugMaterial.dispose()
+      mountainDebugMaterial = null
+    }
+    if (mountains.length === 0) return
+
+    const material = new THREE.LineBasicMaterial({
+      color: '#f97316',
+      transparent: true,
+      opacity: 0.75,
+    })
+    material.depthWrite = false
+    mountainDebugMaterial = material
+    const group = new THREE.Group()
+    const offset = 0.01
+
+    for (const mountain of mountains) {
+      const outline = mountain.outline
+      if (outline.length < 3) continue
+      const positions: number[] = []
+      for (let i = 0; i < outline.length; i += 1) {
+        const theta = (i / outline.length) * Math.PI * 2
+        const dir = tempVector
+          .copy(mountain.tangent)
+          .multiplyScalar(Math.cos(theta))
+          .addScaledVector(mountain.bitangent, Math.sin(theta))
+          .normalize()
+        const angle = outline[i]
+        const point = tempVectorB
+          .copy(mountain.normal)
+          .multiplyScalar(Math.cos(angle))
+          .addScaledVector(dir, Math.sin(angle))
+          .normalize()
+          .multiplyScalar(PLANET_RADIUS + offset)
+        positions.push(point.x, point.y, point.z)
+      }
+      const geometry = new THREE.BufferGeometry()
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+      geometry.computeBoundingSphere()
+      const line = new THREE.LineLoop(geometry, material)
+      group.add(line)
+    }
+
+    group.visible = mountainDebugEnabled
+    world.add(group)
+    mountainDebugGroup = group
+  }
+
+  const buildEnvironment = (data: Environment | null) => {
+    disposeEnvironment()
+
+    lakes = data?.lakes?.length ? data.lakes.map(buildLakeFromData) : createLakes(0x91fcae12, LAKE_COUNT)
+
+    const basePlanetGeometry = createFibonacciSphereGeometry(PLANET_RADIUS, PLANET_FIBONACCI_POINTS)
+    const planetGeometry = basePlanetGeometry.clone()
+    applyLakeDepressions(planetGeometry, lakes)
+    const planetMaterial = new THREE.MeshStandardMaterial({
+      color: '#7ddf6a',
+      roughness: 0.9,
+      metalness: 0.05,
+    })
+    planetMesh = new THREE.Mesh(planetGeometry, planetMaterial)
+    world.add(planetMesh)
+
+    const rawGridGeometry = new THREE.WireframeGeometry(planetGeometry)
+    const gridGeometry = createFilteredGridGeometry(rawGridGeometry, lakes)
+    const shorelineLineGeometry = createShorelineGeometry(rawGridGeometry, lakes)
+    rawGridGeometry.dispose()
+    const gridMaterial = new THREE.LineBasicMaterial({
+      color: GRID_LINE_COLOR,
+      transparent: true,
+      opacity: GRID_LINE_OPACITY,
+    })
+    gridMaterial.depthWrite = false
+    gridMesh = new THREE.LineSegments(gridGeometry, gridMaterial)
+    gridMesh.scale.setScalar(1.002)
+    world.add(gridMesh)
+    const shorelineLineMaterial = new THREE.LineBasicMaterial({
+      color: GRID_LINE_COLOR,
+      transparent: true,
+      opacity: SHORELINE_LINE_OPACITY,
+    })
+    shorelineLineMaterial.depthWrite = false
+    shorelineLineMesh = new THREE.LineSegments(shorelineLineGeometry, shorelineLineMaterial)
+    shorelineLineMesh.scale.setScalar(1.002)
+    world.add(shorelineLineMesh)
+
+    const shorelineFillGeometry = createShorelineFillGeometry(planetGeometry, lakes)
+    const shorelineFillMaterial = new THREE.MeshStandardMaterial({
+      color: SHORE_SAND_COLOR,
+      roughness: 0.92,
+      metalness: 0.05,
+      transparent: true,
+    })
+    shorelineFillMaterial.depthWrite = false
+    shorelineFillMaterial.depthTest = true
+    shorelineFillMaterial.polygonOffset = true
+    shorelineFillMaterial.polygonOffsetFactor = -1
+    shorelineFillMaterial.polygonOffsetUnits = -1
+    shorelineFillMesh = new THREE.Mesh(shorelineFillGeometry, shorelineFillMaterial)
+    shorelineFillMesh.renderOrder = 1
+    shorelineFillMesh.scale.setScalar(1.001)
+    world.add(shorelineFillMesh)
+
+    lakeSurfaceGeometry = new THREE.SphereGeometry(1, LAKE_SURFACE_SEGMENTS, LAKE_SURFACE_RINGS)
+    for (const lake of lakes) {
+      const lakeMaterial = createLakeMaskMaterial(lake)
+      const lakeMesh = new THREE.Mesh(lakeSurfaceGeometry, lakeMaterial)
+      lakeMesh.scale.setScalar(PLANET_RADIUS - lake.surfaceInset)
+      lakeMesh.renderOrder = 2
+      world.add(lakeMesh)
+      lakeMeshes.push(lakeMesh)
+      lakeMaterials.push(lakeMaterial)
+    }
+    if (isLakeDebugEnabled()) {
+      const lakeBaseGeometry = createFibonacciSphereGeometry(PLANET_RADIUS, LAKE_SURFACE_POINTS)
+      const lakeGeometry = createLakeSurfaceGeometry(lakeBaseGeometry, lakes)
+      lakeGeometry.dispose()
+      lakeBaseGeometry.dispose()
+    }
+    basePlanetGeometry.dispose()
+
     const rng = createSeededRandom(0x6f35d2a1)
     const randRange = (min: number, max: number) => min + (max - min) * rng()
     const tierHeightSum = TREE_TIER_HEIGHT_FACTORS.reduce((sum, value) => sum + value, 0)
@@ -1231,8 +1517,6 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     const localMatrix = new THREE.Matrix4()
     const worldMatrix = new THREE.Matrix4()
 
-    const treeNormals: THREE.Vector3[] = []
-    const treeScales: THREE.Vector3[] = []
     const minDot = Math.cos(TREE_MIN_ANGLE)
     const minHeightScale = TREE_MIN_HEIGHT / baseTreeHeight
     const maxHeightScale = Math.max(minHeightScale, TREE_MAX_HEIGHT / baseTreeHeight)
@@ -1240,41 +1524,56 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     const isInLake = (candidate: THREE.Vector3) =>
       sampleLakes(candidate, lakes, lakeSampleTemp).boundary > LAKE_EXCLUSION_THRESHOLD
 
-    const pickSparseNormal = (out: THREE.Vector3) => {
-      for (let attempt = 0; attempt < 60; attempt += 1) {
-        randomOnSphere(rng, out)
-        if (isInLake(out)) continue
-        let ok = true
-        for (const existing of treeNormals) {
-          if (existing.dot(out) > minDot) {
-            ok = false
-            break
+    if (data?.trees?.length) {
+      trees = data.trees.map(buildTreeFromData)
+    } else {
+      const treeNormals: THREE.Vector3[] = []
+      const treeScales: THREE.Vector3[] = []
+      const pickSparseNormal = (out: THREE.Vector3) => {
+        for (let attempt = 0; attempt < 60; attempt += 1) {
+          randomOnSphere(rng, out)
+          if (isInLake(out)) continue
+          let ok = true
+          for (const existing of treeNormals) {
+            if (existing.dot(out) > minDot) {
+              ok = false
+              break
+            }
           }
+          if (ok) return out
         }
-        if (ok) return out
+        for (let attempt = 0; attempt < 40; attempt += 1) {
+          randomOnSphere(rng, out)
+          if (!isInLake(out)) return out
+        }
+        return out
       }
-      for (let attempt = 0; attempt < 40; attempt += 1) {
-        randomOnSphere(rng, out)
-        if (!isInLake(out)) return out
+
+      for (let i = 0; i < treeInstanceCount; i += 1) {
+        const candidate = new THREE.Vector3()
+        pickSparseNormal(candidate)
+        const widthScale = randRange(TREE_MIN_SCALE, TREE_MAX_SCALE)
+        const heightScale = randRange(minHeightScale, maxHeightScale)
+        treeNormals.push(candidate)
+        treeScales.push(new THREE.Vector3(widthScale, heightScale, widthScale))
       }
-      return out
+
+      trees = treeNormals.map((treeNormal, index) => ({
+        normal: treeNormal,
+        widthScale: treeScales[index]?.x ?? 1,
+        heightScale: treeScales[index]?.y ?? 1,
+        twist: randRange(0, Math.PI * 2),
+      }))
     }
 
-    for (let i = 0; i < treeInstanceCount; i += 1) {
-      const candidate = new THREE.Vector3()
-      pickSparseNormal(candidate)
-      const widthScale = randRange(TREE_MIN_SCALE, TREE_MAX_SCALE)
-      const heightScale = randRange(minHeightScale, maxHeightScale)
-      treeNormals.push(candidate)
-      treeScales.push(new THREE.Vector3(widthScale, heightScale, widthScale))
-    }
-
-    for (let i = 0; i < treeNormals.length; i += 1) {
-      normal.copy(treeNormals[i])
+    const appliedTreeCount = Math.min(treeInstanceCount, trees.length)
+    for (let i = 0; i < appliedTreeCount; i += 1) {
+      const tree = trees[i]
+      normal.copy(tree.normal)
       baseQuat.setFromUnitVectors(up, normal)
-      twistQuat.setFromAxisAngle(up, randRange(0, Math.PI * 2))
+      twistQuat.setFromAxisAngle(up, tree.twist)
       baseQuat.multiply(twistQuat)
-      baseScale.copy(treeScales[i])
+      baseScale.set(tree.widthScale, tree.heightScale, tree.widthScale)
       position.copy(normal).multiplyScalar(PLANET_RADIUS + TREE_BASE_OFFSET - TREE_TRUNK_HEIGHT * 0.12)
       baseMatrix.compose(position, baseQuat, baseScale)
 
@@ -1290,49 +1589,76 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       }
     }
 
-    const mountainNormals: THREE.Vector3[] = []
-    const mountainScales: THREE.Vector3[] = []
-    const mountainMinDot = Math.cos(MOUNTAIN_MIN_ANGLE)
-    const pickMountainNormal = (out: THREE.Vector3) => {
-      for (let attempt = 0; attempt < 60; attempt += 1) {
-        randomOnSphere(rng, out)
-        if (isInLake(out)) continue
-        let ok = true
-        for (const existing of mountainNormals) {
-          if (existing.dot(out) > mountainMinDot) {
-            ok = false
-            break
-          }
-        }
-        if (ok) return out
-      }
-      for (let attempt = 0; attempt < 40; attempt += 1) {
-        randomOnSphere(rng, out)
-        if (!isInLake(out)) return out
-      }
-      return out
+    if (treeTrunkMesh) {
+      treeTrunkMesh.count = appliedTreeCount
+      treeTrunkMesh.instanceMatrix.needsUpdate = true
     }
-    for (let i = 0; i < MOUNTAIN_COUNT; i += 1) {
-      const candidate = new THREE.Vector3()
-      pickMountainNormal(candidate)
-      const radius = randRange(MOUNTAIN_RADIUS_MIN, MOUNTAIN_RADIUS_MAX)
-      const height = randRange(MOUNTAIN_HEIGHT_MIN, MOUNTAIN_HEIGHT_MAX)
-      mountainNormals.push(candidate)
-      mountainScales.push(new THREE.Vector3(radius, height, radius))
+    for (const mesh of treeTierMeshes) {
+      mesh.count = appliedTreeCount
+      mesh.instanceMatrix.needsUpdate = true
+    }
+
+    if (data?.mountains?.length) {
+      mountains = data.mountains.map(buildMountainFromData)
+    } else {
+      const mountainNormals: THREE.Vector3[] = []
+      const mountainMinDot = Math.cos(MOUNTAIN_MIN_ANGLE)
+      const pickMountainNormal = (out: THREE.Vector3) => {
+        for (let attempt = 0; attempt < 60; attempt += 1) {
+          randomOnSphere(rng, out)
+          if (isInLake(out)) continue
+          let ok = true
+          for (const existing of mountainNormals) {
+            if (existing.dot(out) > mountainMinDot) {
+              ok = false
+              break
+            }
+          }
+          if (ok) return out
+        }
+        for (let attempt = 0; attempt < 40; attempt += 1) {
+          randomOnSphere(rng, out)
+          if (!isInLake(out)) return out
+        }
+        return out
+      }
+      for (let i = 0; i < MOUNTAIN_COUNT; i += 1) {
+        const candidate = new THREE.Vector3()
+        pickMountainNormal(candidate)
+        const radius = randRange(MOUNTAIN_RADIUS_MIN, MOUNTAIN_RADIUS_MAX)
+        const height = randRange(MOUNTAIN_HEIGHT_MIN, MOUNTAIN_HEIGHT_MAX)
+        const variant = Math.floor(rng() * MOUNTAIN_VARIANTS)
+        const twist = randRange(0, Math.PI * 2)
+        const outline = new Array(MOUNTAIN_OUTLINE_SAMPLES).fill(radius / PLANET_RADIUS)
+        const upVector = Math.abs(candidate.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0)
+        const tangent = new THREE.Vector3().crossVectors(upVector, candidate).normalize()
+        const bitangent = new THREE.Vector3().crossVectors(candidate, tangent).normalize()
+        mountainNormals.push(candidate)
+        mountains.push({
+          normal: candidate,
+          radius,
+          height,
+          variant,
+          twist,
+          outline,
+          tangent,
+          bitangent,
+        })
+      }
     }
 
     if (mountainMeshes.length > 0) {
       const mountainCounts = new Array(mountainMeshes.length).fill(0)
-      for (let i = 0; i < mountainNormals.length; i += 1) {
-        const variantIndex = Math.floor(rng() * mountainMeshes.length)
+      for (const mountain of mountains) {
+        const variantIndex = Math.min(mountainMeshes.length - 1, Math.max(0, Math.floor(mountain.variant)))
         const mesh = mountainMeshes[variantIndex]
-        const instanceIndex = mountainCounts[variantIndex]
         if (!mesh) continue
-        normal.copy(mountainNormals[i])
+        const instanceIndex = mountainCounts[variantIndex]
+        normal.copy(mountain.normal)
         baseQuat.setFromUnitVectors(up, normal)
-        twistQuat.setFromAxisAngle(up, randRange(0, Math.PI * 2))
+        twistQuat.setFromAxisAngle(up, mountain.twist)
         baseQuat.multiply(twistQuat)
-        baseScale.copy(mountainScales[i])
+        baseScale.set(mountain.radius, mountain.height, mountain.radius)
         position.copy(normal).multiplyScalar(PLANET_RADIUS - MOUNTAIN_BASE_SINK)
         baseMatrix.compose(position, baseQuat, baseScale)
         mesh.setMatrixAt(instanceIndex, baseMatrix)
@@ -1343,13 +1669,6 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
         mesh.count = mountainCounts[i]
         mesh.instanceMatrix.needsUpdate = true
       }
-    }
-
-    if (treeTrunkMesh) {
-      treeTrunkMesh.instanceMatrix.needsUpdate = true
-    }
-    for (const mesh of treeTierMeshes) {
-      mesh.instanceMatrix.needsUpdate = true
     }
 
     if (pebbleMesh) {
@@ -1386,7 +1705,11 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       pebbleMesh.count = placed
       pebbleMesh.instanceMatrix.needsUpdate = true
     }
+
+    rebuildMountainDebug()
   }
+
+  buildEnvironment(null)
 
   const createSnakeVisual = (color: string): SnakeVisual => {
     const group = new THREE.Group()
@@ -1407,6 +1730,43 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     })
     const head = new THREE.Mesh(headGeometry, headMaterial)
     group.add(head)
+
+    const bowlCrackUniform = { value: 0 }
+    const bowlMaterial = new THREE.MeshPhysicalMaterial({
+      color: '#cfefff',
+      roughness: 0.08,
+      metalness: 0.0,
+      transmission: 0.75,
+      thickness: 0.3,
+      clearcoat: 1,
+      clearcoatRoughness: 0.1,
+      transparent: true,
+      opacity: 0.35,
+    })
+    bowlMaterial.depthWrite = false
+    bowlMaterial.onBeforeCompile = (shader) => {
+      shader.uniforms.crackAmount = bowlCrackUniform
+      shader.fragmentShader = `uniform float crackAmount;\\n${shader.fragmentShader}`
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <dithering_fragment>',
+        `
+        float crackMask = 0.0;
+        vec3 crackPos = normalize(vNormal);
+        float lineA = abs(sin(crackPos.x * 24.0) * sin(crackPos.y * 21.0));
+        float lineB = abs(sin(crackPos.y * 17.0 + crackPos.z * 11.0));
+        float lineC = abs(sin(crackPos.z * 19.0 - crackPos.x * 13.0));
+        float lines = max(lineA, max(lineB, lineC));
+        crackMask = smoothstep(0.92, 0.985, lines) * crackAmount;
+        diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.1, 0.16, 0.2), crackMask);
+        diffuseColor.a = max(diffuseColor.a, crackMask * 0.6);
+        #include <dithering_fragment>
+        `,
+      )
+    }
+    const bowl = new THREE.Mesh(bowlGeometry, bowlMaterial)
+    bowl.renderOrder = 3
+    bowl.visible = false
+    group.add(bowl)
 
     const tail = new THREE.Mesh(tailGeometry, tubeMaterial)
     group.add(tail)
@@ -1447,6 +1807,9 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       tongueBase,
       tongueForkLeft,
       tongueForkRight,
+      bowl,
+      bowlMaterial,
+      bowlCrackUniform,
       color,
     }
   }
@@ -1469,6 +1832,15 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       material.needsUpdate = true
     }
     material.depthWrite = !shouldBeTransparent
+  }
+
+  const getSurfaceRadius = (normal: THREE.Vector3, radiusOffset: number) => {
+    if (lakes.length === 0) return PLANET_RADIUS + radiusOffset
+    const sample = sampleLakes(normal, lakes, lakeSampleTemp)
+    if (sample.lake && sample.boundary > LAKE_WATER_MASK_THRESHOLD) {
+      return PLANET_RADIUS - sample.depth + radiusOffset
+    }
+    return PLANET_RADIUS + radiusOffset
   }
 
   const buildTailCapGeometry = (
@@ -1665,7 +2037,6 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
 
   const computeTailDirection = (
     curvePoints: THREE.Vector3[],
-    centerlineRadius: number,
     tailBasisPrev?: THREE.Vector3 | null,
     tailBasisTail?: THREE.Vector3 | null,
     fallbackDirection?: THREE.Vector3 | null,
@@ -1745,7 +2116,6 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       ? overrideDirection.clone()
       : computeTailDirection(
           curvePoints,
-          centerlineRadius,
           tailBasisPrev,
           tailBasisTail,
           fallbackDirection,
@@ -2038,7 +2408,6 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     player: PlayerSnapshot,
     isLocal: boolean,
     deltaSeconds: number,
-    gazeYaw: number | null,
     pellets: Point[] | null,
   ): PelletOverride | null => {
     let visual = snakes.get(player.id)
@@ -2138,7 +2507,8 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     }
     tailGrowthStates.set(player.id, smoothedTailGrowth)
     const radius = isLocal ? SNAKE_RADIUS * 1.1 : SNAKE_RADIUS
-    const centerlineRadius = PLANET_RADIUS + radius * SNAKE_LIFT_FACTOR
+    const radiusOffset = radius * SNAKE_LIFT_FACTOR
+    const centerlineRadius = PLANET_RADIUS + radiusOffset
     let tailCurveTail: THREE.Vector3 | null = null
     let tailCurvePrev: THREE.Vector3 | null = null
     let tailExtendDistance = 0
@@ -2328,7 +2698,6 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
           tailSegmentDir ??
           computeTailDirection(
             curvePoints,
-            centerlineRadius,
             tailBasisPrev,
             tailBasisTail,
             lastTailDirection,
@@ -2374,7 +2743,10 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
         lastTailBasePositions.set(player.id, tailCurveTail.clone())
       }
       const baseCurve = new THREE.CatmullRomCurve3(curvePoints, false, 'centripetal')
-      const curve = new SphericalCurve(baseCurve, centerlineRadius)
+      const curve =
+        lakes.length > 0
+          ? new SphericalCurveWithLakes(baseCurve, radiusOffset, lakes)
+          : new SphericalCurve(baseCurve, centerlineRadius)
       const tubularSegments = Math.max(8, nodes.length * 4)
       const tubeGeometry = new THREE.TubeGeometry(curve, tubularSegments, radius, 10, false)
       if (digestionState.visuals.length) {
@@ -2391,6 +2763,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       visual.pupilLeft.visible = false
       visual.pupilRight.visible = false
       visual.tongue.visible = false
+      visual.bowl.visible = false
       lastHeadPositions.delete(player.id)
       lastForwardDirections.delete(player.id)
       lastTailDirections.delete(player.id)
@@ -2457,8 +2830,19 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
 
     const headPoint = nodes[0]
     const headNormal = tempVector.set(headPoint.x, headPoint.y, headPoint.z).normalize()
-    const headPosition = headNormal.clone().multiplyScalar(centerlineRadius)
+    const headPosition = headNormal.clone().multiplyScalar(getSurfaceRadius(headNormal, radiusOffset))
     visual.head.position.copy(headPosition)
+    visual.bowl.position.copy(headPosition)
+
+    let underwater = false
+    if (lakes.length > 0) {
+      const sample = sampleLakes(headNormal, lakes, lakeSampleTemp)
+      underwater = !!sample.lake && sample.boundary > LAKE_WATER_MASK_THRESHOLD
+    }
+    const crackAmount = underwater ? clamp((0.35 - player.oxygen) / 0.35, 0, 1) : 0
+    visual.bowlCrackUniform.value = crackAmount
+    visual.bowlMaterial.opacity = 0.35 * opacity
+    visual.bowl.visible = underwater && visual.group.visible
 
     let forward = tempVectorB
     let hasForward = false
@@ -2615,6 +2999,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     visual.tongueBase.material.dispose()
     visual.tongueForkLeft.material.dispose()
     visual.tongueForkRight.material.dispose()
+    visual.bowlMaterial.dispose()
     resetSnakeTransientState(id)
     deathStates.delete(id)
     lastAliveStates.delete(id)
@@ -2624,7 +3009,6 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     players: PlayerSnapshot[],
     localPlayerId: string | null,
     deltaSeconds: number,
-    gazeYaw: number | null,
     pellets: Point[] | null,
   ): PelletOverride | null => {
     const activeIds = new Set<string>()
@@ -2635,7 +3019,6 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
         player,
         player.id === localPlayerId,
         deltaSeconds,
-        player.id === localPlayerId ? gazeYaw : null,
         pellets,
       )
       if (override) {
@@ -2690,7 +3073,6 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     snapshot: GameStateSnapshot | null,
     cameraState: Camera,
     localPlayerId: string | null,
-    pointer: PointerState | null,
     cameraDistance: number,
   ) => {
     const now = performance.now()
@@ -2708,16 +3090,17 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     camera.updateMatrixWorld()
 
     let localHeadScreen: { x: number; y: number } | null = null
-    let gazeYaw: number | null = null
 
     if (snapshot && localPlayerId) {
       const localPlayer = snapshot.players.find((player) => player.id === localPlayerId)
       const head = localPlayer?.snake[0]
       if (head) {
         const radius = SNAKE_RADIUS * 1.1
-        const centerlineRadius = PLANET_RADIUS + radius * SNAKE_LIFT_FACTOR
+        const radiusOffset = radius * SNAKE_LIFT_FACTOR
         const headNormal = tempVectorC.set(head.x, head.y, head.z).normalize()
-        const headPosition = headNormal.clone().multiplyScalar(centerlineRadius)
+        const headPosition = headNormal
+          .clone()
+          .multiplyScalar(getSurfaceRadius(headNormal, radiusOffset))
         headPosition.applyQuaternion(world.quaternion)
         headPosition.project(camera)
 
@@ -2729,24 +3112,34 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       }
     }
 
-    // gazeYaw stays null so pupils remain fixed forward.
-
     if (snapshot) {
       const pelletOverride = updateSnakes(
         snapshot.players,
         localPlayerId,
         deltaSeconds,
-        gazeYaw,
         snapshot.pellets,
       )
       updatePellets(snapshot.pellets, pelletOverride)
     } else {
-      updateSnakes([], localPlayerId, deltaSeconds, gazeYaw, null)
+      updateSnakes([], localPlayerId, deltaSeconds, null)
       updatePellets([], null)
     }
 
     renderer.render(scene, camera)
     return localHeadScreen
+  }
+
+  const setEnvironment = (environment: Environment) => {
+    buildEnvironment(environment)
+  }
+
+  const setDebugFlags = (flags: { mountainOutline?: boolean }) => {
+    if (typeof flags.mountainOutline === 'boolean') {
+      mountainDebugEnabled = flags.mountainOutline
+      if (mountainDebugGroup) {
+        mountainDebugGroup.visible = mountainDebugEnabled
+      }
+    }
   }
 
   const resize = (width: number, height: number, dpr: number) => {
@@ -2760,59 +3153,9 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
 
   const dispose = () => {
     renderer.dispose()
-    planetGeometry.dispose()
-    planetMaterial.dispose()
-    gridGeometry.dispose()
-    gridMaterial.dispose()
-    shorelineLineGeometry.dispose()
-    shorelineLineMaterial.dispose()
-    shorelineFillGeometry.dispose()
-    shorelineFillMaterial.dispose()
-    world.remove(shorelineFillMesh)
-    for (const mesh of lakeMeshes) {
-      world.remove(mesh)
-    }
-    for (const material of lakeMaterials) {
-      material.dispose()
-    }
-    lakeSurfaceGeometry.dispose()
-    for (const mesh of treeTierMeshes) {
-      environmentGroup.remove(mesh)
-    }
-    if (treeTrunkMesh) {
-      environmentGroup.remove(treeTrunkMesh)
-    }
-    for (const mesh of mountainMeshes) {
-      environmentGroup.remove(mesh)
-    }
-    if (pebbleMesh) {
-      environmentGroup.remove(pebbleMesh)
-    }
-    for (const geometry of treeTierGeometries) {
-      geometry.dispose()
-    }
-    if (treeTrunkGeometry) {
-      treeTrunkGeometry.dispose()
-    }
-    if (treeLeafMaterial) {
-      treeLeafMaterial.dispose()
-    }
-    if (treeTrunkMaterial) {
-      treeTrunkMaterial.dispose()
-    }
-    for (const geometry of mountainGeometries) {
-      geometry.dispose()
-    }
-    if (mountainMaterial) {
-      mountainMaterial.dispose()
-    }
-    if (pebbleGeometry) {
-      pebbleGeometry.dispose()
-    }
-    if (pebbleMaterial) {
-      pebbleMaterial.dispose()
-    }
+    disposeEnvironment()
     headGeometry.dispose()
+    bowlGeometry.dispose()
     tailGeometry.dispose()
     eyeGeometry.dispose()
     pupilGeometry.dispose()
@@ -2840,6 +3183,8 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   return {
     resize,
     render,
+    setEnvironment,
+    setDebugFlags,
     dispose,
   }
 }

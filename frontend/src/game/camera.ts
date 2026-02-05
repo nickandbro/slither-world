@@ -1,7 +1,7 @@
 import type { Camera, Point } from './types'
 import { cross, dot, normalize, normalizeQuat, quatFromBasis, rotateVectorByQuat, IDENTITY_QUAT } from './math'
 
-export function updateCamera(head: Point | null, current: Camera, upRef: { current: Point }): Camera {
+export function updateCamera(head: Point | null, upRef: { current: Point }): Camera {
   if (!head) return { q: { ...IDENTITY_QUAT }, active: false }
   const headNorm = normalize(head)
   const currentUp = upRef.current

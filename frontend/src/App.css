@@ -153,6 +153,107 @@
   transition: width 0.15s ease;
 }
 
+.oxygen-panel {
+  position: absolute;
+  left: 1rem;
+  right: auto;
+  bottom: 3.25rem;
+  min-width: 140px;
+  max-width: min(50%, 210px);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.5rem 0.6rem;
+  background: rgba(9, 18, 30, 0.72);
+  border-radius: 12px;
+  color: #e9f6ff;
+  font-family: 'Space Mono', monospace;
+  font-size: 0.68rem;
+  letter-spacing: 0.03em;
+  pointer-events: none;
+}
+
+.oxygen-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.oxygen-label {
+  font-weight: 700;
+}
+
+.oxygen-value {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+
+.oxygen-bar {
+  width: 100%;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.oxygen-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #38bdf8, #0ea5e9);
+  border-radius: 999px;
+  transition: width 0.15s ease;
+}
+
+.oxygen-fill.is-low {
+  background: linear-gradient(90deg, #f97316, #ef4444);
+}
+
+.debug-drawer {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.4rem;
+  font-family: 'Space Mono', monospace;
+}
+
+.debug-toggle {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(10, 18, 30, 0.78);
+  color: #f2f7ff;
+  padding: 0.35rem 0.65rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.debug-toggle:hover {
+  border-color: rgba(255, 255, 255, 0.35);
+}
+
+.debug-panel {
+  background: rgba(9, 16, 28, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  padding: 0.5rem 0.6rem;
+  color: #f2f7ff;
+  font-size: 0.7rem;
+}
+
+.debug-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.debug-item input {
+  accent-color: #f97316;
+}
+
 .overlay {
   position: absolute;
   inset: 0;
@@ -349,6 +450,16 @@ button:active {
   .stamina-panel {
     max-width: 70vw;
     bottom: 8.5rem;
+  }
+
+  .oxygen-panel {
+    max-width: 70vw;
+    bottom: 4.75rem;
+  }
+
+  .debug-drawer {
+    top: 0.65rem;
+    right: 0.65rem;
   }
 
   .leaderboard-header {

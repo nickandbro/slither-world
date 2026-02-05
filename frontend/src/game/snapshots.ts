@@ -54,6 +54,7 @@ function blendPlayers(a: PlayerSnapshot, b: PlayerSnapshot, t: number): PlayerSn
     color: b.color,
     score: b.score,
     stamina: lerp(a.stamina, b.stamina, t),
+    oxygen: lerp(a.oxygen, b.oxygen, t),
     alive: b.alive,
     snake,
     digestions: blendDigestions(a.digestions, b.digestions, t),

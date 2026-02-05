@@ -70,6 +70,7 @@ pub fn apply_snake_rotation_step(snake: &mut [SnakeNode], axis: Point, velocity:
   }
 }
 
+#[allow(dead_code)]
 pub fn apply_snake_rotation(
   snake: &mut [SnakeNode],
   axis: Point,
@@ -107,6 +108,26 @@ pub fn rotate_snake(snake: &mut [SnakeNode], z_angle: f64, y_angle: f64) {
       let Some(mut queued_point) = queued.take() else { continue };
       rotate_y(&mut queued_point, y_angle);
       rotate_z(&mut queued_point, z_angle);
+      *queued = Some(queued_point);
+    }
+  }
+}
+
+pub fn rotate_snake_around_axis(snake: &mut [SnakeNode], axis: Point, angle: f64) {
+  for node in snake {
+    let mut point = Point {
+      x: node.x,
+      y: node.y,
+      z: node.z,
+    };
+    rotate_around_axis(&mut point, axis, angle);
+    node.x = point.x;
+    node.y = point.y;
+    node.z = point.z;
+
+    for queued in node.pos_queue.iter_mut() {
+      let Some(mut queued_point) = queued.take() else { continue };
+      rotate_around_axis(&mut queued_point, axis, angle);
       *queued = Some(queued_point);
     }
   }

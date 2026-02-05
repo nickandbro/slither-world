@@ -34,6 +34,7 @@ pub struct Player {
   pub target_axis: Point,
   pub boost: bool,
   pub stamina: f64,
+  pub oxygen: f64,
   pub score: i64,
   pub alive: bool,
   pub connected: bool,

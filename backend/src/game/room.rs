@@ -1,16 +1,18 @@
 use super::constants::{
   BASE_PELLET_COUNT, BASE_SPEED, BOOST_MULTIPLIER, BOT_BOOST_DISTANCE, BOT_COUNT,
-  BOT_MIN_STAMINA_TO_BOOST, COLOR_POOL, MAX_PELLETS, MAX_SPAWN_ATTEMPTS, PLAYER_TIMEOUT_MS,
-  RESPAWN_COOLDOWN_MS, RESPAWN_RETRY_MS, SPAWN_CONE_ANGLE, STAMINA_DRAIN_PER_SEC, STAMINA_MAX,
-  STAMINA_RECHARGE_PER_SEC, TICK_MS, TURN_RATE,
+  BOT_MIN_STAMINA_TO_BOOST, COLOR_POOL, MAX_PELLETS, MAX_SPAWN_ATTEMPTS, OXYGEN_DRAIN_PER_SEC,
+  OXYGEN_MAX, PLAYER_TIMEOUT_MS, RESPAWN_COOLDOWN_MS, RESPAWN_RETRY_MS, SPAWN_CONE_ANGLE,
+  STAMINA_DRAIN_PER_SEC, STAMINA_MAX, STAMINA_RECHARGE_PER_SEC, TICK_MS, TURN_RATE,
 };
 use super::digestion::{add_digestion, advance_digestions, get_digestion_progress};
+use super::environment::{sample_lakes, Environment, LAKE_WATER_MASK_THRESHOLD};
 use super::input::parse_axis;
 use super::math::{
   collision, cross, length, normalize, point_from_spherical, random_axis, rotate_toward, rotate_y,
   rotate_z,
 };
-use super::snake::{apply_snake_rotation, create_snake, rotate_snake};
+use super::physics::apply_snake_with_collisions;
+use super::snake::{create_snake, rotate_snake};
 use super::types::{Player, Point, SnakeNode};
 use crate::protocol;
 use crate::shared::names::sanitize_player_name;
@@ -48,6 +50,7 @@ struct RoomState {
   sessions: HashMap<String, SessionEntry>,
   players: HashMap<String, Player>,
   pellets: Vec<Point>,
+  environment: Environment,
 }
 
 #[derive(Debug, Deserialize)]
@@ -72,6 +75,7 @@ impl Room {
         sessions: HashMap::new(),
         players: HashMap::new(),
         pellets: Vec::new(),
+        environment: Environment::generate(),
       }),
       running: AtomicBool::new(false),
     }
@@ -267,6 +271,23 @@ impl RoomState {
       return Some(id);
     }
 
+    let alive_bots = self
+      .players
+      .values()
+      .filter(|player| player.alive && player.is_bot)
+      .count();
+    let alive_humans = self
+      .players
+      .values()
+      .filter(|player| player.alive && !player.is_bot)
+      .count();
+    tracing::debug!(
+      alive_bots,
+      alive_humans,
+      total_players = self.players.len(),
+      "debug_kill_no_target"
+    );
+
     None
   }
 
@@ -435,6 +456,7 @@ impl RoomState {
       target_axis: axis,
       boost: false,
       stamina: STAMINA_MAX,
+      oxygen: OXYGEN_MAX,
       score: 0,
       alive,
       connected: true,
@@ -551,8 +573,39 @@ impl RoomState {
       let speed_factor = if is_boosting { BOOST_MULTIPLIER } else { 1.0 };
       let step_count = (speed_factor.round() as i32).max(1);
       let step_velocity = (BASE_SPEED * speed_factor) / step_count as f64;
-      apply_snake_rotation(&mut player.snake, player.axis, step_velocity, step_count);
+      apply_snake_with_collisions(
+        &mut player.snake,
+        &mut player.axis,
+        step_velocity,
+        step_count,
+        &self.environment,
+      );
       move_steps.insert(player.id.clone(), step_count);
+    }
+
+    let mut death_reasons: HashMap<String, &'static str> = HashMap::new();
+    let mut oxygen_dead: HashSet<String> = HashSet::new();
+    let player_ids: Vec<String> = self.players.keys().cloned().collect();
+    for id in &player_ids {
+      let Some(player) = self.players.get_mut(id) else { continue };
+      if !player.alive {
+        continue;
+      }
+      let head = Point {
+        x: player.snake[0].x,
+        y: player.snake[0].y,
+        z: player.snake[0].z,
+      };
+      let sample = sample_lakes(head, &self.environment.lakes);
+      if sample.boundary > LAKE_WATER_MASK_THRESHOLD {
+        player.oxygen = (player.oxygen - OXYGEN_DRAIN_PER_SEC * dt_seconds).max(0.0);
+        if player.oxygen <= 0.0 {
+          oxygen_dead.insert(player.id.clone());
+          death_reasons.entry(player.id.clone()).or_insert("oxygen");
+        }
+      } else {
+        player.oxygen = OXYGEN_MAX;
+      }
     }
 
     let player_snapshots: Vec<(String, bool, Vec<Point>)> = self
@@ -582,6 +635,7 @@ impl RoomState {
       for node in snake.iter().skip(2) {
         if collision(head, *node) {
           dead.insert(id.clone());
+          death_reasons.entry(id.clone()).or_insert("self_collision");
           break;
         }
       }
@@ -595,6 +649,7 @@ impl RoomState {
         for node in other_snake {
           if collision(head, *node) {
             dead.insert(id.clone());
+            death_reasons.entry(id.clone()).or_insert("snake_collision");
             break;
           }
         }
@@ -604,7 +659,10 @@ impl RoomState {
       }
     }
 
+    dead.extend(oxygen_dead);
     for id in dead {
+      let reason = death_reasons.get(&id).copied().unwrap_or("collision");
+      tracing::debug!(player_id = %id, reason, "death_reason");
       self.handle_death(&id);
     }
 
@@ -693,6 +751,7 @@ impl RoomState {
     player.alive = true;
     player.boost = false;
     player.stamina = STAMINA_MAX;
+    player.oxygen = OXYGEN_MAX;
     player.respawn_at = None;
     player.snake = spawned.snake;
     player.digestions.clear();
@@ -714,8 +773,9 @@ impl RoomState {
     }
     capacity += 2;
     for player in self.players.values() {
-      capacity += 16 + 1 + 4 + 4 + 2 + player.snake.len() * 12 + 1 + player.digestions.len() * 4;
+      capacity += 16 + 1 + 4 + 4 + 4 + 2 + player.snake.len() * 12 + 1 + player.digestions.len() * 4;
     }
+    capacity += self.environment.encoded_len();
 
     let mut encoder = protocol::Encoder::with_capacity(capacity);
     encoder.write_header(protocol::TYPE_INIT, 0);
@@ -740,13 +800,15 @@ impl RoomState {
       self.write_player_state(&mut encoder, player);
     }
 
+    self.environment.write_to(&mut encoder);
+
     encoder.into_vec()
   }
 
   fn build_state_payload(&self, now: i64) -> Vec<u8> {
     let mut capacity = 4 + 8 + 2 + self.pellets.len() * 12 + 2;
     for player in self.players.values() {
-      capacity += 16 + 1 + 4 + 4 + 2 + player.snake.len() * 12 + 1 + player.digestions.len() * 4;
+      capacity += 16 + 1 + 4 + 4 + 4 + 2 + player.snake.len() * 12 + 1 + player.digestions.len() * 4;
     }
 
     let mut encoder = protocol::Encoder::with_capacity(capacity);
@@ -814,6 +876,7 @@ impl RoomState {
     encoder.write_u8(if player.alive { 1 } else { 0 });
     encoder.write_i32(player.score as i32);
     encoder.write_f32(player.stamina as f32);
+    encoder.write_f32(player.oxygen as f32);
     let snake_len = player.snake.len().min(u16::MAX as usize) as u16;
     encoder.write_u16(snake_len);
     for node in player.snake.iter().take(snake_len as usize) {
@@ -885,6 +948,7 @@ mod tests {
       target_axis: Point { x: 1.0, y: 0.0, z: 0.0 },
       boost: false,
       stamina: STAMINA_MAX,
+      oxygen: OXYGEN_MAX,
       score: 0,
       alive: true,
       connected: true,
@@ -900,6 +964,7 @@ mod tests {
       sessions: HashMap::new(),
       players: HashMap::new(),
       pellets: Vec::new(),
+      environment: Environment::generate(),
     }
   }
 

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
-import { createWebGLScene } from './render/webglScene'
-import type { Camera, GameStateSnapshot, Point } from './game/types'
+import { createWebGLScene, type WebGLScene } from './render/webglScene'
+import type { Camera, Environment, GameStateSnapshot, Point } from './game/types'
 import { axisFromPointer, updateCamera } from './game/camera'
 import { IDENTITY_QUAT, clamp } from './game/math'
 import { buildInterpolatedSnapshot, type TimedSnapshot } from './game/snapshots'
@@ -28,6 +28,16 @@ import { resolveWebSocketUrl } from './services/backend'
 const MAX_SNAPSHOT_BUFFER = 20
 const MIN_INTERP_DELAY_MS = 60
 const MAX_EXTRAPOLATION_MS = 70
+
+const MOUNTAIN_DEBUG_KEY = 'spherical_snake_mountain_debug'
+const getMountainDebug = () => {
+  if (typeof window === 'undefined') return false
+  try {
+    return window.localStorage.getItem(MOUNTAIN_DEBUG_KEY) === '1'
+  } catch {
+    return false
+  }
+}
 const OFFSET_SMOOTHING = 0.12
 const CAMERA_DISTANCE_DEFAULT = 5.2
 const CAMERA_DISTANCE_MIN = 4.2
@@ -39,6 +49,7 @@ export default function App() {
   const glCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const hudCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const socketRef = useRef<WebSocket | null>(null)
+  const webglRef = useRef<WebGLScene | null>(null)
   const renderConfigRef = useRef<RenderConfig | null>(null)
   const pointerRef = useRef({
     angle: 0,
@@ -61,6 +72,7 @@ export default function App() {
   const playerMetaRef = useRef<Map<string, PlayerMeta>>(new Map())
 
   const [gameState, setGameState] = useState<GameStateSnapshot | null>(null)
+  const [environment, setEnvironment] = useState<Environment | null>(null)
   const [playerId, setPlayerId] = useState<string | null>(getStoredPlayerId())
   const [playerName, setPlayerName] = useState(getInitialName)
   const [roomName, setRoomName] = useState(getInitialRoom)
@@ -69,6 +81,8 @@ export default function App() {
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([])
   const [connectionStatus, setConnectionStatus] = useState('Connecting')
   const [leaderboardStatus, setLeaderboardStatus] = useState('')
+  const [debugOpen, setDebugOpen] = useState(false)
+  const [mountainDebug, setMountainDebug] = useState(getMountainDebug)
   const playerIdRef = useRef<string | null>(playerId)
   const playerNameRef = useRef(playerName)
 
@@ -77,6 +91,8 @@ export default function App() {
   }, [gameState, playerId])
 
   const score = localPlayer?.score ?? 0
+  const oxygenPct = localPlayer ? Math.round(clamp(localPlayer.oxygen, 0, 1) * 100) : 0
+  const oxygenLow = oxygenPct <= 35
   const playersOnline = gameState?.players.length ?? 0
   const staminaPlayers = useMemo(() => {
     if (!gameState) return []
@@ -133,6 +149,23 @@ export default function App() {
   }, [playerName])
 
   useEffect(() => {
+    const webgl = webglRef.current
+    if (webgl && environment) {
+      webgl.setEnvironment?.(environment)
+    }
+  }, [environment])
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(MOUNTAIN_DEBUG_KEY, mountainDebug ? '1' : '0')
+    } catch {
+      // ignore persistence errors
+    }
+    const webgl = webglRef.current
+    webgl?.setDebugFlags?.({ mountainOutline: mountainDebug })
+  }, [mountainDebug])
+
+  useEffect(() => {
     if (score > bestScore) {
       setBestScore(score)
       storeBestScore(score)
@@ -158,6 +191,11 @@ export default function App() {
     if (!hudCtx) return
 
     const webgl = createWebGLScene(glCanvas)
+    webglRef.current = webgl
+    if (environment) {
+      webgl.setEnvironment?.(environment)
+    }
+    webgl.setDebugFlags?.({ mountainOutline: mountainDebug })
 
     const updateConfig = () => {
       const rect = glCanvas.getBoundingClientRect()
@@ -189,13 +227,12 @@ export default function App() {
         const localId = playerIdRef.current
         const localHead =
           snapshot?.players.find((player) => player.id === localId)?.snake[0] ?? null
-        const camera = updateCamera(localHead, cameraRef.current, cameraUpRef)
+        const camera = updateCamera(localHead, cameraUpRef)
         cameraRef.current = camera
         const headScreen = webgl.render(
           snapshot,
           camera,
           localId,
-          pointerRef.current,
           cameraDistanceRef.current,
         )
         headScreenRef.current = headScreen
@@ -219,6 +256,7 @@ export default function App() {
       glCanvas.removeEventListener('wheel', handleWheel)
       window.cancelAnimationFrame(frameId)
       webgl.dispose()
+      webglRef.current = null
     }
   }, [])
 
@@ -240,6 +278,7 @@ export default function App() {
       playerMetaRef.current = new Map()
       setConnectionStatus('Connecting')
       setGameState(null)
+      setEnvironment(null)
 
       socket.addEventListener('open', () => {
         setConnectionStatus('Connected')
@@ -254,6 +293,7 @@ export default function App() {
         if (decoded.type === 'init') {
           setPlayerId(decoded.playerId)
           storePlayerId(decoded.playerId)
+          setEnvironment(decoded.environment)
           pushSnapshot(decoded.state)
           setGameState(decoded.state)
           return
@@ -496,6 +536,41 @@ export default function App() {
                 })}
               </div>
             )}
+            {localPlayer && (
+              <div className='oxygen-panel' aria-label='Oxygen meter'>
+                <div className='oxygen-header'>
+                  <span className='oxygen-label'>O2</span>
+                  <span className='oxygen-value'>{oxygenPct}%</span>
+                </div>
+                <div className='oxygen-bar'>
+                  <div
+                    className={['oxygen-fill', oxygenLow ? 'is-low' : ''].filter(Boolean).join(' ')}
+                    style={{ width: `${oxygenPct}%` }}
+                  />
+                </div>
+              </div>
+            )}
+            <div className={['debug-drawer', debugOpen ? 'is-open' : ''].filter(Boolean).join(' ')}>
+              <button
+                type='button'
+                className='debug-toggle'
+                onClick={() => setDebugOpen((current) => !current)}
+              >
+                Debug
+              </button>
+              {debugOpen && (
+                <div className='debug-panel'>
+                  <label className='debug-item'>
+                    <input
+                      type='checkbox'
+                      checked={mountainDebug}
+                      onChange={(event) => setMountainDebug(event.target.checked)}
+                    />
+                    Mountain outlines
+                  </label>
+                </div>
+              )}
+            </div>
           </div>
           {localPlayer && !localPlayer.alive && (
             <div className='overlay'>

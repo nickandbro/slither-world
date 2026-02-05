@@ -1,7 +1,9 @@
 pub mod constants;
 pub mod digestion;
+pub mod environment;
 pub mod input;
 pub mod math;
+pub mod physics;
 pub mod room;
 pub mod snake;
 pub mod types;
