@@ -662,15 +662,18 @@ impl RoomState {
     player.respawn_at = Some(Self::now_millis() + RESPAWN_COOLDOWN_MS);
     player.digestions.clear();
 
-    let mut index = 2;
-    while index < player.snake.len() && self.pellets.len() < MAX_PELLETS {
-      let node = &player.snake[index];
+    for node in player.snake.iter().skip(1) {
       self.pellets.push(Point {
         x: node.x,
         y: node.y,
         z: node.z,
       });
-      index += 2;
+    }
+
+    let max_pellets = u16::MAX as usize;
+    if self.pellets.len() > max_pellets {
+      let excess = self.pellets.len() - max_pellets;
+      self.pellets.drain(0..excess);
     }
 
     player.score = 0;
@@ -853,4 +856,90 @@ impl RoomState {
 struct SpawnedSnake {
   snake: Vec<SnakeNode>,
   axis: Point,
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::collections::{HashMap, VecDeque};
+
+  fn make_snake(len: usize, start: f64) -> Vec<SnakeNode> {
+    (0..len)
+      .map(|index| SnakeNode {
+        x: start + index as f64,
+        y: 0.0,
+        z: 0.0,
+        pos_queue: VecDeque::new(),
+      })
+      .collect()
+  }
+
+  fn make_player(id: &str, snake: Vec<SnakeNode>) -> Player {
+    Player {
+      id: id.to_string(),
+      id_bytes: [0u8; 16],
+      name: "Test".to_string(),
+      color: "#ffffff".to_string(),
+      is_bot: false,
+      axis: Point { x: 1.0, y: 0.0, z: 0.0 },
+      target_axis: Point { x: 1.0, y: 0.0, z: 0.0 },
+      boost: false,
+      stamina: STAMINA_MAX,
+      score: 0,
+      alive: true,
+      connected: true,
+      last_seen: 0,
+      respawn_at: None,
+      snake,
+      digestions: Vec::new(),
+    }
+  }
+
+  fn make_state() -> RoomState {
+    RoomState {
+      sessions: HashMap::new(),
+      players: HashMap::new(),
+      pellets: Vec::new(),
+    }
+  }
+
+  #[test]
+  fn death_drops_pellets_for_each_body_node() {
+    let mut state = make_state();
+    let snake = make_snake(6, 0.0);
+    let player_id = "player-1".to_string();
+    let player = make_player(&player_id, snake.clone());
+    state.players.insert(player_id.clone(), player);
+
+    state.handle_death(&player_id);
+
+    assert_eq!(state.pellets.len(), snake.len() - 1);
+    for (pellet, node) in state.pellets.iter().zip(snake.iter().skip(1)) {
+      assert_eq!(pellet.x, node.x);
+      assert_eq!(pellet.y, node.y);
+      assert_eq!(pellet.z, node.z);
+    }
+  }
+
+  #[test]
+  fn death_pellets_clamp_to_u16_max() {
+    let mut state = make_state();
+    let base_len = u16::MAX as usize - 2;
+    state.pellets = vec![Point { x: 0.0, y: 0.0, z: 0.0 }; base_len];
+
+    let snake = make_snake(5, 100.0);
+    let player_id = "player-2".to_string();
+    let player = make_player(&player_id, snake.clone());
+    state.players.insert(player_id.clone(), player);
+
+    state.handle_death(&player_id);
+
+    assert_eq!(state.pellets.len(), u16::MAX as usize);
+    let tail = &state.pellets[state.pellets.len() - 4..];
+    for (pellet, node) in tail.iter().zip(snake.iter().skip(1)) {
+      assert_eq!(pellet.x, node.x);
+      assert_eq!(pellet.y, node.y);
+      assert_eq!(pellet.z, node.z);
+    }
+  }
 }
