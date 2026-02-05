@@ -180,6 +180,11 @@ const OXYGEN_DAMAGE_COLOR = new THREE.Color('#ff2d2d')
 const OXYGEN_DAMAGE_EMISSIVE = new THREE.Color('#ff0000')
 const LAKE_WATER_OVERDRAW = BASE_PLANET_RADIUS * 0.01
 const LAKE_TERRAIN_CLAMP_EPS = BASE_PLANET_RADIUS * 0.0012
+const LAKE_VISUAL_DEPTH_MULT = 1.28
+const LAKE_SHORE_DROP_BLEND_START = 0.05
+const LAKE_SHORE_DROP_BLEND_END = 0.62
+const LAKE_SHORE_DROP_EXP = 0.72
+const LAKE_SHORE_DROP_EXTRA_MAX = BASE_PLANET_RADIUS * 0.055
 const LAKE_WATER_OPACITY = 0.65
 const LAKE_WATER_WAVE_SPEED = 0.65
 const LAKE_WATER_WAVE_SCALE = 22
@@ -202,6 +207,11 @@ const SHORE_SAND_COLOR = '#d8c48a'
 const SNAKE_RADIUS = 0.045
 const HEAD_RADIUS = SNAKE_RADIUS * 1.35
 const SNAKE_LIFT_FACTOR = 0.85
+const SNAKE_UNDERWATER_CLEARANCE = SNAKE_RADIUS * 0.18
+const SNAKE_MIN_TERRAIN_CLEARANCE = SNAKE_RADIUS * 0.1
+const SNAKE_WATERLINE_BLEND_START = 0.08
+const SNAKE_WATERLINE_BLEND_END = 0.55
+const SNAKE_SLOPE_INSERT_RADIUS_DELTA = SNAKE_RADIUS * 0.4
 const EYE_RADIUS = SNAKE_RADIUS * 0.62
 const PUPIL_RADIUS = EYE_RADIUS * 0.4
 const PUPIL_OFFSET = EYE_RADIUS - PUPIL_RADIUS * 0.6
@@ -525,6 +535,17 @@ const getLakeTerrainDepth = (sample: ReturnType<typeof sampleLakes>) => {
   return Math.max(sample.depth, sample.lake.surfaceInset + LAKE_TERRAIN_CLAMP_EPS)
 }
 
+const getVisualLakeTerrainDepth = (sample: ReturnType<typeof sampleLakes>) => {
+  const baseDepth = getLakeTerrainDepth(sample)
+  if (!sample.lake || baseDepth <= 0) return 0
+  const boundary = clamp(sample.boundary, 0, 1)
+  const shoreBlendRaw =
+    1 - smoothstep(LAKE_SHORE_DROP_BLEND_START, LAKE_SHORE_DROP_BLEND_END, boundary)
+  const shoreBlend = Math.pow(shoreBlendRaw, LAKE_SHORE_DROP_EXP)
+  const deepened = baseDepth * LAKE_VISUAL_DEPTH_MULT + shoreBlend * LAKE_SHORE_DROP_EXTRA_MAX
+  return Math.max(deepened, sample.lake.surfaceInset + LAKE_TERRAIN_CLAMP_EPS)
+}
+
 const applyLakeDepressions = (geometry: THREE.BufferGeometry, lakes: Lake[]) => {
   const positions = geometry.attributes.position
   const normal = new THREE.Vector3()
@@ -532,7 +553,7 @@ const applyLakeDepressions = (geometry: THREE.BufferGeometry, lakes: Lake[]) => 
   for (let i = 0; i < positions.count; i += 1) {
     normal.set(positions.getX(i), positions.getY(i), positions.getZ(i)).normalize()
     const sample = sampleLakes(normal, lakes, temp)
-    const depth = getLakeTerrainDepth(sample)
+    const depth = getVisualLakeTerrainDepth(sample)
     const radius = PLANET_RADIUS - depth
     positions.setXYZ(i, normal.x * radius, normal.y * radius, normal.z * radius)
   }
@@ -575,7 +596,7 @@ const createLakeSurfaceGeometry = (sampleGeometry: THREE.BufferGeometry, lakes: 
   const pushSample = (point: THREE.Vector3) => {
     normal.copy(point).normalize()
     const sample = sampleLakes(normal, lakes, temp)
-    samples.push({ sample, depth: sample.depth })
+    samples.push({ sample, depth: getVisualLakeTerrainDepth(sample) })
   }
   for (let i = 0; i < basePositions.count; i += 3) {
     if (stats) stats.total += 1
@@ -1052,51 +1073,11 @@ const dumpLakeGeometry = (geometry: THREE.BufferGeometry) => {
   console.info('[LakeGeometry]', payload)
 }
 
-function pointToVector(point: Point, radius: number) {
-  return new THREE.Vector3(point.x, point.y, point.z).normalize().multiplyScalar(radius)
-}
-
-class SphericalCurve extends THREE.Curve<THREE.Vector3> {
-  private base: THREE.CatmullRomCurve3
-  private radius: number
-
-  constructor(base: THREE.CatmullRomCurve3, radius: number) {
-    super()
-    this.base = base
-    this.radius = radius
-  }
-
-  getPoint(t: number, optionalTarget = new THREE.Vector3()) {
-    this.base.getPoint(t, optionalTarget)
-    return optionalTarget.normalize().multiplyScalar(this.radius)
-  }
-}
-
-class SphericalCurveWithLakes extends THREE.Curve<THREE.Vector3> {
-  private base: THREE.CatmullRomCurve3
-  private radiusOffset: number
-  private lakes: Lake[]
-  private temp: THREE.Vector3
-
-  constructor(base: THREE.CatmullRomCurve3, radiusOffset: number, lakes: Lake[]) {
-    super()
-    this.base = base
-    this.radiusOffset = radiusOffset
-    this.lakes = lakes
-    this.temp = new THREE.Vector3()
-  }
-
-  getPoint(t: number, optionalTarget = new THREE.Vector3()) {
-    this.base.getPoint(t, optionalTarget)
-    const normal = optionalTarget.normalize()
-    let depth = 0
-    if (this.lakes.length > 0) {
-      const sample = sampleLakes(normal, this.lakes, this.temp)
-      depth = getLakeTerrainDepth(sample)
-    }
-    const radius = PLANET_RADIUS - depth + this.radiusOffset
-    return normal.multiplyScalar(radius)
-  }
+const slerpProjectedPoint = (from: THREE.Vector3, to: THREE.Vector3, alpha: number) => {
+  const fromRadius = from.length()
+  const toRadius = to.length()
+  const blendedRadius = fromRadius + (toRadius - fromRadius) * alpha
+  return slerpOnSphere(from, to, alpha, blendedRadius)
 }
 
 const formatRendererError = (error: unknown) => {
@@ -2230,12 +2211,80 @@ const createScene = async (
     material.depthWrite = !shouldBeTransparent
   }
 
-  const getSurfaceRadius = (normal: THREE.Vector3, radiusOffset: number) => {
-    if (lakes.length === 0) return PLANET_RADIUS + radiusOffset
+  const getSnakeCenterlineRadius = (
+    normal: THREE.Vector3,
+    radiusOffset: number,
+    snakeRadius: number,
+  ) => {
+    if (lakes.length === 0) {
+      return PLANET_RADIUS + radiusOffset
+    }
     const sample = sampleLakes(normal, lakes, lakeSampleTemp)
-    const depth = getLakeTerrainDepth(sample)
-    if (depth > 0) return PLANET_RADIUS - depth + radiusOffset
-    return PLANET_RADIUS + radiusOffset
+    const depth = getVisualLakeTerrainDepth(sample)
+    let centerlineRadius = PLANET_RADIUS - depth + radiusOffset
+    if (!sample.lake || sample.boundary <= LAKE_WATER_MASK_THRESHOLD) {
+      return centerlineRadius
+    }
+
+    const boundary = clamp(sample.boundary, 0, 1)
+    const submergeBlend = smoothstep(
+      SNAKE_WATERLINE_BLEND_START,
+      SNAKE_WATERLINE_BLEND_END,
+      boundary,
+    )
+    if (submergeBlend <= 0) return centerlineRadius
+
+    const waterRadius = PLANET_RADIUS - sample.lake.surfaceInset
+    const terrainRadius = PLANET_RADIUS - depth
+    const minCenterlineRadius = terrainRadius + SNAKE_MIN_TERRAIN_CLEARANCE
+    const maxUnderwaterRadius = waterRadius - (snakeRadius + SNAKE_UNDERWATER_CLEARANCE)
+    const submergedRadius = Math.max(
+      minCenterlineRadius,
+      Math.min(centerlineRadius, maxUnderwaterRadius),
+    )
+    centerlineRadius += (submergedRadius - centerlineRadius) * submergeBlend
+    return centerlineRadius
+  }
+
+  const buildSnakeCurvePoints = (
+    nodes: Point[],
+    radiusOffset: number,
+    snakeRadius: number,
+  ) => {
+    const curvePoints: THREE.Vector3[] = []
+    let prevNormal: THREE.Vector3 | null = null
+    let prevRadius = PLANET_RADIUS + radiusOffset
+
+    for (let i = 0; i < nodes.length; i += 1) {
+      const node = nodes[i]
+      const normal = new THREE.Vector3(node.x, node.y, node.z).normalize()
+      const nodeRadius = getSnakeCenterlineRadius(normal, radiusOffset, snakeRadius)
+      if (
+        prevNormal &&
+        i > 1 &&
+        i < nodes.length - 1 &&
+        Math.abs(nodeRadius - prevRadius) >= SNAKE_SLOPE_INSERT_RADIUS_DELTA
+      ) {
+        const midpointNormal = prevNormal.clone().add(normal)
+        if (midpointNormal.lengthSq() > 1e-8) {
+          midpointNormal.normalize()
+        } else {
+          midpointNormal.copy(normal)
+        }
+        const midpointRadius = getSnakeCenterlineRadius(
+          midpointNormal,
+          radiusOffset,
+          snakeRadius,
+        )
+        curvePoints.push(midpointNormal.multiplyScalar(midpointRadius))
+      }
+
+      curvePoints.push(normal.clone().multiplyScalar(nodeRadius))
+      prevNormal = normal
+      prevRadius = nodeRadius
+    }
+
+    return curvePoints
   }
 
   const buildTailCapGeometry = (
@@ -2497,7 +2546,6 @@ const createScene = async (
   const computeExtendedTailPoint = (
     curvePoints: THREE.Vector3[],
     extendDistance: number,
-    centerlineRadius: number,
     tailBasisPrev?: THREE.Vector3 | null,
     tailBasisTail?: THREE.Vector3 | null,
     fallbackDirection?: THREE.Vector3 | null,
@@ -2506,6 +2554,8 @@ const createScene = async (
   ) => {
     if (extendDistance <= 0 || curvePoints.length < 2) return null
     const tailPos = curvePoints[curvePoints.length - 1]
+    const tailRadius = tailPos.length()
+    if (!Number.isFinite(tailRadius) || tailRadius <= 1e-6) return null
     const tailNormal = tailPos.clone().normalize()
     let tailDir = overrideDirection
       ? overrideDirection.clone()
@@ -2527,21 +2577,21 @@ const createScene = async (
     if (!tailDir) return null
 
     const axis = tailNormal.clone().cross(tailDir)
-    const angle = extendDistance / centerlineRadius
+    const angle = extendDistance / tailRadius
     let extended: THREE.Vector3
     if (axis.lengthSq() < 1e-8 || !Number.isFinite(angle)) {
       extended = tailPos
         .clone()
         .addScaledVector(tailDir, extendDistance)
         .normalize()
-        .multiplyScalar(centerlineRadius)
+        .multiplyScalar(tailRadius)
     } else {
       axis.normalize()
       extended = tailPos
         .clone()
         .applyAxisAngle(axis, angle)
         .normalize()
-        .multiplyScalar(centerlineRadius)
+        .multiplyScalar(tailRadius)
     }
     return extended
   }
@@ -2905,7 +2955,8 @@ const createScene = async (
     tailGrowthStates.set(player.id, smoothedTailGrowth)
     const radius = isLocal ? SNAKE_RADIUS * 1.1 : SNAKE_RADIUS
     const radiusOffset = radius * SNAKE_LIFT_FACTOR
-    const centerlineRadius = PLANET_RADIUS + radiusOffset
+    let headCurvePoint: THREE.Vector3 | null = null
+    let secondCurvePoint: THREE.Vector3 | null = null
     let tailCurveTail: THREE.Vector3 | null = null
     let tailCurvePrev: THREE.Vector3 | null = null
     let tailExtendDistance = 0
@@ -2927,7 +2978,9 @@ const createScene = async (
     } else {
       visual.tube.visible = true
       visual.tail.visible = true
-      const curvePoints = nodes.map((node) => pointToVector(node, centerlineRadius))
+      const curvePoints = buildSnakeCurvePoints(nodes, radiusOffset, radius)
+      headCurvePoint = curvePoints[0]?.clone() ?? null
+      secondCurvePoint = curvePoints[1]?.clone() ?? null
       const tailAddState = tailAddStates.get(player.id)
       if (tailAddState && curvePoints.length >= 2) {
         tailAddState.progress = clamp(
@@ -2957,7 +3010,12 @@ const createScene = async (
         if (!start) {
           start = end
         }
-        start = start.clone().normalize().multiplyScalar(centerlineRadius)
+        const startRadius = start.length()
+        if (startRadius > 1e-6) {
+          start = start.clone().normalize().multiplyScalar(startRadius)
+        } else {
+          start = end
+        }
 
         let blendedEnd = end
         if (referenceDir && referenceDistance > 1e-6) {
@@ -2965,17 +3023,16 @@ const createScene = async (
             start,
             referenceDir,
             referenceDistance,
-            centerlineRadius,
+            Math.max(start.length(), 1e-6),
           )
           const alignBlend = clamp((tailAddState.progress - 0.35) / 0.35, 0, 1)
-          blendedEnd = slerpOnSphere(syntheticEnd, end, alignBlend, centerlineRadius)
+          blendedEnd = slerpProjectedPoint(syntheticEnd, end, alignBlend)
         }
 
-        curvePoints[curvePoints.length - 1] = slerpOnSphere(
+        curvePoints[curvePoints.length - 1] = slerpProjectedPoint(
           start,
           blendedEnd,
           tailAddState.progress,
-          centerlineRadius,
         )
         if (tailAddState.progress >= 1) {
           tailAddStates.delete(player.id)
@@ -3119,7 +3176,6 @@ const createScene = async (
         const extendedTail = computeExtendedTailPoint(
           curvePoints,
           extensionDistance,
-          centerlineRadius,
           tailBasisPrev,
           tailBasisTail,
           lastTailDirection,
@@ -3140,12 +3196,8 @@ const createScene = async (
         lastTailBasePositions.set(player.id, tailCurveTail.clone())
       }
       const baseCurve = new THREE.CatmullRomCurve3(curvePoints, false, 'centripetal')
-      const curve =
-        lakes.length > 0
-          ? new SphericalCurveWithLakes(baseCurve, radiusOffset, lakes)
-          : new SphericalCurve(baseCurve, centerlineRadius)
-      const tubularSegments = Math.max(8, nodes.length * 4)
-      const tubeGeometry = new THREE.TubeGeometry(curve, tubularSegments, radius, 10, false)
+      const tubularSegments = Math.max(8, curvePoints.length * 4)
+      const tubeGeometry = new THREE.TubeGeometry(baseCurve, tubularSegments, radius, 10, false)
       if (digestionState.visuals.length) {
         applyDigestionBulges(tubeGeometry, digestionState.visuals)
       }
@@ -3227,7 +3279,11 @@ const createScene = async (
 
     const headPoint = nodes[0]
     const headNormal = tempVector.set(headPoint.x, headPoint.y, headPoint.z).normalize()
-    const headPosition = headNormal.clone().multiplyScalar(getSurfaceRadius(headNormal, radiusOffset))
+    const headPosition =
+      headCurvePoint ??
+      headNormal
+        .clone()
+        .multiplyScalar(getSnakeCenterlineRadius(headNormal, radiusOffset, radius))
     visual.head.position.copy(headPosition)
     visual.bowl.position.copy(headPosition)
 
@@ -3300,7 +3356,14 @@ const createScene = async (
 
     if (!hasForward) {
       if (nodes.length > 1) {
-        const nextPoint = pointToVector(nodes[1], centerlineRadius)
+        const nextPoint =
+          secondCurvePoint ??
+          (() => {
+            const nextNode = nodes[1]
+            const nextNormal = new THREE.Vector3(nextNode.x, nextNode.y, nextNode.z).normalize()
+            const nextRadius = getSnakeCenterlineRadius(nextNormal, radiusOffset, radius)
+            return nextNormal.multiplyScalar(nextRadius)
+          })()
         forward = headPosition.clone().sub(nextPoint)
       } else {
         forward = new THREE.Vector3().crossVectors(headNormal, new THREE.Vector3(0, 1, 0))
@@ -3376,8 +3439,38 @@ const createScene = async (
     }
 
     if (nodes.length > 1) {
-      const tailPos = tailCurveTail ?? pointToVector(nodes[nodes.length - 1], centerlineRadius)
-      const prevPos = tailCurvePrev ?? pointToVector(nodes[nodes.length - 2], centerlineRadius)
+      const tailPos =
+        tailCurveTail ??
+        (() => {
+          const tailNode = nodes[nodes.length - 1]
+          const tailNormalFallback = new THREE.Vector3(
+            tailNode.x,
+            tailNode.y,
+            tailNode.z,
+          ).normalize()
+          const tailRadius = getSnakeCenterlineRadius(
+            tailNormalFallback,
+            radiusOffset,
+            radius,
+          )
+          return tailNormalFallback.multiplyScalar(tailRadius)
+        })()
+      const prevPos =
+        tailCurvePrev ??
+        (() => {
+          const prevNode = nodes[nodes.length - 2]
+          const prevNormalFallback = new THREE.Vector3(
+            prevNode.x,
+            prevNode.y,
+            prevNode.z,
+          ).normalize()
+          const prevRadius = getSnakeCenterlineRadius(
+            prevNormalFallback,
+            radiusOffset,
+            radius,
+          )
+          return prevNormalFallback.multiplyScalar(prevRadius)
+        })()
       const tailNormal = tailPos.clone().normalize()
       const tailDir = tailPos.clone().sub(prevPos)
       tailDir.addScaledVector(tailNormal, -tailDir.dot(tailNormal))
@@ -3531,7 +3624,7 @@ const createScene = async (
         const headNormal = tempVectorC.set(head.x, head.y, head.z).normalize()
         const headPosition = headNormal
           .clone()
-          .multiplyScalar(getSurfaceRadius(headNormal, radiusOffset))
+          .multiplyScalar(getSnakeCenterlineRadius(headNormal, radiusOffset, radius))
         headPosition.applyQuaternion(world.quaternion)
         headPosition.project(camera)
 
