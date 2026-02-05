@@ -4,6 +4,11 @@ export type Point = {
   z: number
 }
 
+export type DigestionSnapshot = {
+  id: number
+  progress: number
+}
+
 export type PlayerSnapshot = {
   id: string
   name: string
@@ -13,7 +18,7 @@ export type PlayerSnapshot = {
   oxygen: number
   alive: boolean
   snake: Point[]
-  digestions: number[]
+  digestions: DigestionSnapshot[]
 }
 
 export type Lake = {

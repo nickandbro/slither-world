@@ -18,6 +18,7 @@ pub struct SnakeNode {
 
 #[derive(Debug, Clone)]
 pub struct Digestion {
+  pub id: u32,
   pub remaining: i64,
   pub total: i64,
   pub growth_steps: i64,
@@ -41,5 +42,6 @@ pub struct Player {
   pub last_seen: i64,
   pub respawn_at: Option<i64>,
   pub snake: Vec<SnakeNode>,
+  pub next_digestion_id: u32,
   pub digestions: Vec<Digestion>,
 }

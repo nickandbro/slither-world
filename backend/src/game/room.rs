@@ -463,6 +463,7 @@ impl RoomState {
       last_seen: Self::now_millis(),
       respawn_at,
       snake,
+      next_digestion_id: 0,
       digestions: Vec::new(),
     }
   }
@@ -719,6 +720,7 @@ impl RoomState {
     player.alive = false;
     player.respawn_at = Some(Self::now_millis() + RESPAWN_COOLDOWN_MS);
     player.digestions.clear();
+    player.next_digestion_id = 0;
 
     for node in player.snake.iter().skip(1) {
       self.pellets.push(Point {
@@ -755,6 +757,7 @@ impl RoomState {
     player.respawn_at = None;
     player.snake = spawned.snake;
     player.digestions.clear();
+    player.next_digestion_id = 0;
     tracing::debug!(player_id, is_bot = player.is_bot, "player respawned");
   }
 
@@ -773,7 +776,7 @@ impl RoomState {
     }
     capacity += 2;
     for player in self.players.values() {
-      capacity += 16 + 1 + 4 + 4 + 4 + 2 + player.snake.len() * 12 + 1 + player.digestions.len() * 4;
+      capacity += 16 + 1 + 4 + 4 + 4 + 2 + player.snake.len() * 12 + 1 + player.digestions.len() * 8;
     }
     capacity += self.environment.encoded_len();
 
@@ -808,7 +811,7 @@ impl RoomState {
   fn build_state_payload(&self, now: i64) -> Vec<u8> {
     let mut capacity = 4 + 8 + 2 + self.pellets.len() * 12 + 2;
     for player in self.players.values() {
-      capacity += 16 + 1 + 4 + 4 + 4 + 2 + player.snake.len() * 12 + 1 + player.digestions.len() * 4;
+      capacity += 16 + 1 + 4 + 4 + 4 + 2 + player.snake.len() * 12 + 1 + player.digestions.len() * 8;
     }
 
     let mut encoder = protocol::Encoder::with_capacity(capacity);
@@ -887,6 +890,7 @@ impl RoomState {
     let digestion_len = player.digestions.len().min(u8::MAX as usize) as u8;
     encoder.write_u8(digestion_len);
     for digestion in player.digestions.iter().take(digestion_len as usize) {
+      encoder.write_u32(digestion.id);
       encoder.write_f32(get_digestion_progress(digestion) as f32);
     }
   }
@@ -924,6 +928,7 @@ struct SpawnedSnake {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::game::types::Digestion;
   use std::collections::{HashMap, VecDeque};
 
   fn make_snake(len: usize, start: f64) -> Vec<SnakeNode> {
@@ -955,6 +960,7 @@ mod tests {
       last_seen: 0,
       respawn_at: None,
       snake,
+      next_digestion_id: 0,
       digestions: Vec::new(),
     }
   }
@@ -1006,5 +1012,33 @@ mod tests {
       assert_eq!(pellet.y, node.y);
       assert_eq!(pellet.z, node.z);
     }
+  }
+
+  #[test]
+  fn write_player_state_encodes_digestion_id_and_progress() {
+    let state = make_state();
+    let mut player = make_player("player-3", make_snake(2, 0.0));
+    player.digestions.push(Digestion {
+      id: 42,
+      remaining: 2,
+      total: 4,
+      growth_steps: 1,
+    });
+
+    let mut encoder = protocol::Encoder::with_capacity(256);
+    state.write_player_state(&mut encoder, &player);
+    let payload = encoder.into_vec();
+
+    let mut offset = 16 + 1 + 4 + 4 + 4 + 2 + player.snake.len() * 12;
+    assert_eq!(payload[offset], 1);
+    offset += 1;
+
+    let encoded_id = u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
+    assert_eq!(encoded_id, 42);
+    offset += 4;
+
+    let encoded_progress = f32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
+    let expected_progress = get_digestion_progress(&player.digestions[0]) as f32;
+    assert!((encoded_progress - expected_progress).abs() < 1e-6);
   }
 }

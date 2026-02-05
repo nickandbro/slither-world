@@ -1,7 +1,14 @@
 import * as THREE from 'three'
 import { ConvexGeometry } from 'three/examples/jsm/geometries/ConvexGeometry'
 import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils'
-import type { Camera, Environment, GameStateSnapshot, PlayerSnapshot, Point } from '../game/types'
+import type {
+  Camera,
+  DigestionSnapshot,
+  Environment,
+  GameStateSnapshot,
+  PlayerSnapshot,
+  Point,
+} from '../game/types'
 
 type SnakeVisual = {
   group: THREE.Group
@@ -2226,14 +2233,14 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     tubeGeometry.computeVertexNormals()
   }
 
-  const buildDigestionVisuals = (digestions: number[]) => {
+  const buildDigestionVisuals = (digestions: DigestionSnapshot[]) => {
     const visuals: DigestionVisual[] = []
     let tailGrowth = 0
 
     for (const digestion of digestions) {
-      const travelT = clamp(digestion, 0, 1)
+      const travelT = clamp(digestion.progress, 0, 1)
       const travelBiased = Math.pow(travelT, DIGESTION_TRAVEL_EASE)
-      const growth = clamp(digestion - 1, 0, 1)
+      const growth = clamp(digestion.progress - 1, 0, 1)
       visuals.push({ t: travelBiased, strength: 1 - growth })
       if (growth > tailGrowth) tailGrowth = growth
     }
@@ -2664,7 +2671,9 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     const nodes = player.snake
     const debug = isTailDebugEnabled() && isLocal
     const maxDigestion =
-      player.digestions.length > 0 ? Math.max(...player.digestions) : 0
+      player.digestions.length > 0
+        ? Math.max(...player.digestions.map((digestion) => digestion.progress))
+        : 0
     const lastTailDirection = lastTailDirections.get(player.id) ?? null
     let lengthIncreased = false
     const prevLength = lastSnakeLengths.get(player.id)

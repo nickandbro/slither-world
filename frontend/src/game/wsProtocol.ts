@@ -1,11 +1,17 @@
-import type { Environment, GameStateSnapshot, PlayerSnapshot, Point } from './types'
+import type {
+  DigestionSnapshot,
+  Environment,
+  GameStateSnapshot,
+  PlayerSnapshot,
+  Point,
+} from './types'
 
 export type PlayerMeta = {
   name: string
   color: string
 }
 
-const VERSION = 2
+const VERSION = 3
 
 const TYPE_JOIN = 0x01
 const TYPE_INPUT = 0x02
@@ -195,11 +201,12 @@ function readPlayerStates(reader: Reader, meta: Map<string, PlayerMeta>): Player
 
     const digestionsLen = reader.readU8()
     if (digestionsLen === null) return null
-    const digestions: number[] = []
+    const digestions: DigestionSnapshot[] = []
     for (let j = 0; j < digestionsLen; j += 1) {
-      const value = reader.readF32()
-      if (value === null) return null
-      digestions.push(value)
+      const digestionId = reader.readU32()
+      const progress = reader.readF32()
+      if (digestionId === null || progress === null) return null
+      digestions.push({ id: digestionId, progress })
     }
 
     const metaEntry = meta.get(id)
@@ -425,6 +432,13 @@ class Reader {
   readI32(): number | null {
     if (!this.ensure(4)) return null
     const value = this.view.getInt32(this.offset, true)
+    this.offset += 4
+    return value
+  }
+
+  readU32(): number | null {
+    if (!this.ensure(4)) return null
+    const value = this.view.getUint32(this.offset, true)
     this.offset += 4
     return value
   }

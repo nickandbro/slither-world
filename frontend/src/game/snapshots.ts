@@ -1,4 +1,4 @@
-import type { GameStateSnapshot, PlayerSnapshot, Point } from './types'
+import type { DigestionSnapshot, GameStateSnapshot, PlayerSnapshot, Point } from './types'
 import { clamp, lerp, lerpPoint } from './math'
 
 export type TimedSnapshot = GameStateSnapshot & {
@@ -7,20 +7,40 @@ export type TimedSnapshot = GameStateSnapshot & {
 
 const MAX_DIGESTION_PROGRESS = 2
 
-function blendDigestions(a: number[], b: number[], t: number) {
-  const maxLength = Math.max(a.length, b.length)
-  const digestions: number[] = []
-  for (let i = 0; i < maxLength; i += 1) {
-    const da = a[i]
-    const db = b[i]
-    if (typeof da === 'number' && typeof db === 'number') {
-      digestions.push(clamp(lerp(da, db, t), 0, MAX_DIGESTION_PROGRESS))
-    } else if (typeof db === 'number') {
-      digestions.push(clamp(db, 0, MAX_DIGESTION_PROGRESS))
-    } else if (typeof da === 'number' && t < 0.95) {
-      digestions.push(clamp(da, 0, MAX_DIGESTION_PROGRESS))
+function blendDigestions(a: DigestionSnapshot[], b: DigestionSnapshot[], t: number) {
+  const digestions: DigestionSnapshot[] = []
+  const digestionsA = new Map(a.map((digestion) => [digestion.id, digestion]))
+  const digestionsB = new Set(b.map((digestion) => digestion.id))
+
+  for (const digestionB of b) {
+    const digestionA = digestionsA.get(digestionB.id)
+    if (digestionA) {
+      digestions.push({
+        id: digestionB.id,
+        progress: clamp(
+          lerp(digestionA.progress, digestionB.progress, t),
+          0,
+          MAX_DIGESTION_PROGRESS,
+        ),
+      })
+    } else {
+      digestions.push({
+        id: digestionB.id,
+        progress: clamp(digestionB.progress, 0, MAX_DIGESTION_PROGRESS),
+      })
     }
   }
+
+  if (t < 0.95) {
+    for (const digestionA of a) {
+      if (digestionsB.has(digestionA.id)) continue
+      digestions.push({
+        id: digestionA.id,
+        progress: clamp(digestionA.progress, 0, MAX_DIGESTION_PROGRESS),
+      })
+    }
+  }
+
   return digestions
 }
 
