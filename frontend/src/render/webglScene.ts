@@ -107,7 +107,11 @@ export type WebGLScene = {
     cameraDistance: number,
   ) => { x: number; y: number } | null
   setEnvironment: (environment: Environment) => void
-  setDebugFlags: (flags: { mountainOutline?: boolean }) => void
+  setDebugFlags: (flags: {
+    mountainOutline?: boolean
+    lakeCollider?: boolean
+    treeCollider?: boolean
+  }) => void
   dispose: () => void
 }
 
@@ -135,9 +139,16 @@ const LAKE_CENTER_PIT_RATIO = 0.35
 const LAKE_SURFACE_INSET_RATIO = 0.5
 const LAKE_SURFACE_EXTRA_INSET = BASE_PLANET_RADIUS * 0.01
 const LAKE_SURFACE_DEPTH_EPS = BASE_PLANET_RADIUS * 0.0015
+const LAKE_DEBUG_SEGMENTS = 128
+const LAKE_DEBUG_OFFSET = 0.02
+const TREE_DEBUG_SEGMENTS = 64
+const TREE_DEBUG_OFFSET = 0.02
 const DEATH_FADE_DURATION = 3
-  const DEATH_START_OPACITY = 0.9
+const DEATH_START_OPACITY = 0.9
 const DEATH_VISIBILITY_CUTOFF = 0.02
+
+const WORLD_UP = new THREE.Vector3(0, 1, 0)
+const WORLD_RIGHT = new THREE.Vector3(1, 0, 0)
 const LAKE_WATER_OVERDRAW = BASE_PLANET_RADIUS * 0.01
 const LAKE_TERRAIN_CLAMP_EPS = BASE_PLANET_RADIUS * 0.0008
 const LAKE_WATER_MASK_THRESHOLD = 0
@@ -359,11 +370,21 @@ const createLakes = (seed: number, count: number) => {
   }
   return lakes
 }
+const buildTangentBasis = (
+  normal: THREE.Vector3,
+  tangent: THREE.Vector3,
+  bitangent: THREE.Vector3,
+) => {
+  const up = Math.abs(normal.y) < 0.9 ? WORLD_UP : WORLD_RIGHT
+  tangent.copy(up).cross(normal).normalize()
+  bitangent.copy(normal).cross(tangent).normalize()
+}
+
 const buildLakeFromData = (data: Environment['lakes'][number]) => {
   const center = new THREE.Vector3(data.center.x, data.center.y, data.center.z).normalize()
-  const up = Math.abs(center.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0)
-  const tangent = new THREE.Vector3().crossVectors(up, center).normalize()
-  const bitangent = new THREE.Vector3().crossVectors(center, tangent).normalize()
+  const tangent = new THREE.Vector3()
+  const bitangent = new THREE.Vector3()
+  buildTangentBasis(center, tangent, bitangent)
   return {
     center,
     radius: data.radius,
@@ -393,9 +414,9 @@ const buildTreeFromData = (data: Environment['trees'][number]): TreeInstance => 
 
 const buildMountainFromData = (data: Environment['mountains'][number]): MountainInstance => {
   const normal = new THREE.Vector3(data.normal.x, data.normal.y, data.normal.z).normalize()
-  const up = Math.abs(normal.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0)
-  const tangent = new THREE.Vector3().crossVectors(up, normal).normalize()
-  const bitangent = new THREE.Vector3().crossVectors(normal, tangent).normalize()
+  const tangent = new THREE.Vector3()
+  const bitangent = new THREE.Vector3()
+  buildTangentBasis(normal, tangent, bitangent)
   return {
     normal,
     radius: data.radius,
@@ -1025,6 +1046,12 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   let mountainDebugGroup: THREE.Group | null = null
   let mountainDebugMaterial: THREE.LineBasicMaterial | null = null
   let mountainDebugEnabled = false
+  let lakeDebugGroup: THREE.Group | null = null
+  let lakeDebugMaterial: THREE.LineBasicMaterial | null = null
+  let lakeDebugEnabled = false
+  let treeDebugGroup: THREE.Group | null = null
+  let treeDebugMaterial: THREE.LineBasicMaterial | null = null
+  let treeDebugEnabled = false
 
   const environmentGroup = new THREE.Group()
   world.add(environmentGroup)
@@ -1035,7 +1062,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
   world.add(pelletsGroup)
 
   const headGeometry = new THREE.SphereGeometry(HEAD_RADIUS, 18, 18)
-  const bowlGeometry = new THREE.SphereGeometry(HEAD_RADIUS * 1.45, 20, 20)
+  const bowlGeometry = new THREE.SphereGeometry(HEAD_RADIUS * 1.55, 20, 20)
   const tailGeometry = new THREE.SphereGeometry(1, 18, 12, 0, Math.PI * 2, 0, Math.PI / 2)
   const eyeGeometry = new THREE.SphereGeometry(EYE_RADIUS, 12, 12)
   const pupilGeometry = new THREE.SphereGeometry(PUPIL_RADIUS, 10, 10)
@@ -1226,6 +1253,32 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       mountainDebugMaterial.dispose()
       mountainDebugMaterial = null
     }
+    if (lakeDebugGroup) {
+      world.remove(lakeDebugGroup)
+      lakeDebugGroup.traverse((child) => {
+        if (child instanceof THREE.LineLoop) {
+          child.geometry.dispose()
+        }
+      })
+      lakeDebugGroup = null
+    }
+    if (lakeDebugMaterial) {
+      lakeDebugMaterial.dispose()
+      lakeDebugMaterial = null
+    }
+    if (treeDebugGroup) {
+      world.remove(treeDebugGroup)
+      treeDebugGroup.traverse((child) => {
+        if (child instanceof THREE.LineLoop) {
+          child.geometry.dispose()
+        }
+      })
+      treeDebugGroup = null
+    }
+    if (treeDebugMaterial) {
+      treeDebugMaterial.dispose()
+      treeDebugMaterial = null
+    }
 
     for (const mesh of treeTierMeshes) {
       environmentGroup.remove(mesh)
@@ -1305,6 +1358,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       opacity: 0.75,
     })
     material.depthWrite = false
+    material.depthTest = false
     mountainDebugMaterial = material
     const group = new THREE.Group()
     const offset = 0.01
@@ -1333,12 +1387,163 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
       geometry.computeBoundingSphere()
       const line = new THREE.LineLoop(geometry, material)
+      line.renderOrder = 4
       group.add(line)
     }
 
     group.visible = mountainDebugEnabled
     world.add(group)
     mountainDebugGroup = group
+  }
+
+  const computeLakeEdgeRadius = (lake: Lake, theta: number) => {
+    let angle = lake.radius
+    for (let i = 0; i < 2; i += 1) {
+      const sinAngle = Math.sin(angle)
+      const x = Math.cos(theta) * sinAngle
+      const y = Math.sin(theta) * sinAngle
+      const warp =
+        Math.sin((x + y) * lake.noiseFrequencyC + lake.noisePhaseC) * lake.warpAmplitude
+      const u = x * lake.noiseFrequency + lake.noisePhase + warp
+      const v = y * lake.noiseFrequencyB + lake.noisePhaseB - warp
+      const w = (x - y) * lake.noiseFrequencyC + lake.noisePhaseC * 0.7
+      const noise =
+        Math.sin(u) +
+        Math.sin(v) +
+        0.6 * Math.sin(2 * u + v * 0.6) +
+        0.45 * Math.sin(2.3 * v - 0.7 * u) +
+        0.35 * Math.sin(w)
+      const noiseNormalized = noise / 3.15
+      angle = clamp(
+        lake.radius * (1 + lake.noiseAmplitude * noiseNormalized),
+        lake.radius * 0.65,
+        lake.radius * 1.35,
+      )
+    }
+    return angle
+  }
+
+  const rebuildLakeDebug = () => {
+    if (lakeDebugGroup) {
+      world.remove(lakeDebugGroup)
+      lakeDebugGroup.traverse((child) => {
+        if (child instanceof THREE.LineLoop) {
+          child.geometry.dispose()
+        }
+      })
+      lakeDebugGroup = null
+    }
+    if (lakeDebugMaterial) {
+      lakeDebugMaterial.dispose()
+      lakeDebugMaterial = null
+    }
+    if (lakes.length === 0) return
+
+    const material = new THREE.LineBasicMaterial({
+      color: '#38bdf8',
+      transparent: true,
+      opacity: 0.75,
+    })
+    material.depthWrite = false
+    material.depthTest = false
+    lakeDebugMaterial = material
+
+    const group = new THREE.Group()
+    const dir = new THREE.Vector3()
+    const point = new THREE.Vector3()
+    for (const lake of lakes) {
+      const positions: number[] = []
+      for (let i = 0; i < LAKE_DEBUG_SEGMENTS; i += 1) {
+        const theta = (i / LAKE_DEBUG_SEGMENTS) * Math.PI * 2
+        const angle = computeLakeEdgeRadius(lake, theta)
+        dir
+          .copy(lake.tangent)
+          .multiplyScalar(Math.cos(theta))
+          .addScaledVector(lake.bitangent, Math.sin(theta))
+          .normalize()
+        point
+          .copy(lake.center)
+          .multiplyScalar(Math.cos(angle))
+          .addScaledVector(dir, Math.sin(angle))
+          .normalize()
+          .multiplyScalar(PLANET_RADIUS + LAKE_DEBUG_OFFSET)
+        positions.push(point.x, point.y, point.z)
+      }
+      const geometry = new THREE.BufferGeometry()
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+      geometry.computeBoundingSphere()
+      const line = new THREE.LineLoop(geometry, material)
+      line.renderOrder = 4
+      group.add(line)
+    }
+
+    group.visible = lakeDebugEnabled
+    world.add(group)
+    lakeDebugGroup = group
+  }
+
+  const rebuildTreeDebug = () => {
+    if (treeDebugGroup) {
+      world.remove(treeDebugGroup)
+      treeDebugGroup.traverse((child) => {
+        if (child instanceof THREE.LineLoop) {
+          child.geometry.dispose()
+        }
+      })
+      treeDebugGroup = null
+    }
+    if (treeDebugMaterial) {
+      treeDebugMaterial.dispose()
+      treeDebugMaterial = null
+    }
+    if (trees.length === 0) return
+
+    const material = new THREE.LineBasicMaterial({
+      color: '#facc15',
+      transparent: true,
+      opacity: 0.75,
+    })
+    material.depthWrite = false
+    material.depthTest = false
+    treeDebugMaterial = material
+
+    const group = new THREE.Group()
+    const tangent = new THREE.Vector3()
+    const bitangent = new THREE.Vector3()
+    const dir = new THREE.Vector3()
+    const point = new THREE.Vector3()
+
+    for (const tree of trees) {
+      const angle = (TREE_TRUNK_RADIUS * tree.widthScale) / PLANET_RADIUS
+      if (!Number.isFinite(angle) || angle <= 0) continue
+      buildTangentBasis(tree.normal, tangent, bitangent)
+      const positions: number[] = []
+      for (let i = 0; i < TREE_DEBUG_SEGMENTS; i += 1) {
+        const theta = (i / TREE_DEBUG_SEGMENTS) * Math.PI * 2
+        dir
+          .copy(tangent)
+          .multiplyScalar(Math.cos(theta))
+          .addScaledVector(bitangent, Math.sin(theta))
+          .normalize()
+        point
+          .copy(tree.normal)
+          .multiplyScalar(Math.cos(angle))
+          .addScaledVector(dir, Math.sin(angle))
+          .normalize()
+          .multiplyScalar(PLANET_RADIUS + TREE_DEBUG_OFFSET)
+        positions.push(point.x, point.y, point.z)
+      }
+      const geometry = new THREE.BufferGeometry()
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+      geometry.computeBoundingSphere()
+      const line = new THREE.LineLoop(geometry, material)
+      line.renderOrder = 4
+      group.add(line)
+    }
+
+    group.visible = treeDebugEnabled
+    world.add(group)
+    treeDebugGroup = group
   }
 
   const buildEnvironment = (data: Environment | null) => {
@@ -1707,6 +1912,8 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     }
 
     rebuildMountainDebug()
+    rebuildLakeDebug()
+    rebuildTreeDebug()
   }
 
   buildEnvironment(null)
@@ -1736,17 +1943,17 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
       color: '#cfefff',
       roughness: 0.08,
       metalness: 0.0,
-      transmission: 0.75,
-      thickness: 0.3,
+      transmission: 0.7,
+      thickness: 0.35,
       clearcoat: 1,
       clearcoatRoughness: 0.1,
       transparent: true,
-      opacity: 0.35,
+      opacity: 0.45,
     })
     bowlMaterial.depthWrite = false
     bowlMaterial.onBeforeCompile = (shader) => {
       shader.uniforms.crackAmount = bowlCrackUniform
-      shader.fragmentShader = `uniform float crackAmount;\\n${shader.fragmentShader}`
+      shader.fragmentShader = `uniform float crackAmount;\n${shader.fragmentShader}`
       shader.fragmentShader = shader.fragmentShader.replace(
         '#include <dithering_fragment>',
         `
@@ -2841,7 +3048,7 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     }
     const crackAmount = underwater ? clamp((0.35 - player.oxygen) / 0.35, 0, 1) : 0
     visual.bowlCrackUniform.value = crackAmount
-    visual.bowlMaterial.opacity = 0.35 * opacity
+    visual.bowlMaterial.opacity = 0.45 * opacity
     visual.bowl.visible = underwater && visual.group.visible
 
     let forward = tempVectorB
@@ -3133,11 +3340,27 @@ export function createWebGLScene(canvas: HTMLCanvasElement): WebGLScene {
     buildEnvironment(environment)
   }
 
-  const setDebugFlags = (flags: { mountainOutline?: boolean }) => {
+  const setDebugFlags = (flags: {
+    mountainOutline?: boolean
+    lakeCollider?: boolean
+    treeCollider?: boolean
+  }) => {
     if (typeof flags.mountainOutline === 'boolean') {
       mountainDebugEnabled = flags.mountainOutline
       if (mountainDebugGroup) {
         mountainDebugGroup.visible = mountainDebugEnabled
+      }
+    }
+    if (typeof flags.lakeCollider === 'boolean') {
+      lakeDebugEnabled = flags.lakeCollider
+      if (lakeDebugGroup) {
+        lakeDebugGroup.visible = lakeDebugEnabled
+      }
+    }
+    if (typeof flags.treeCollider === 'boolean') {
+      treeDebugEnabled = flags.treeCollider
+      if (treeDebugGroup) {
+        treeDebugGroup.visible = treeDebugEnabled
       }
     }
   }

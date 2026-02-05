@@ -211,8 +211,9 @@
 .debug-drawer {
   position: absolute;
   top: 1rem;
-  right: 1rem;
-  z-index: 6;
+  left: 1rem;
+  right: auto;
+  z-index: 7;
   display: flex;
   flex-direction: column;
   align-items: flex-end;

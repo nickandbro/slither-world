@@ -30,10 +30,29 @@ const MIN_INTERP_DELAY_MS = 60
 const MAX_EXTRAPOLATION_MS = 70
 
 const MOUNTAIN_DEBUG_KEY = 'spherical_snake_mountain_debug'
+const LAKE_DEBUG_KEY = 'spherical_snake_lake_debug'
+const TREE_DEBUG_KEY = 'spherical_snake_tree_debug'
+const DEBUG_UI_ENABLED = import.meta.env.DEV || import.meta.env.VITE_E2E_DEBUG === '1'
 const getMountainDebug = () => {
   if (typeof window === 'undefined') return false
   try {
     return window.localStorage.getItem(MOUNTAIN_DEBUG_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+const getLakeDebug = () => {
+  if (typeof window === 'undefined') return false
+  try {
+    return window.localStorage.getItem(LAKE_DEBUG_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+const getTreeDebug = () => {
+  if (typeof window === 'undefined') return false
+  try {
+    return window.localStorage.getItem(TREE_DEBUG_KEY) === '1'
   } catch {
     return false
   }
@@ -83,6 +102,8 @@ export default function App() {
   const [leaderboardStatus, setLeaderboardStatus] = useState('')
   const [debugOpen, setDebugOpen] = useState(false)
   const [mountainDebug, setMountainDebug] = useState(getMountainDebug)
+  const [lakeDebug, setLakeDebug] = useState(getLakeDebug)
+  const [treeDebug, setTreeDebug] = useState(getTreeDebug)
   const playerIdRef = useRef<string | null>(playerId)
   const playerNameRef = useRef(playerName)
 
@@ -158,12 +179,18 @@ export default function App() {
   useEffect(() => {
     try {
       window.localStorage.setItem(MOUNTAIN_DEBUG_KEY, mountainDebug ? '1' : '0')
+      window.localStorage.setItem(LAKE_DEBUG_KEY, lakeDebug ? '1' : '0')
+      window.localStorage.setItem(TREE_DEBUG_KEY, treeDebug ? '1' : '0')
     } catch {
       // ignore persistence errors
     }
     const webgl = webglRef.current
-    webgl?.setDebugFlags?.({ mountainOutline: mountainDebug })
-  }, [mountainDebug])
+    webgl?.setDebugFlags?.({
+      mountainOutline: mountainDebug,
+      lakeCollider: lakeDebug,
+      treeCollider: treeDebug,
+    })
+  }, [mountainDebug, lakeDebug, treeDebug])
 
   useEffect(() => {
     if (score > bestScore) {
@@ -195,7 +222,11 @@ export default function App() {
     if (environment) {
       webgl.setEnvironment?.(environment)
     }
-    webgl.setDebugFlags?.({ mountainOutline: mountainDebug })
+    webgl.setDebugFlags?.({
+      mountainOutline: mountainDebug,
+      lakeCollider: lakeDebug,
+      treeCollider: treeDebug,
+    })
 
     const updateConfig = () => {
       const rect = glCanvas.getBoundingClientRect()
@@ -550,27 +581,45 @@ export default function App() {
                 </div>
               </div>
             )}
-            <div className={['debug-drawer', debugOpen ? 'is-open' : ''].filter(Boolean).join(' ')}>
-              <button
-                type='button'
-                className='debug-toggle'
-                onClick={() => setDebugOpen((current) => !current)}
-              >
-                Debug
-              </button>
-              {debugOpen && (
-                <div className='debug-panel'>
-                  <label className='debug-item'>
-                    <input
-                      type='checkbox'
-                      checked={mountainDebug}
-                      onChange={(event) => setMountainDebug(event.target.checked)}
-                    />
-                    Mountain outlines
-                  </label>
-                </div>
-              )}
-            </div>
+            {DEBUG_UI_ENABLED && (
+              <div className={['debug-drawer', debugOpen ? 'is-open' : ''].filter(Boolean).join(' ')}>
+                <button
+                  type='button'
+                  className='debug-toggle'
+                  onClick={() => setDebugOpen((current) => !current)}
+                >
+                  Debug
+                </button>
+                {debugOpen && (
+                  <div className='debug-panel'>
+                    <label className='debug-item'>
+                      <input
+                        type='checkbox'
+                        checked={mountainDebug}
+                        onChange={(event) => setMountainDebug(event.target.checked)}
+                      />
+                      Mountain outlines
+                    </label>
+                    <label className='debug-item'>
+                      <input
+                        type='checkbox'
+                        checked={lakeDebug}
+                        onChange={(event) => setLakeDebug(event.target.checked)}
+                      />
+                      Lake collider
+                    </label>
+                    <label className='debug-item'>
+                      <input
+                        type='checkbox'
+                        checked={treeDebug}
+                        onChange={(event) => setTreeDebug(event.target.checked)}
+                      />
+                      Tree colliders
+                    </label>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
           {localPlayer && !localPlayer.alive && (
             <div className='overlay'>
