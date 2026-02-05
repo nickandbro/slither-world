@@ -100,7 +100,6 @@ export default function App() {
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([])
   const [connectionStatus, setConnectionStatus] = useState('Connecting')
   const [leaderboardStatus, setLeaderboardStatus] = useState('')
-  const [debugOpen, setDebugOpen] = useState(false)
   const [mountainDebug, setMountainDebug] = useState(getMountainDebug)
   const [lakeDebug, setLakeDebug] = useState(getLakeDebug)
   const [treeDebug, setTreeDebug] = useState(getTreeDebug)
@@ -581,45 +580,6 @@ export default function App() {
                 </div>
               </div>
             )}
-            {DEBUG_UI_ENABLED && (
-              <div className={['debug-drawer', debugOpen ? 'is-open' : ''].filter(Boolean).join(' ')}>
-                <button
-                  type='button'
-                  className='debug-toggle'
-                  onClick={() => setDebugOpen((current) => !current)}
-                >
-                  Debug
-                </button>
-                {debugOpen && (
-                  <div className='debug-panel'>
-                    <label className='debug-item'>
-                      <input
-                        type='checkbox'
-                        checked={mountainDebug}
-                        onChange={(event) => setMountainDebug(event.target.checked)}
-                      />
-                      Mountain outlines
-                    </label>
-                    <label className='debug-item'>
-                      <input
-                        type='checkbox'
-                        checked={lakeDebug}
-                        onChange={(event) => setLakeDebug(event.target.checked)}
-                      />
-                      Lake collider
-                    </label>
-                    <label className='debug-item'>
-                      <input
-                        type='checkbox'
-                        checked={treeDebug}
-                        onChange={(event) => setTreeDebug(event.target.checked)}
-                      />
-                      Tree colliders
-                    </label>
-                  </div>
-                )}
-              </div>
-            )}
           </div>
           {localPlayer && !localPlayer.alive && (
             <div className='overlay'>
@@ -669,6 +629,37 @@ export default function App() {
               Update
             </button>
           </div>
+          {DEBUG_UI_ENABLED && (
+            <div className='control-row debug-controls'>
+              <label className='control-label'>Debug</label>
+              <div className='debug-options' role='group' aria-label='Debug toggles'>
+                <label className='debug-option'>
+                  <input
+                    type='checkbox'
+                    checked={mountainDebug}
+                    onChange={(event) => setMountainDebug(event.target.checked)}
+                  />
+                  Mountain outlines
+                </label>
+                <label className='debug-option'>
+                  <input
+                    type='checkbox'
+                    checked={lakeDebug}
+                    onChange={(event) => setLakeDebug(event.target.checked)}
+                  />
+                  Lake collider
+                </label>
+                <label className='debug-option'>
+                  <input
+                    type='checkbox'
+                    checked={treeDebug}
+                    onChange={(event) => setTreeDebug(event.target.checked)}
+                  />
+                  Tree colliders
+                </label>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className='info-panel'>
