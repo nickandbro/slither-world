@@ -49,6 +49,8 @@ pub const MOUNTAIN_HEIGHT_MIN: f64 = BASE_PLANET_RADIUS * 0.12;
 pub const MOUNTAIN_HEIGHT_MAX: f64 = BASE_PLANET_RADIUS * 0.26;
 pub const MOUNTAIN_MIN_ANGLE: f64 = 0.55;
 pub const MOUNTAIN_OUTLINE_SAMPLES: usize = 64;
+const MOUNTAIN_OUTLINE_SMOOTH_RADIUS: isize = 4;
+const MOUNTAIN_OUTLINE_SMOOTH_PASSES: usize = 2;
 
 const LAKE_SEED: u32 = 0x91fcae12;
 const ENV_SEED: u32 = 0x6f35d2a1;
@@ -428,20 +430,28 @@ fn build_mountain_outline(seed: u32, base_angle: f64) -> Vec<f64> {
     outline[i] = (base_angle * scale).max(base_angle * 0.5);
   }
 
-  // Smooth the outline to avoid sharp discontinuities.
+  // Smooth the outline to avoid sharp discontinuities and produce a rounded collider.
+  if MOUNTAIN_OUTLINE_SMOOTH_PASSES == 0 {
+    return outline;
+  }
   let mut smoothed = vec![0.0; MOUNTAIN_OUTLINE_SAMPLES];
-  for i in 0..MOUNTAIN_OUTLINE_SAMPLES {
-    let mut sum = 0.0;
-    let mut count = 0.0;
-    for offset in -2..=2 {
-      let idx = (i as isize + offset).rem_euclid(MOUNTAIN_OUTLINE_SAMPLES as isize) as usize;
-      sum += outline[idx];
-      count += 1.0;
+  let radius = MOUNTAIN_OUTLINE_SMOOTH_RADIUS.max(1);
+  for _ in 0..MOUNTAIN_OUTLINE_SMOOTH_PASSES {
+    for i in 0..MOUNTAIN_OUTLINE_SAMPLES {
+      let mut sum = 0.0;
+      let mut weight = 0.0;
+      for offset in -radius..=radius {
+        let idx = (i as isize + offset).rem_euclid(MOUNTAIN_OUTLINE_SAMPLES as isize) as usize;
+        let w = (radius + 1 - offset.abs()) as f64;
+        sum += outline[idx] * w;
+        weight += w;
+      }
+      smoothed[i] = sum / weight;
     }
-    smoothed[i] = sum / count;
+    std::mem::swap(&mut outline, &mut smoothed);
   }
 
-  smoothed
+  outline
 }
 
 fn hash3(seed: u32, x: i32, y: i32, z: i32) -> f64 {
