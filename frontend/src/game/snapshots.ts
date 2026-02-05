@@ -44,28 +44,44 @@ function blendDigestions(a: DigestionSnapshot[], b: DigestionSnapshot[], t: numb
   return digestions
 }
 
+function canBlendSnakeWindow(a: PlayerSnapshot, b: PlayerSnapshot) {
+  if (a.snakeDetail !== b.snakeDetail) return false
+  if (a.snakeDetail === 'stub') return true
+  if (a.snakeDetail === 'window') {
+    return (
+      a.snakeStart === b.snakeStart &&
+      a.snake.length === b.snake.length &&
+      a.snakeTotalLen === b.snakeTotalLen
+    )
+  }
+  return true
+}
+
 function blendPlayers(a: PlayerSnapshot, b: PlayerSnapshot, t: number): PlayerSnapshot {
   if (a.alive !== b.alive) {
     return b
   }
-  const maxLength = Math.max(a.snake.length, b.snake.length)
-  const snake: Point[] = []
-  const tailA = a.snake[a.snake.length - 1]
-
-  for (let i = 0; i < maxLength; i += 1) {
-    const nodeA = a.snake[i]
-    const nodeB = b.snake[i]
-    if (nodeA && nodeB) {
-      snake.push(lerpPoint(nodeA, nodeB, t))
-    } else if (nodeB) {
-      if (tailA) {
-        snake.push(lerpPoint(tailA, nodeB, t))
-      } else {
-        snake.push({ ...nodeB })
+  let snake: Point[] = []
+  if (canBlendSnakeWindow(a, b)) {
+    const maxLength = Math.max(a.snake.length, b.snake.length)
+    const tailA = a.snake[a.snake.length - 1]
+    for (let i = 0; i < maxLength; i += 1) {
+      const nodeA = a.snake[i]
+      const nodeB = b.snake[i]
+      if (nodeA && nodeB) {
+        snake.push(lerpPoint(nodeA, nodeB, t))
+      } else if (nodeB) {
+        if (tailA) {
+          snake.push(lerpPoint(tailA, nodeB, t))
+        } else {
+          snake.push({ ...nodeB })
+        }
+      } else if (nodeA) {
+        snake.push({ ...nodeA })
       }
-    } else if (nodeA) {
-      snake.push({ ...nodeA })
     }
+  } else {
+    snake = b.snake.map((node) => ({ ...node }))
   }
 
   return {
@@ -76,8 +92,14 @@ function blendPlayers(a: PlayerSnapshot, b: PlayerSnapshot, t: number): PlayerSn
     stamina: lerp(a.stamina, b.stamina, t),
     oxygen: lerp(a.oxygen, b.oxygen, t),
     alive: b.alive,
+    snakeDetail: b.snakeDetail,
+    snakeStart: b.snakeStart,
+    snakeTotalLen: b.snakeTotalLen,
     snake,
-    digestions: blendDigestions(a.digestions, b.digestions, t),
+    digestions:
+      a.snakeDetail === 'full' && b.snakeDetail === 'full'
+        ? blendDigestions(a.digestions, b.digestions, t)
+        : b.digestions,
   }
 }
 

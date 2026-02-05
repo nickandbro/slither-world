@@ -8,7 +8,7 @@ import {
 } from './render/webglScene'
 import type { Camera, Environment, GameStateSnapshot, Point } from './game/types'
 import { axisFromPointer, updateCamera } from './game/camera'
-import { IDENTITY_QUAT, clamp } from './game/math'
+import { IDENTITY_QUAT, clamp, normalize } from './game/math'
 import { buildInterpolatedSnapshot, type TimedSnapshot } from './game/snapshots'
 import { drawHud, type RenderConfig } from './game/hud'
 import {
@@ -70,11 +70,36 @@ const CAMERA_DISTANCE_MIN = 4.2
 const CAMERA_DISTANCE_MAX = 9
 const CAMERA_ZOOM_SENSITIVITY = 0.0015
 const POINTER_MAX_RANGE_RATIO = 0.25
+const CAMERA_FOV_DEGREES = 40
+const PLANET_RADIUS = 3
+const VIEW_RADIUS_EXTRA_MARGIN = 0.08
 const formatRendererError = (error: unknown) => {
   if (error instanceof Error && error.message.trim()) {
     return error.message.trim()
   }
   return 'Renderer initialization failed'
+}
+
+const surfaceAngleFromRay = (cameraDistance: number, halfFov: number) => {
+  const clampedDistance = Math.max(cameraDistance, PLANET_RADIUS + 1e-3)
+  const sinHalf = Math.sin(halfFov)
+  const cosHalf = Math.cos(halfFov)
+  const underSqrt = PLANET_RADIUS * PLANET_RADIUS - clampedDistance * clampedDistance * sinHalf * sinHalf
+  if (underSqrt <= 0) {
+    return Math.acos(clamp(PLANET_RADIUS / clampedDistance, -1, 1))
+  }
+  const rayDistance = clampedDistance * cosHalf - Math.sqrt(underSqrt)
+  const hitZ = clampedDistance - rayDistance * cosHalf
+  return Math.acos(clamp(hitZ / PLANET_RADIUS, -1, 1))
+}
+
+const computeViewRadius = (cameraDistance: number, aspect: number) => {
+  const halfY = (CAMERA_FOV_DEGREES * Math.PI) / 360
+  const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 1
+  const halfX = Math.atan(Math.tan(halfY) * safeAspect)
+  const halfDiag = Math.min(Math.PI * 0.499, Math.hypot(halfX, halfY))
+  const base = surfaceAngleFromRay(cameraDistance, halfDiag)
+  return clamp(base + VIEW_RADIUS_EXTRA_MARGIN, 0.2, 1.4)
 }
 
 export default function App() {
@@ -100,6 +125,7 @@ export default function App() {
   const cameraRef = useRef<Camera>({ q: { ...IDENTITY_QUAT }, active: false })
   const cameraUpRef = useRef<Point>({ x: 0, y: 1, z: 0 })
   const cameraDistanceRef = useRef(CAMERA_DISTANCE_DEFAULT)
+  const localHeadRef = useRef<Point | null>(null)
   const headScreenRef = useRef<{ x: number; y: number } | null>(null)
   const playerMetaRef = useRef<Map<string, PlayerMeta>>(new Map())
 
@@ -309,6 +335,7 @@ export default function App() {
             const localId = playerIdRef.current
             const localHead =
               snapshot?.players.find((player) => player.id === localId)?.snake[0] ?? null
+            localHeadRef.current = localHead ? normalize(localHead) : null
             const camera = updateCamera(localHead, cameraUpRef)
             cameraRef.current = camera
             const headScreen = webgl.render(
@@ -354,7 +381,6 @@ export default function App() {
       headScreenRef.current = null
     }
     // Renderer swaps are intentionally triggered by explicit backend preference only.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rendererPreference])
 
   useEffect(() => {
@@ -500,7 +526,18 @@ export default function App() {
       const axis = pointerRef.current.active
         ? axisFromPointer(pointerRef.current.angle, cameraRef.current)
         : null
-      socket.send(encodeInput(axis, pointerRef.current.boost))
+      const config = renderConfigRef.current
+      const aspect = config && config.height > 0 ? config.width / config.height : 1
+      const viewRadius = computeViewRadius(cameraDistanceRef.current, aspect)
+      socket.send(
+        encodeInput(
+          axis,
+          pointerRef.current.boost,
+          localHeadRef.current,
+          viewRadius,
+          cameraDistanceRef.current,
+        ),
+      )
     }, 50)
   }
 

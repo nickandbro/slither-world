@@ -17,6 +17,9 @@ export type PlayerSnapshot = {
   stamina: number
   oxygen: number
   alive: boolean
+  snakeDetail: 'full' | 'window' | 'stub'
+  snakeStart: number
+  snakeTotalLen: number
   snake: Point[]
   digestions: DigestionSnapshot[]
 }

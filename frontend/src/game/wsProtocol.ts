@@ -11,7 +11,7 @@ export type PlayerMeta = {
   color: string
 }
 
-const VERSION = 3
+const VERSION = 4
 
 const TYPE_JOIN = 0x01
 const TYPE_INPUT = 0x02
@@ -26,6 +26,13 @@ const FLAG_JOIN_NAME = 1 << 1
 
 const FLAG_INPUT_AXIS = 1 << 0
 const FLAG_INPUT_BOOST = 1 << 1
+const FLAG_INPUT_VIEW_CENTER = 1 << 2
+const FLAG_INPUT_VIEW_RADIUS = 1 << 3
+const FLAG_INPUT_CAMERA_DISTANCE = 1 << 4
+
+const SNAKE_DETAIL_FULL = 0
+const SNAKE_DETAIL_WINDOW = 1
+const SNAKE_DETAIL_STUB = 2
 
 const MAX_STRING_BYTES = 255
 
@@ -62,12 +69,31 @@ export function encodeJoin(name: string | null, playerId: string | null): ArrayB
   return buffer
 }
 
-export function encodeInput(axis: Point | null, boost: boolean): ArrayBuffer {
-  let flags = 0
-  if (axis) flags |= FLAG_INPUT_AXIS
-  if (boost) flags |= FLAG_INPUT_BOOST
+export function encodeInput(
+  axis: Point | null,
+  boost: boolean,
+  viewCenter: Point | null = null,
+  viewRadius: number | null = null,
+  cameraDistance: number | null = null,
+): ArrayBuffer {
+  const hasAxis = !!axis
+  const hasViewCenter = !!viewCenter
+  const hasViewRadius = Number.isFinite(viewRadius)
+  const hasCameraDistance = Number.isFinite(cameraDistance)
 
-  const length = 4 + (axis ? 12 : 0)
+  let flags = 0
+  if (hasAxis) flags |= FLAG_INPUT_AXIS
+  if (boost) flags |= FLAG_INPUT_BOOST
+  if (hasViewCenter) flags |= FLAG_INPUT_VIEW_CENTER
+  if (hasViewRadius) flags |= FLAG_INPUT_VIEW_RADIUS
+  if (hasCameraDistance) flags |= FLAG_INPUT_CAMERA_DISTANCE
+
+  const length =
+    4 +
+    (hasAxis ? 12 : 0) +
+    (hasViewCenter ? 12 : 0) +
+    (hasViewRadius ? 4 : 0) +
+    (hasCameraDistance ? 4 : 0)
   const buffer = new ArrayBuffer(length)
   const view = new DataView(buffer)
   let offset = 0
@@ -76,6 +102,20 @@ export function encodeInput(axis: Point | null, boost: boolean): ArrayBuffer {
     view.setFloat32(offset, axis.x, true)
     view.setFloat32(offset + 4, axis.y, true)
     view.setFloat32(offset + 8, axis.z, true)
+    offset += 12
+  }
+  if (viewCenter) {
+    view.setFloat32(offset, viewCenter.x, true)
+    view.setFloat32(offset + 4, viewCenter.y, true)
+    view.setFloat32(offset + 8, viewCenter.z, true)
+    offset += 12
+  }
+  if (hasViewRadius) {
+    view.setFloat32(offset, viewRadius as number, true)
+    offset += 4
+  }
+  if (hasCameraDistance) {
+    view.setFloat32(offset, cameraDistance as number, true)
   }
   return buffer
 }
@@ -184,15 +224,45 @@ function readPlayerStates(reader: Reader, meta: Map<string, PlayerMeta>): Player
     const score = reader.readI32()
     const stamina = reader.readF32()
     const oxygen = reader.readF32()
-    const snakeLen = reader.readU16()
+    const snakeDetailRaw = reader.readU8()
+    const snakeTotalLen = reader.readU16()
     if (
       id === null ||
       aliveRaw === null ||
       score === null ||
       stamina === null ||
       oxygen === null ||
-      snakeLen === null
+      snakeDetailRaw === null ||
+      snakeTotalLen === null
     ) {
+      return null
+    }
+
+    let snakeDetail: PlayerSnapshot['snakeDetail'] = 'full'
+    let snakeStart = 0
+    let snakeLen = 0
+    if (snakeDetailRaw === SNAKE_DETAIL_FULL) {
+      const fullLen = reader.readU16()
+      if (fullLen === null) return null
+      snakeLen = fullLen
+      snakeDetail = 'full'
+      snakeStart = 0
+    } else if (snakeDetailRaw === SNAKE_DETAIL_WINDOW) {
+      const start = reader.readU16()
+      const length = reader.readU16()
+      if (start === null || length === null) return null
+      snakeDetail = 'window'
+      snakeStart = start
+      snakeLen = length
+    } else if (snakeDetailRaw === SNAKE_DETAIL_STUB) {
+      snakeDetail = 'stub'
+      snakeStart = 0
+      snakeLen = 0
+    } else {
+      return null
+    }
+
+    if (snakeStart + snakeLen > snakeTotalLen) {
       return null
     }
 
@@ -218,6 +288,9 @@ function readPlayerStates(reader: Reader, meta: Map<string, PlayerMeta>): Player
       stamina,
       oxygen,
       alive: aliveRaw === 1,
+      snakeDetail,
+      snakeStart,
+      snakeTotalLen,
       snake,
       digestions,
     })

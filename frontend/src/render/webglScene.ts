@@ -146,6 +146,18 @@ const BASE_PLANET_RADIUS = 1
 const PLANET_RADIUS = 3
 const PLANET_SCALE = PLANET_RADIUS / BASE_PLANET_RADIUS
 const PLANET_FIBONACCI_POINTS = 2048
+const PLANET_PATCH_LOD_ENABLED = true
+const PLANET_PATCH_CENTER_REBUILD_ANGLE = 0.04
+const PLANET_PATCH_EDGE_MARGIN = 0.14
+const PLANET_PATCH_RING_EXPONENT = 1.8
+const PLANET_PATCH_OUTER_MIN = 0.72
+const PLANET_PATCH_OUTER_MAX = 1.36
+const PLANET_PATCH_MIN_RINGS = 22
+const PLANET_PATCH_MAX_RINGS = 56
+const PLANET_PATCH_MIN_SEGMENTS = 56
+const PLANET_PATCH_MAX_SEGMENTS = 144
+const PLANET_PATCH_DISTANCE_NEAR = 4.2
+const PLANET_PATCH_DISTANCE_FAR = 9
 const LAKE_SURFACE_POINTS = PLANET_FIBONACCI_POINTS * 3
 const LAKE_SURFACE_SEGMENTS = 96
 const LAKE_SURFACE_RINGS = 64
@@ -292,6 +304,44 @@ const smoothValue = (current: number, target: number, deltaSeconds: number, rate
   const rate = target >= current ? rateUp : rateDown
   const alpha = 1 - Math.exp(-rate * Math.max(0, deltaSeconds))
   return current + (target - current) * alpha
+}
+
+const surfaceAngleFromRay = (cameraDistance: number, halfFov: number) => {
+  const clampedDistance = Math.max(cameraDistance, PLANET_RADIUS + 1e-3)
+  const sinHalf = Math.sin(halfFov)
+  const cosHalf = Math.cos(halfFov)
+  const under = PLANET_RADIUS * PLANET_RADIUS - clampedDistance * clampedDistance * sinHalf * sinHalf
+  if (under <= 0) {
+    return Math.acos(clamp(PLANET_RADIUS / clampedDistance, -1, 1))
+  }
+  const rayDistance = clampedDistance * cosHalf - Math.sqrt(under)
+  const hitZ = clampedDistance - rayDistance * cosHalf
+  return Math.acos(clamp(hitZ / PLANET_RADIUS, -1, 1))
+}
+
+const computePatchOuterAngle = (cameraDistance: number, aspect: number) => {
+  const halfY = (40 * Math.PI) / 360
+  const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 1
+  const halfX = Math.atan(Math.tan(halfY) * safeAspect)
+  const halfDiag = Math.min(Math.PI * 0.499, Math.hypot(halfX, halfY))
+  const base = surfaceAngleFromRay(cameraDistance, halfDiag)
+  return clamp(base + PLANET_PATCH_EDGE_MARGIN, PLANET_PATCH_OUTER_MIN, PLANET_PATCH_OUTER_MAX)
+}
+
+const computePatchDetail = (cameraDistance: number) => {
+  const t = clamp(
+    (PLANET_PATCH_DISTANCE_FAR - cameraDistance) /
+      (PLANET_PATCH_DISTANCE_FAR - PLANET_PATCH_DISTANCE_NEAR),
+    0,
+    1,
+  )
+  const rings = Math.round(
+    PLANET_PATCH_MIN_RINGS + (PLANET_PATCH_MAX_RINGS - PLANET_PATCH_MIN_RINGS) * t,
+  )
+  const rawSegments =
+    PLANET_PATCH_MIN_SEGMENTS + (PLANET_PATCH_MAX_SEGMENTS - PLANET_PATCH_MIN_SEGMENTS) * t
+  const segments = Math.max(12, Math.round(rawSegments / 4) * 4)
+  return { rings, segments }
 }
 const createMountainGeometry = (seed: number) => {
   const rand = createSeededRandom(seed)
@@ -1246,6 +1296,10 @@ const createScene = async (
   let viewportWidth = 1
   let viewportHeight = 1
   let lastFrameTime = performance.now()
+  const planetPatchCenter = new THREE.Vector3(0, 0, 1)
+  let planetPatchOuterAngle = 0
+  let planetPatchRings = 0
+  let planetPatchSegments = 0
 
   const snakes = new Map<string, SnakeVisual>()
   const deathStates = new Map<string, DeathState>()
@@ -1254,6 +1308,7 @@ const createScene = async (
   const lastForwardDirections = new Map<string, THREE.Vector3>()
   const lastTailDirections = new Map<string, THREE.Vector3>()
   const lastSnakeLengths = new Map<string, number>()
+  const lastSnakeStarts = new Map<string, number>()
   const tailAddStates = new Map<string, TailAddState>()
   const tailExtraStates = new Map<string, TailExtraState>()
   const lastTailBasePositions = new Map<string, THREE.Vector3>()
@@ -1358,6 +1413,10 @@ const createScene = async (
   }
 
   const disposeEnvironment = () => {
+    planetPatchCenter.set(0, 0, 1)
+    planetPatchOuterAngle = 0
+    planetPatchRings = 0
+    planetPatchSegments = 0
     if (planetMesh) {
       world.remove(planetMesh)
       planetMesh.geometry.dispose()
@@ -1700,61 +1759,196 @@ const createScene = async (
     treeDebugGroup = group
   }
 
+  const getPlanetSurfaceRadius = (normal: THREE.Vector3) => {
+    if (lakes.length === 0) return PLANET_RADIUS
+    const sample = sampleLakes(normal, lakes, lakeSampleTemp)
+    const depth = getVisualLakeTerrainDepth(sample)
+    return PLANET_RADIUS - depth
+  }
+
+  const buildPlanetPatchGeometry = (
+    center: THREE.Vector3,
+    outerAngle: number,
+    rings: number,
+    segments: number,
+  ) => {
+    const geometry = new THREE.BufferGeometry()
+    const clampedRings = Math.max(1, rings)
+    const clampedSegments = Math.max(12, segments)
+    const positions: number[] = []
+    const indices: number[] = []
+
+    const tangent = new THREE.Vector3()
+    const bitangent = new THREE.Vector3()
+    const dir = new THREE.Vector3()
+    buildTangentBasis(center, tangent, bitangent)
+
+    const addVertex = (normal: THREE.Vector3) => {
+      const radius = getPlanetSurfaceRadius(normal)
+      positions.push(normal.x * radius, normal.y * radius, normal.z * radius)
+    }
+
+    addVertex(center)
+
+    for (let ring = 1; ring <= clampedRings; ring += 1) {
+      const t = ring / clampedRings
+      const theta = outerAngle * Math.pow(t, PLANET_PATCH_RING_EXPONENT)
+      const sinTheta = Math.sin(theta)
+      const cosTheta = Math.cos(theta)
+      for (let s = 0; s < clampedSegments; s += 1) {
+        const phi = (s / clampedSegments) * Math.PI * 2
+        dir
+          .copy(center)
+          .multiplyScalar(cosTheta)
+          .addScaledVector(tangent, Math.cos(phi) * sinTheta)
+          .addScaledVector(bitangent, Math.sin(phi) * sinTheta)
+          .normalize()
+        addVertex(dir)
+      }
+    }
+
+    const firstRingStart = 1
+    for (let s = 0; s < clampedSegments; s += 1) {
+      const current = firstRingStart + s
+      const next = firstRingStart + ((s + 1) % clampedSegments)
+      indices.push(0, current, next)
+    }
+
+    for (let ring = 2; ring <= clampedRings; ring += 1) {
+      const prevStart = 1 + (ring - 2) * clampedSegments
+      const currStart = 1 + (ring - 1) * clampedSegments
+      for (let s = 0; s < clampedSegments; s += 1) {
+        const a = prevStart + s
+        const b = prevStart + ((s + 1) % clampedSegments)
+        const c = currStart + s
+        const d = currStart + ((s + 1) % clampedSegments)
+        indices.push(a, c, b)
+        indices.push(b, c, d)
+      }
+    }
+
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+    geometry.setIndex(indices)
+    geometry.computeVertexNormals()
+    geometry.computeBoundingSphere()
+    return geometry
+  }
+
+  const updateLakePatchVisibility = (center: THREE.Vector3, outerAngle: number) => {
+    if (!PLANET_PATCH_LOD_ENABLED) return
+    const visibilityCos = Math.cos(outerAngle + PLANET_PATCH_EDGE_MARGIN)
+    for (let i = 0; i < lakeMeshes.length; i += 1) {
+      const lake = lakes[i]
+      const mesh = lakeMeshes[i]
+      if (!lake || !mesh) continue
+      mesh.visible = lake.center.dot(center) >= visibilityCos
+    }
+  }
+
+  const maybeRebuildPlanetPatch = (
+    center: THREE.Vector3,
+    cameraDistance: number,
+    force = false,
+  ) => {
+    if (!PLANET_PATCH_LOD_ENABLED || !planetMesh) return
+    const normalizedCenter = center.clone().normalize()
+    const aspect = viewportHeight > 0 ? viewportWidth / viewportHeight : 1
+    const outerAngle = computePatchOuterAngle(cameraDistance, aspect)
+    const detail = computePatchDetail(cameraDistance)
+
+    const centerDelta = Math.acos(clamp(planetPatchCenter.dot(normalizedCenter), -1, 1))
+    const angleDelta = Math.abs(outerAngle - planetPatchOuterAngle)
+    const detailChanged =
+      detail.rings !== planetPatchRings || detail.segments !== planetPatchSegments
+
+    if (
+      !force &&
+      !detailChanged &&
+      centerDelta < PLANET_PATCH_CENTER_REBUILD_ANGLE &&
+      angleDelta < 0.03
+    ) {
+      return
+    }
+
+    const nextGeometry = buildPlanetPatchGeometry(
+      normalizedCenter,
+      outerAngle,
+      detail.rings,
+      detail.segments,
+    )
+    planetMesh.geometry.dispose()
+    planetMesh.geometry = nextGeometry
+    planetPatchCenter.copy(normalizedCenter)
+    planetPatchOuterAngle = outerAngle
+    planetPatchRings = detail.rings
+    planetPatchSegments = detail.segments
+    updateLakePatchVisibility(normalizedCenter, outerAngle)
+  }
+
   const buildEnvironment = (data: Environment | null) => {
     disposeEnvironment()
 
     lakes = data?.lakes?.length ? data.lakes.map(buildLakeFromData) : createLakes(0x91fcae12, LAKE_COUNT)
 
-    const basePlanetGeometry = createFibonacciSphereGeometry(PLANET_RADIUS, PLANET_FIBONACCI_POINTS)
-    const planetGeometry = basePlanetGeometry.clone()
-    applyLakeDepressions(planetGeometry, lakes)
     const planetMaterial = new THREE.MeshStandardMaterial({
       color: '#7ddf6a',
       roughness: 0.9,
       metalness: 0.05,
+      side: PLANET_PATCH_LOD_ENABLED ? THREE.DoubleSide : THREE.FrontSide,
     })
-    planetMesh = new THREE.Mesh(planetGeometry, planetMaterial)
-    world.add(planetMesh)
+    if (PLANET_PATCH_LOD_ENABLED) {
+      planetMesh = new THREE.Mesh(new THREE.BufferGeometry(), planetMaterial)
+      world.add(planetMesh)
+      maybeRebuildPlanetPatch(planetPatchCenter, PLANET_PATCH_DISTANCE_NEAR, true)
+    } else {
+      const basePlanetGeometry = createFibonacciSphereGeometry(PLANET_RADIUS, PLANET_FIBONACCI_POINTS)
+      const planetGeometry = basePlanetGeometry.clone()
+      applyLakeDepressions(planetGeometry, lakes)
+      planetMesh = new THREE.Mesh(planetGeometry, planetMaterial)
+      world.add(planetMesh)
 
-    const rawGridGeometry = new THREE.WireframeGeometry(planetGeometry)
-    const gridGeometry = createFilteredGridGeometry(rawGridGeometry, lakes)
-    const shorelineLineGeometry = createShorelineGeometry(rawGridGeometry, lakes)
-    rawGridGeometry.dispose()
-    const gridMaterial = new THREE.LineBasicMaterial({
-      color: GRID_LINE_COLOR,
-      transparent: true,
-      opacity: GRID_LINE_OPACITY,
-    })
-    gridMaterial.depthWrite = false
-    gridMesh = new THREE.LineSegments(gridGeometry, gridMaterial)
-    gridMesh.scale.setScalar(1.002)
-    world.add(gridMesh)
-    const shorelineLineMaterial = new THREE.LineBasicMaterial({
-      color: GRID_LINE_COLOR,
-      transparent: true,
-      opacity: SHORELINE_LINE_OPACITY,
-    })
-    shorelineLineMaterial.depthWrite = false
-    shorelineLineMesh = new THREE.LineSegments(shorelineLineGeometry, shorelineLineMaterial)
-    shorelineLineMesh.scale.setScalar(1.002)
-    world.add(shorelineLineMesh)
+      const rawGridGeometry = new THREE.WireframeGeometry(planetGeometry)
+      const gridGeometry = createFilteredGridGeometry(rawGridGeometry, lakes)
+      const shorelineLineGeometry = createShorelineGeometry(rawGridGeometry, lakes)
+      rawGridGeometry.dispose()
+      const gridMaterial = new THREE.LineBasicMaterial({
+        color: GRID_LINE_COLOR,
+        transparent: true,
+        opacity: GRID_LINE_OPACITY,
+      })
+      gridMaterial.depthWrite = false
+      gridMesh = new THREE.LineSegments(gridGeometry, gridMaterial)
+      gridMesh.scale.setScalar(1.002)
+      world.add(gridMesh)
+      const shorelineLineMaterial = new THREE.LineBasicMaterial({
+        color: GRID_LINE_COLOR,
+        transparent: true,
+        opacity: SHORELINE_LINE_OPACITY,
+      })
+      shorelineLineMaterial.depthWrite = false
+      shorelineLineMesh = new THREE.LineSegments(shorelineLineGeometry, shorelineLineMaterial)
+      shorelineLineMesh.scale.setScalar(1.002)
+      world.add(shorelineLineMesh)
 
-    const shorelineFillGeometry = createShorelineFillGeometry(planetGeometry, lakes)
-    const shorelineFillMaterial = new THREE.MeshStandardMaterial({
-      color: SHORE_SAND_COLOR,
-      roughness: 0.92,
-      metalness: 0.05,
-      transparent: true,
-    })
-    shorelineFillMaterial.depthWrite = false
-    shorelineFillMaterial.depthTest = true
-    shorelineFillMaterial.polygonOffset = true
-    shorelineFillMaterial.polygonOffsetFactor = -1
-    shorelineFillMaterial.polygonOffsetUnits = -1
-    shorelineFillMesh = new THREE.Mesh(shorelineFillGeometry, shorelineFillMaterial)
-    shorelineFillMesh.renderOrder = 1
-    shorelineFillMesh.scale.setScalar(1.001)
-    world.add(shorelineFillMesh)
+      const shorelineFillGeometry = createShorelineFillGeometry(planetGeometry, lakes)
+      const shorelineFillMaterial = new THREE.MeshStandardMaterial({
+        color: SHORE_SAND_COLOR,
+        roughness: 0.92,
+        metalness: 0.05,
+        transparent: true,
+      })
+      shorelineFillMaterial.depthWrite = false
+      shorelineFillMaterial.depthTest = true
+      shorelineFillMaterial.polygonOffset = true
+      shorelineFillMaterial.polygonOffsetFactor = -1
+      shorelineFillMaterial.polygonOffsetUnits = -1
+      shorelineFillMesh = new THREE.Mesh(shorelineFillGeometry, shorelineFillMaterial)
+      shorelineFillMesh.renderOrder = 1
+      shorelineFillMesh.scale.setScalar(1.001)
+      world.add(shorelineFillMesh)
+
+      basePlanetGeometry.dispose()
+    }
 
     if (webglShaderHooksEnabled) {
       lakeSurfaceGeometry = new THREE.SphereGeometry(1, LAKE_SURFACE_SEGMENTS, LAKE_SURFACE_RINGS)
@@ -1786,8 +1980,9 @@ const createScene = async (
       lakeGeometry.dispose()
       lakeBaseGeometry.dispose()
     }
-    basePlanetGeometry.dispose()
-
+    if (PLANET_PATCH_LOD_ENABLED) {
+      updateLakePatchVisibility(planetPatchCenter, planetPatchOuterAngle)
+    }
     const rng = createSeededRandom(0x6f35d2a1)
     const randRange = (min: number, max: number) => min + (max - min) * rng()
     const tierHeightSum = TREE_TIER_HEIGHT_FACTORS.reduce((sum, value) => sum + value, 0)
@@ -2899,6 +3094,26 @@ const createScene = async (
     updateSnakeMaterial(visual.tongueForkLeft.material, '#ff6f9f', false, opacity, 0.3)
     updateSnakeMaterial(visual.tongueForkRight.material, '#ff6f9f', false, opacity, 0.3)
 
+    const previousSnakeStart = lastSnakeStarts.get(player.id)
+    if (previousSnakeStart !== undefined && previousSnakeStart !== player.snakeStart) {
+      resetSnakeTransientState(player.id)
+    }
+    lastSnakeStarts.set(player.id, player.snakeStart)
+
+    if (player.snakeDetail === 'stub') {
+      resetSnakeTransientState(player.id)
+      visual.tube.visible = false
+      visual.tail.visible = false
+      visual.head.visible = false
+      visual.eyeLeft.visible = false
+      visual.eyeRight.visible = false
+      visual.pupilLeft.visible = false
+      visual.pupilRight.visible = false
+      visual.tongue.visible = false
+      visual.bowl.visible = false
+      return null
+    }
+
     const nodes = player.snake
     const debug = isTailDebugEnabled() && isLocal
     const maxDigestion =
@@ -3225,14 +3440,30 @@ const createScene = async (
       tailGrowthStates.delete(player.id)
       tailDebugStates.delete(player.id)
       tongueStates.delete(player.id)
+      lastSnakeStarts.delete(player.id)
       return null
     }
 
-    visual.head.visible = true
-    visual.eyeLeft.visible = true
-    visual.eyeRight.visible = true
-    visual.pupilLeft.visible = true
-    visual.pupilRight.visible = true
+    const hasHead = player.snakeStart === 0
+    let tongueOverride: PelletOverride | null = null
+
+    if (!hasHead) {
+      visual.head.visible = false
+      visual.eyeLeft.visible = false
+      visual.eyeRight.visible = false
+      visual.pupilLeft.visible = false
+      visual.pupilRight.visible = false
+      visual.tongue.visible = false
+      visual.bowl.visible = false
+      lastHeadPositions.delete(player.id)
+      lastForwardDirections.delete(player.id)
+      tongueStates.delete(player.id)
+    } else {
+      visual.head.visible = true
+      visual.eyeLeft.visible = true
+      visual.eyeRight.visible = true
+      visual.pupilLeft.visible = true
+      visual.pupilRight.visible = true
 
     if (debug) {
       const prevDebug = tailDebugStates.get(player.id)
@@ -3430,12 +3661,12 @@ const createScene = async (
     tempVectorG.copy(rightEyePosition).sub(headPosition).normalize()
     updatePupil(rightEyePosition, tempVectorG, visual.pupilRight.position)
 
-    let tongueOverride: PelletOverride | null = null
     if (isLocal) {
       tongueOverride = updateTongue(player.id, visual, headPosition, headNormal, forward, pellets, deltaSeconds)
     } else {
       visual.tongue.visible = false
       tongueStates.delete(player.id)
+    }
     }
 
     if (nodes.length > 1) {
@@ -3527,6 +3758,7 @@ const createScene = async (
     resetSnakeTransientState(id)
     deathStates.delete(id)
     lastAliveStates.delete(id)
+    lastSnakeStarts.delete(id)
   }
 
   const updateSnakes = (
@@ -3614,14 +3846,16 @@ const createScene = async (
     camera.updateMatrixWorld()
 
     let localHeadScreen: { x: number; y: number } | null = null
+    let localHeadNormalForPatch: THREE.Vector3 | null = null
 
     if (snapshot && localPlayerId) {
       const localPlayer = snapshot.players.find((player) => player.id === localPlayerId)
-      const head = localPlayer?.snake[0]
+      const head = localPlayer?.snakeDetail !== 'stub' ? localPlayer?.snake[0] : undefined
       if (head) {
         const radius = SNAKE_RADIUS * 1.1
         const radiusOffset = radius * SNAKE_LIFT_FACTOR
         const headNormal = tempVectorC.set(head.x, head.y, head.z).normalize()
+        localHeadNormalForPatch = headNormal.clone()
         const headPosition = headNormal
           .clone()
           .multiplyScalar(getSnakeCenterlineRadius(headNormal, radiusOffset, radius))
@@ -3647,6 +3881,9 @@ const createScene = async (
     } else {
       updateSnakes([], localPlayerId, deltaSeconds, null)
       updatePellets([], null)
+    }
+    if (PLANET_PATCH_LOD_ENABLED && localHeadNormalForPatch && Number.isFinite(cameraDistance)) {
+      maybeRebuildPlanetPatch(localHeadNormalForPatch, cameraDistance)
     }
 
     const lakeTimeSeconds = now * 0.001
@@ -3702,6 +3939,9 @@ const createScene = async (
     renderer.setSize(width, height, false)
     camera.aspect = width / height
     camera.updateProjectionMatrix()
+    if (PLANET_PATCH_LOD_ENABLED && planetMesh) {
+      maybeRebuildPlanetPatch(planetPatchCenter, camera.position.z, true)
+    }
   }
 
   const dispose = () => {
