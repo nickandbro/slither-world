@@ -10,7 +10,7 @@ use super::constants::{
     SMALL_PELLET_SHRINK_MIN_RATIO, SMALL_PELLET_SIZE_MAX, SMALL_PELLET_SIZE_MIN,
     SMALL_PELLET_SPAWN_HEAD_EXCLUSION_ANGLE, SMALL_PELLET_VIEW_MARGIN_MAX,
     SMALL_PELLET_VIEW_MARGIN_MIN, SMALL_PELLET_VISIBLE_MAX, SMALL_PELLET_VISIBLE_MIN,
-    SMALL_PELLET_ZOOM_MAX_CAMERA_DISTANCE, SMALL_PELLET_ZOOM_MIN_CAMERA_DISTANCE,
+    SMALL_PELLET_ZOOM_MAX_CAMERA_DISTANCE, SMALL_PELLET_ZOOM_MIN_CAMERA_DISTANCE, NODE_QUEUE_SIZE,
     SNAKE_GIRTH_MAX_SCALE, SNAKE_GIRTH_NODES_PER_STEP, SNAKE_GIRTH_STEP_PERCENT, SPAWN_CONE_ANGLE,
     SPAWN_PLAYER_MIN_DISTANCE, STAMINA_DRAIN_PER_SEC, STAMINA_MAX, STAMINA_RECHARGE_PER_SEC,
     STARTING_LENGTH, TICK_MS, TURN_RATE,
@@ -1370,6 +1370,17 @@ impl RoomState {
         Self::snake_body_angular_radius_for_scale(scale)
     }
 
+    fn self_collision_start_index(body_angular_radius: f64) -> usize {
+        let boost_steps = (BOOST_MULTIPLIER.round() as i32).max(1) as f64;
+        let min_step_velocity = (BASE_SPEED * BOOST_MULTIPLIER) / boost_steps;
+        let min_node_spacing = (NODE_QUEUE_SIZE as f64) * min_step_velocity;
+        if !min_node_spacing.is_finite() || min_node_spacing <= 1e-9 {
+            return 2;
+        }
+        let required = ((2.0 * body_angular_radius.max(0.0)) / min_node_spacing).ceil() as usize;
+        required.max(2)
+    }
+
     fn tick(&mut self) {
         let now = Self::now_millis();
         let dt_seconds = TICK_MS as f64 / 1000.0;
@@ -1508,7 +1519,8 @@ impl RoomState {
                 continue;
             }
             let head = snapshot.snake[0];
-            for node in snapshot.snake.iter().skip(2) {
+            let self_collision_start = Self::self_collision_start_index(snapshot.body_angular_radius);
+            for node in snapshot.snake.iter().skip(self_collision_start) {
                 if collision_with_angular_radii(
                     head,
                     *node,
@@ -2107,6 +2119,14 @@ mod tests {
         assert!((RoomState::player_girth_scale_from_len(STARTING_LENGTH + 15) - 1.15).abs() < 1e-9);
         assert!((RoomState::player_girth_scale_from_len(STARTING_LENGTH + 20) - 1.2).abs() < 1e-9);
         assert!((RoomState::player_girth_scale_from_len(STARTING_LENGTH + 500) - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn self_collision_skip_count_increases_with_girth() {
+        let base_radius = RoomState::snake_body_angular_radius_for_scale(1.0);
+        let capped_radius = RoomState::snake_body_angular_radius_for_scale(SNAKE_GIRTH_MAX_SCALE);
+        assert_eq!(RoomState::self_collision_start_index(base_radius), 2);
+        assert!(RoomState::self_collision_start_index(capped_radius) >= 3);
     }
 
     fn insert_session_with_view(
