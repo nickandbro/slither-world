@@ -43,6 +43,12 @@ Backend (run inside `backend/`):
 - `cargo run` — start the Tokio server (defaults to `0.0.0.0:8787`).
 - `cargo test` — run backend tests (if added).
 
+## Testing Expectations
+- Default validation should be lightweight: prefer targeted checks such as `npm run build`, `npm run lint`, and focused backend/frontend tests relevant to the change.
+- Do **not** create new Playwright E2E specs for every change by default.
+- Do **not** run `npm run test:e2e` unless the user explicitly asks for E2E execution.
+- Only add or run E2E coverage when explicitly requested by the user (or when the task is explicitly E2E-focused).
+
 ## Configuration & Deployment Notes
 - Backend API routes:
   - `GET /api/leaderboard` and `POST /api/leaderboard` (JSON).
@@ -62,11 +68,13 @@ Backend (run inside `backend/`):
 - The client renders interpolated snapshots from the server tick; avoid bypassing the snapshot buffer when changing netcode or visuals.
 - Digestion bumps are identity-tracked across snapshots: each digestion item includes a stable `id` plus `progress`, and interpolation is ID-based to prevent bump jumps when older digestions complete during tail growth.
 - Boosting is stamina-gated on the server. Stamina drains while boosting and recharges when not boosting; `PlayerSnapshot` includes `stamina` for the HUD. The local stamina bar is head-anchored and only shown while below max (depleting/recharging).
+- Client boost visuals are split intentionally: the viewport speed-line overlay (`.boost-fx`) remains a local screen-space effect, while world-space boost visuals include ground skid marks and a front-of-head draft hemisphere.
 - Oxygen drains while underwater; `PlayerSnapshot` includes `oxygen` for the HUD and the client renders a fishbowl with crack shader as oxygen runs low. Reaching zero oxygen causes immediate death (no periodic body-shrink phase), and there is no separate red damage-blink effect.
 - Snake girth is server-authoritative and grows per added node (equivalent to `+10%` per 10 nodes), capped at `2.0x`. Girth scales snake/environment collider radii (including spawn safety checks), and self-collision near-head checks are widened for thicker snakes to avoid false deaths.
 - In dev/e2e, `window.__SNAKE_DEBUG__.getRendererInfo()` reports `{ requestedBackend, activeBackend, fallbackReason }` for renderer assertions.
 - In dev/e2e, terrain/culling assertions use `window.__SNAKE_DEBUG__.getTerrainPatchInfo()` and `window.__SNAKE_DEBUG__.getEnvironmentCullInfo()`.
 - In dev/e2e, snake-grounding assertions use `window.__SNAKE_DEBUG__.getSnakeGroundingInfo()` and read `{ minClearance, maxPenetration, maxAppliedLift, sampleCount }`.
+- In dev/e2e, boost-draft assertions can use `window.__SNAKE_DEBUG__.getBoostDraftInfo(id)` and read `{ visible, opacity, planeCount }` (`planeCount` is currently `1` for the hemispherical draft mesh).
 - Spawning is collision-safe: new spawns are rejected if any node overlaps existing alive snakes. Respawn retries are delayed if no safe spot is found.
 - Multiplayer WebSocket payloads are custom binary frames (versioned header). Current protocol version is `9`; when the protocol changes, deploy frontend and backend together. The server still accepts JSON `Text` frames for backwards compatibility, but always sends binary. Client codec lives in `frontend/src/game/wsProtocol.ts`. State/init snapshots include `u16 total_players` plus a per-session view-scoped player list; the server always includes the local player and includes remote players only when they have a visible non-stub snake window for that session view. Player payload entries include `u8 is_boosting` + `f32 girth_scale` + `f32 tail_extension` (after `oxygen`), and pellet payload entries are encoded as `u32 pellet_id` + quantized normal (`i16 x/y/z`) + `u8 color_index` + `u8 size`.
 - Player digestion payload entries are encoded as `u32 digestion_id` + `f32 progress` + `f32 strength` in the binary stream (count remains `u8`).
@@ -86,6 +94,7 @@ Backend (run inside `backend/`):
 - Cactuses are serialized through the legacy `trees` payload for protocol compatibility (`width_scale < 0` means cactus) and are rendered client-side as connected spine tubes (`TubeGeometry`) plus cap/joint spheres, with slight base sink into terrain.
 - Lake visibility is view-angle-driven (`updateLakeVisibility`) with generous edge margins/hysteresis to avoid late edge pop-in at high zoom distances.
 - Snake visual grounding is mesh-aware: segment/head/tail placement samples the deformed terrain mesh (with analytic fallback) and applies a tiny positive contact clearance to reduce slope clipping and z-fighting.
+- Boost draft visuals are rendered as a front-anchored hemispherical shell near the snake head (low-opacity blue/white wisp tint, shader-based edge fade to full transparency at boundaries) and are only visible while that snake is actively boosting.
 - Digestion bulges are applied in tube-ring space with identity-tracked progress, and the visual start is anchored by a fixed node index near the neck (default: one node behind the head) instead of a percentage-based body offset. Bulge intensity scales down as snake girth increases so larger snakes show subtler swallow bumps.
 - Pellet visuals are glow sprites rendered in color buckets (`THREE.Points`) for high pellet counts; keep updates allocation-light and preserve per-pellet terrain grounding so sprites stay on top of elevated/sunken terrain.
 - Shoreline fill and shoreline line meshes are generated from the full deformed planet geometry in both patch and fallback paths to keep lake edges coherent.

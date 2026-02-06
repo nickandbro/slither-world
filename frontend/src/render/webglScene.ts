@@ -30,6 +30,7 @@ type SnakeVisual = {
   boostDraft: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>
   boostDraftMaterial: THREE.MeshBasicMaterial
   boostDraftPhase: number
+  boostDraftIntensity: number
   color: string
 }
 
@@ -83,16 +84,69 @@ type BoostDraftMaterialUserData = {
 }
 
 type PelletSpriteBucket = {
-  points: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>
-  material: THREE.PointsMaterial
+  corePoints: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>
+  glowPoints: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>
+  coreMaterial: THREE.PointsMaterial
+  glowMaterial: THREE.PointsMaterial
   positionAttribute: THREE.BufferAttribute
   capacity: number
-  baseSize: number
+  baseCoreSize: number
+  baseGlowSize: number
   colorBucketIndex: number
   sizeTierIndex: number
 }
 
-const createPelletSpriteTexture = () => {
+const createPelletCoreTexture = () => {
+  const size = 128
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+
+  const center = size * 0.5
+  const radius = size * 0.38
+  ctx.clearRect(0, 0, size, size)
+  ctx.save()
+  ctx.beginPath()
+  ctx.arc(center, center, radius, 0, Math.PI * 2)
+  ctx.closePath()
+  ctx.clip()
+
+  const shadeGradient = ctx.createRadialGradient(
+    center - radius * 0.38,
+    center - radius * 0.46,
+    radius * 0.12,
+    center,
+    center,
+    radius * 1.02,
+  )
+  shadeGradient.addColorStop(0, 'rgba(255,255,255,1)')
+  shadeGradient.addColorStop(0.44, 'rgba(244,244,244,0.98)')
+  shadeGradient.addColorStop(0.78, 'rgba(176,176,176,0.96)')
+  shadeGradient.addColorStop(1, 'rgba(96,96,96,0.94)')
+  ctx.fillStyle = shadeGradient
+  ctx.fillRect(0, 0, size, size)
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.56)'
+  ctx.lineWidth = radius * 0.17
+  ctx.beginPath()
+  ctx.arc(center, center, radius * 0.92, Math.PI * 1.08, Math.PI * 1.8)
+  ctx.stroke()
+
+  ctx.fillStyle = 'rgba(255,255,255,0.78)'
+  ctx.beginPath()
+  ctx.arc(center - radius * 0.34, center - radius * 0.34, radius * 0.24, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.restore()
+
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.colorSpace = THREE.SRGBColorSpace
+  texture.needsUpdate = true
+  return texture
+}
+
+const createPelletGlowTexture = () => {
   const size = 64
   const canvas = document.createElement('canvas')
   canvas.width = size
@@ -128,13 +182,12 @@ const createBoostDraftTexture = () => {
     for (let x = 0; x < width; x += 1) {
       const u = width > 1 ? x / (width - 1) : 0
       const v = height > 1 ? y / (height - 1) : 0
-      const swirlA = Math.sin((u * 6.8 + v * 3.9) * Math.PI * 2) * 0.5 + 0.5
-      const swirlB = Math.sin((u * 11.2 - v * 2.7) * Math.PI * 2) * 0.5 + 0.5
+      // Keep U-frequency integral so u=0 and u=1 match and do not create a seam.
+      const swirlA = Math.sin((u * 8 + v * 4) * Math.PI * 2) * 0.5 + 0.5
+      const swirlB = Math.sin((u * 12 - v * 3) * Math.PI * 2) * 0.5 + 0.5
       const noise = 0.84 + 0.16 * (swirlA * 0.6 + swirlB * 0.4)
-      const seamDistance = Math.min(u, 1 - u)
-      const seamFade = smoothstep(0, 0.08, seamDistance)
       const equatorFade = 1 - smoothstep(0.72, 1, v)
-      const alpha = clamp(noise * seamFade * equatorFade, 0, 1)
+      const alpha = clamp(noise * equatorFade, 0, 1)
       const alphaByte = Math.round(alpha * 255)
       const offset = (y * width + x) * 4
       imageData.data[offset] = 255
@@ -400,7 +453,9 @@ const EYE_RADIUS = SNAKE_RADIUS * 0.62
 const PUPIL_RADIUS = EYE_RADIUS * 0.4
 const PUPIL_OFFSET = EYE_RADIUS - PUPIL_RADIUS * 0.6
 const PELLET_RADIUS = SNAKE_RADIUS * 0.34
-const PELLET_OFFSET = 0.02
+const PELLET_SURFACE_CLEARANCE = SNAKE_RADIUS * 0.08
+const PELLET_SIZE_MIN = 0.55
+const PELLET_SIZE_MAX = 2.85
 const PELLET_GROUND_CACHE_NORMAL_EPS = 0.0000005
 const PELLET_COLORS = [
   '#ff5f6d',
@@ -420,9 +475,12 @@ const PELLET_SIZE_TIER_MULTIPLIERS = [0.9, 1.45, 2.8]
 const PELLET_SIZE_TIER_MEDIUM_MIN = 1.05
 const PELLET_SIZE_TIER_LARGE_MIN = 1.6
 const PELLET_GLOW_PULSE_SPEED = 0.45
-const PELLET_GLOW_OPACITY_BASE = 0.8
-const PELLET_GLOW_OPACITY_RANGE = 0.1
-const PELLET_GLOW_SIZE_RANGE = 0.08
+const PELLET_CORE_OPACITY_BASE = 0.98
+const PELLET_CORE_OPACITY_RANGE = 0.03
+const PELLET_CORE_SIZE_RANGE = 0.03
+const PELLET_GLOW_OPACITY_BASE = 0.74
+const PELLET_GLOW_OPACITY_RANGE = 0.16
+const PELLET_GLOW_SIZE_RANGE = 0.1
 const PELLET_GLOW_PHASE_STEP = 0.73
 const TONGUE_MAX_LENGTH = HEAD_RADIUS * 2.8
 const TONGUE_MAX_RANGE = HEAD_RADIUS * 3.1
@@ -467,6 +525,8 @@ const BOOST_DRAFT_EDGE_FADE_END = 1.0
 const BOOST_DRAFT_COLOR_A = new THREE.Color('#56d9ff')
 const BOOST_DRAFT_COLOR_B = new THREE.Color('#ffffff')
 const BOOST_DRAFT_COLOR_SHIFT_SPEED = 3.8
+const BOOST_DRAFT_FADE_IN_RATE = 8
+const BOOST_DRAFT_FADE_OUT_RATE = 5.5
 const BOOST_DRAFT_MIN_ACTIVE_OPACITY = 0.01
 const BOOST_DRAFT_LOCAL_FORWARD_AXIS = new THREE.Vector3(0, 1, 0)
 const DIGESTION_BULGE_MIN = 0.22
@@ -1627,8 +1687,10 @@ const createScene = async (
 
   const PELLET_COLOR_BUCKET_COUNT = PELLET_COLORS.length
   const PELLET_BUCKET_COUNT = PELLET_COLOR_BUCKET_COUNT * PELLET_SIZE_TIER_MULTIPLIERS.length
-  const PELLET_POINT_SIZE = PELLET_RADIUS * 7.1
-  const pelletSpriteTexture = createPelletSpriteTexture()
+  const PELLET_CORE_POINT_SIZE = PELLET_RADIUS * 5
+  const PELLET_GLOW_POINT_SIZE = PELLET_RADIUS * 8.4
+  const pelletCoreTexture = createPelletCoreTexture()
+  const pelletGlowTexture = createPelletGlowTexture()
   let treeTierGeometries: THREE.BufferGeometry[] = []
   let treeTierMeshes: THREE.InstancedMesh[] = []
   let treeTrunkGeometry: THREE.BufferGeometry | null = null
@@ -3603,7 +3665,7 @@ const createScene = async (
       color: BOOST_DRAFT_COLOR_A,
       transparent: true,
       opacity: 0,
-      alphaMap: boostDraftTexture ?? undefined,
+      alphaMap: webglShaderHooksEnabled ? undefined : (boostDraftTexture ?? undefined),
       side: THREE.FrontSide,
       blending: THREE.NormalBlending,
     })
@@ -3762,6 +3824,7 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
       boostDraft,
       boostDraftMaterial,
       boostDraftPhase: 0,
+      boostDraftIntensity: 0,
       color,
     }
   }
@@ -3789,6 +3852,7 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
   const hideBoostDraft = (visual: SnakeVisual) => {
     visual.boostDraft.visible = false
     visual.boostDraftMaterial.opacity = 0
+    visual.boostDraftIntensity = 0
     const userData = visual.boostDraftMaterial.userData as BoostDraftMaterialUserData
     if (userData.timeUniform) {
       userData.timeUniform.value = 0
@@ -3809,13 +3873,22 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
     deltaSeconds: number,
   ) => {
     const active = player.alive && player.isBoosting && snakeOpacity > BOOST_DRAFT_MIN_ACTIVE_OPACITY
-    if (!active) {
+    const safeDelta = Math.max(0, deltaSeconds)
+    visual.boostDraftPhase = (visual.boostDraftPhase + safeDelta * BOOST_DRAFT_PULSE_SPEED) % (Math.PI * 2)
+    const targetIntensity = active ? 1 : 0
+    visual.boostDraftIntensity = smoothValue(
+      visual.boostDraftIntensity,
+      targetIntensity,
+      safeDelta,
+      BOOST_DRAFT_FADE_IN_RATE,
+      BOOST_DRAFT_FADE_OUT_RATE,
+    )
+    const intensity = clamp(visual.boostDraftIntensity, 0, 1)
+    if (intensity <= BOOST_DRAFT_MIN_ACTIVE_OPACITY) {
       hideBoostDraft(visual)
       return
     }
 
-    const safeDelta = Math.max(0, deltaSeconds)
-    visual.boostDraftPhase = (visual.boostDraftPhase + safeDelta * BOOST_DRAFT_PULSE_SPEED) % (Math.PI * 2)
     const radius = BOOST_DRAFT_BASE_RADIUS * (headRadius / HEAD_RADIUS)
     visual.boostDraft.position
       .copy(headPosition)
@@ -3831,7 +3904,7 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
       0.5 *
         Math.sin(visual.boostDraftPhase * (BOOST_DRAFT_COLOR_SHIFT_SPEED / BOOST_DRAFT_PULSE_SPEED))
     visual.boostDraftMaterial.color.copy(BOOST_DRAFT_COLOR_A).lerp(BOOST_DRAFT_COLOR_B, colorT)
-    const opacity = BOOST_DRAFT_OPACITY * snakeOpacity
+    const opacity = BOOST_DRAFT_OPACITY * snakeOpacity * intensity
     visual.boostDraftMaterial.opacity = opacity
     const userData = visual.boostDraftMaterial.userData as BoostDraftMaterialUserData
     if (userData.timeUniform) {
@@ -5104,13 +5177,19 @@ diffuseColor.a *= retireEdge;`,
 
   const getPelletSurfacePosition = (pellet: PelletSnapshot, out: THREE.Vector3) => {
     const radius = getPelletTerrainRadius(pellet)
+    const pelletScale = clamp(
+      Number.isFinite(pellet.size) ? pellet.size : 1,
+      PELLET_SIZE_MIN,
+      PELLET_SIZE_MAX,
+    )
+    const surfaceLift = PELLET_RADIUS * pelletScale + PELLET_SURFACE_CLEARANCE
     out.set(pellet.x, pellet.y, pellet.z)
     if (out.lengthSq() <= 1e-8) {
       out.set(0, 0, 1)
     } else {
       out.normalize()
     }
-    out.multiplyScalar(radius + PELLET_OFFSET)
+    out.multiplyScalar(radius + surfaceLift)
     return out
   }
 
@@ -5945,7 +6024,8 @@ diffuseColor.a *= retireEdge;`,
     const sizeTierIndex = Math.floor(bucketIndex / PELLET_COLOR_BUCKET_COUNT)
     const colorBucketIndex = bucketIndex % PELLET_COLOR_BUCKET_COUNT
     const sizeMultiplier = PELLET_SIZE_TIER_MULTIPLIERS[sizeTierIndex] ?? 1
-    const baseSize = PELLET_POINT_SIZE * sizeMultiplier
+    const baseCoreSize = PELLET_CORE_POINT_SIZE * sizeMultiplier
+    const baseGlowSize = PELLET_GLOW_POINT_SIZE * sizeMultiplier
     const geometry = new THREE.BufferGeometry()
     const positionArray = new Float32Array(capacity * 3)
     const positionAttribute = new THREE.BufferAttribute(positionArray, 3)
@@ -5953,10 +6033,24 @@ diffuseColor.a *= retireEdge;`,
     geometry.setAttribute('position', positionAttribute)
     geometry.setDrawRange(0, 0)
 
-    const material = new THREE.PointsMaterial({
-      size: baseSize,
-      map: pelletSpriteTexture ?? undefined,
-      alphaMap: pelletSpriteTexture ?? undefined,
+    const coreMaterial = new THREE.PointsMaterial({
+      size: baseCoreSize,
+      map: pelletCoreTexture ?? undefined,
+      alphaMap: pelletCoreTexture ?? undefined,
+      color: PELLET_COLORS[colorBucketIndex] ?? '#ffd166',
+      transparent: true,
+      opacity: PELLET_CORE_OPACITY_BASE,
+      alphaTest: 0.36,
+      depthWrite: false,
+      depthTest: true,
+      blending: THREE.NormalBlending,
+      sizeAttenuation: true,
+      toneMapped: false,
+    })
+    const glowMaterial = new THREE.PointsMaterial({
+      size: baseGlowSize,
+      map: pelletGlowTexture ?? undefined,
+      alphaMap: pelletGlowTexture ?? undefined,
       color: PELLET_COLORS[colorBucketIndex] ?? '#ffd166',
       transparent: true,
       opacity: PELLET_GLOW_OPACITY_BASE,
@@ -5966,16 +6060,25 @@ diffuseColor.a *= retireEdge;`,
       sizeAttenuation: true,
       toneMapped: false,
     })
-    const points = new THREE.Points(geometry, material)
-    points.visible = false
-    points.frustumCulled = false
-    pelletsGroup.add(points)
+    const glowPoints = new THREE.Points(geometry, glowMaterial)
+    const corePoints = new THREE.Points(geometry, coreMaterial)
+    glowPoints.visible = false
+    corePoints.visible = false
+    glowPoints.frustumCulled = false
+    corePoints.frustumCulled = false
+    glowPoints.renderOrder = 5
+    corePoints.renderOrder = 6
+    pelletsGroup.add(glowPoints)
+    pelletsGroup.add(corePoints)
     return {
-      points,
-      material,
+      corePoints,
+      glowPoints,
+      coreMaterial,
+      glowMaterial,
       positionAttribute,
       capacity,
-      baseSize,
+      baseCoreSize,
+      baseGlowSize,
       colorBucketIndex,
       sizeTierIndex,
     }
@@ -6008,8 +6111,10 @@ diffuseColor.a *= retireEdge;`,
     geometry.setAttribute('position', positionAttribute)
     geometry.setDrawRange(0, 0)
 
-    bucket.points.geometry.dispose()
-    bucket.points.geometry = geometry
+    const previousGeometry = bucket.corePoints.geometry
+    bucket.corePoints.geometry = geometry
+    bucket.glowPoints.geometry = geometry
+    previousGeometry.dispose()
     bucket.positionAttribute = positionAttribute
     bucket.capacity = nextCapacity
     return bucket
@@ -6035,14 +6140,16 @@ diffuseColor.a *= retireEdge;`,
       const bucket = pelletBuckets[bucketIndex]
       if (required <= 0) {
         if (bucket) {
-          bucket.points.visible = false
-          bucket.points.geometry.setDrawRange(0, 0)
+          bucket.corePoints.visible = false
+          bucket.glowPoints.visible = false
+          bucket.corePoints.geometry.setDrawRange(0, 0)
         }
         continue
       }
       const nextBucket = ensurePelletBucketCapacity(bucketIndex, required)
-      nextBucket.points.visible = true
-      nextBucket.points.geometry.setDrawRange(0, required)
+      nextBucket.corePoints.visible = true
+      nextBucket.glowPoints.visible = true
+      nextBucket.corePoints.geometry.setDrawRange(0, required)
       bucketPositions[bucketIndex] = nextBucket.positionAttribute.array as Float32Array
     }
 
@@ -6091,12 +6198,19 @@ diffuseColor.a *= retireEdge;`,
       const pulse = 0.5 + 0.5 * Math.sin(phase)
       const easedPulse = smoothstep(0, 1, pulse)
       const centered = (easedPulse - 0.5) * 2
-      bucket.material.opacity = clamp(
-        PELLET_GLOW_OPACITY_BASE + centered * PELLET_GLOW_OPACITY_RANGE,
-        0.58,
-        0.98,
+      const centeredCore = centered * 0.55
+      bucket.coreMaterial.opacity = clamp(
+        PELLET_CORE_OPACITY_BASE + centeredCore * PELLET_CORE_OPACITY_RANGE,
+        0.9,
+        1,
       )
-      bucket.material.size = bucket.baseSize * (1 + centered * PELLET_GLOW_SIZE_RANGE)
+      bucket.coreMaterial.size = bucket.baseCoreSize * (1 + centeredCore * PELLET_CORE_SIZE_RANGE)
+      bucket.glowMaterial.opacity = clamp(
+        PELLET_GLOW_OPACITY_BASE + centered * PELLET_GLOW_OPACITY_RANGE,
+        0.44,
+        0.96,
+      )
+      bucket.glowMaterial.size = bucket.baseGlowSize * (1 + centered * PELLET_GLOW_SIZE_RANGE)
     }
   }
 
@@ -6289,12 +6403,15 @@ diffuseColor.a *= retireEdge;`,
     for (let i = 0; i < pelletBuckets.length; i += 1) {
       const bucket = pelletBuckets[i]
       if (!bucket) continue
-      pelletsGroup.remove(bucket.points)
-      bucket.points.geometry.dispose()
-      bucket.points.material.dispose()
+      pelletsGroup.remove(bucket.glowPoints)
+      pelletsGroup.remove(bucket.corePoints)
+      bucket.corePoints.geometry.dispose()
+      bucket.coreMaterial.dispose()
+      bucket.glowMaterial.dispose()
       pelletBuckets[i] = null
     }
-    pelletSpriteTexture?.dispose()
+    pelletCoreTexture?.dispose()
+    pelletGlowTexture?.dispose()
     pelletGroundCache.clear()
     pelletIdsSeen.clear()
     for (const [id, visual] of snakes) {
