@@ -85,6 +85,93 @@
   pointer-events: none;
 }
 
+.boost-fx {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  --boost-intensity: 0;
+  --boost-pulse: 0;
+  --boost-edge-opacity: 0;
+  --boost-phase: 0;
+  opacity: calc(0.04 + var(--boost-intensity) * 0.56);
+  background:
+    radial-gradient(
+      circle at center,
+      rgb(0 0 0 / 0) 0 41%,
+      rgb(0 0 0 / calc(var(--boost-intensity) * 0.12)) 68%,
+      rgb(0 0 0 / calc(var(--boost-intensity) * 0.42)) 100%
+    );
+}
+
+.boost-fx::before,
+.boost-fx::after {
+  content: '';
+  position: absolute;
+  inset: -4%;
+  pointer-events: none;
+}
+
+.boost-fx::before {
+  background:
+    repeating-conic-gradient(
+      from calc(var(--boost-phase) * 1turn),
+      rgb(255 255 255 / 0) 0deg 5deg,
+      rgb(255 255 255 / calc(var(--boost-edge-opacity) * 0.55)) 5deg 6deg,
+      rgb(255 255 255 / 0) 6deg 11deg,
+      rgb(230 238 250 / calc(var(--boost-edge-opacity) * 0.32)) 11deg 11.6deg,
+      rgb(255 255 255 / 0) 11.6deg 17deg
+    );
+  -webkit-mask: radial-gradient(circle at center, transparent 0 38%, black 57%, black 100%);
+  mask: radial-gradient(circle at center, transparent 0 38%, black 57%, black 100%);
+  opacity: calc(0.08 + var(--boost-intensity) * 0.55);
+  transform: scale(1.015);
+}
+
+.boost-fx::after {
+  background:
+    repeating-conic-gradient(
+      from calc((var(--boost-phase) * 1turn) + 0.17turn),
+      rgb(255 255 255 / 0) 0deg 8deg,
+      rgb(255 255 255 / calc(var(--boost-edge-opacity) * 0.5)) 8deg 9.3deg,
+      rgb(255 255 255 / 0) 9.3deg 19deg,
+      rgb(180 194 214 / calc(var(--boost-edge-opacity) * 0.24)) 19deg 20deg,
+      rgb(255 255 255 / 0) 20deg 29deg
+    );
+  -webkit-mask: radial-gradient(circle at center, transparent 0 46%, black 68%, black 100%);
+  mask: radial-gradient(circle at center, transparent 0 46%, black 68%, black 100%);
+  opacity: calc(0.03 + var(--boost-pulse) * 0.55);
+  transform: scale(1.03);
+}
+
+.boost-fx--active::after {
+  animation: boost-fx-rotation 0.9s linear infinite;
+}
+
+@keyframes boost-fx-rotation {
+  from {
+    transform: scale(1.03) rotate(0deg);
+  }
+
+  to {
+    transform: scale(1.06) rotate(4deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .boost-fx {
+    opacity: calc(0.03 + var(--boost-intensity) * 0.45);
+  }
+
+  .boost-fx--active::after {
+    animation: none;
+  }
+
+  .boost-fx::after {
+    opacity: calc(0.02 + var(--boost-pulse) * 0.4);
+  }
+}
+
 .debug-controls .control-label {
   align-self: flex-start;
 }

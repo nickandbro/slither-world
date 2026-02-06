@@ -85,6 +85,11 @@ const POINTER_MAX_RANGE_RATIO = 0.25
 const CAMERA_FOV_DEGREES = 40
 const PLANET_RADIUS = 3
 const VIEW_RADIUS_EXTRA_MARGIN = 0.08
+const BOOST_EFFECT_STAMINA_EPS = 0.02
+const BOOST_EFFECT_FADE_IN_RATE = 9
+const BOOST_EFFECT_FADE_OUT_RATE = 12
+const BOOST_EFFECT_PULSE_SPEED = 8.5
+const BOOST_EFFECT_ACTIVE_CLASS_THRESHOLD = 0.01
 const formatRendererError = (error: unknown) => {
   if (error instanceof Error && error.message.trim()) {
     return error.message.trim()
@@ -114,9 +119,17 @@ const computeViewRadius = (cameraDistance: number, aspect: number) => {
   return clamp(base + VIEW_RADIUS_EXTRA_MARGIN, 0.2, 1.4)
 }
 
+type BoostFxState = {
+  intensity: number
+  pulse: number
+  lastFrameMs: number
+  activeClassApplied: boolean
+}
+
 export default function App() {
   const glCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const hudCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  const boostFxRef = useRef<HTMLDivElement | null>(null)
   const socketRef = useRef<WebSocket | null>(null)
   const webglRef = useRef<RenderScene | null>(null)
   const renderConfigRef = useRef<RenderConfig | null>(null)
@@ -140,6 +153,12 @@ export default function App() {
   const localHeadRef = useRef<Point | null>(null)
   const headScreenRef = useRef<{ x: number; y: number } | null>(null)
   const playerMetaRef = useRef<Map<string, PlayerMeta>>(new Map())
+  const boostFxStateRef = useRef<BoostFxState>({
+    intensity: 0,
+    pulse: 0,
+    lastFrameMs: 0,
+    activeClassApplied: false,
+  })
 
   const [gameState, setGameState] = useState<GameStateSnapshot | null>(null)
   const [environment, setEnvironment] = useState<Environment | null>(null)
@@ -183,6 +202,57 @@ export default function App() {
     }
     return `Renderer: ${activeRenderer.toUpperCase()}`
   }, [activeRenderer, rendererFallbackReason])
+
+  const resetBoostFx = () => {
+    const state = boostFxStateRef.current
+    state.intensity = 0
+    state.pulse = 0
+    state.lastFrameMs = 0
+    state.activeClassApplied = false
+    const boostFx = boostFxRef.current
+    if (!boostFx) return
+    boostFx.classList.remove('boost-fx--active')
+    boostFx.style.setProperty('--boost-intensity', '0')
+    boostFx.style.setProperty('--boost-pulse', '0')
+    boostFx.style.setProperty('--boost-edge-opacity', '0')
+    boostFx.style.setProperty('--boost-phase', '0')
+  }
+
+  const updateBoostFx = (boostActive: boolean) => {
+    const boostFx = boostFxRef.current
+    if (!boostFx) return
+    const state = boostFxStateRef.current
+    const now = performance.now()
+    const deltaSeconds =
+      state.lastFrameMs > 0 ? Math.min(0.1, Math.max(0, (now - state.lastFrameMs) / 1000)) : 0
+    state.lastFrameMs = now
+
+    const target = boostActive ? 1 : 0
+    const rate = target >= state.intensity ? BOOST_EFFECT_FADE_IN_RATE : BOOST_EFFECT_FADE_OUT_RATE
+    const alpha = 1 - Math.exp(-rate * deltaSeconds)
+    state.intensity += (target - state.intensity) * alpha
+    if (Math.abs(target - state.intensity) < 1e-4) {
+      state.intensity = target
+    }
+
+    if (boostActive) {
+      state.pulse = (state.pulse + deltaSeconds * BOOST_EFFECT_PULSE_SPEED) % (Math.PI * 2)
+    }
+    const pulseAmount = state.intensity * (Math.sin(state.pulse) * 0.5 + 0.5)
+    const phaseTurn = state.pulse / (Math.PI * 2)
+    const edgeOpacity = clamp(0.1 + state.intensity * 0.45 + pulseAmount * 0.18, 0, 1)
+
+    boostFx.style.setProperty('--boost-intensity', state.intensity.toFixed(4))
+    boostFx.style.setProperty('--boost-pulse', pulseAmount.toFixed(4))
+    boostFx.style.setProperty('--boost-edge-opacity', edgeOpacity.toFixed(4))
+    boostFx.style.setProperty('--boost-phase', phaseTurn.toFixed(4))
+
+    const shouldApplyActive = state.intensity > BOOST_EFFECT_ACTIVE_CLASS_THRESHOLD
+    if (shouldApplyActive !== state.activeClassApplied) {
+      boostFx.classList.toggle('boost-fx--active', shouldApplyActive)
+      state.activeClassApplied = shouldApplyActive
+    }
+  }
 
   const pushSnapshot = (state: GameStateSnapshot) => {
     const now = Date.now()
@@ -300,6 +370,7 @@ export default function App() {
 
     const setupScene = async () => {
       try {
+        resetBoostFx()
         const created = await createRenderScene(glCanvas, rendererPreference)
         if (disposed) {
           created.scene.dispose()
@@ -340,11 +411,17 @@ export default function App() {
 
         const renderLoop = () => {
           const config = renderConfigRef.current
+          let boostActive = false
           if (config && webgl) {
             const snapshot = getRenderSnapshot()
             const localId = playerIdRef.current
             const localSnapshotPlayer =
               snapshot?.players.find((player) => player.id === localId) ?? null
+            boostActive =
+              pointerRef.current.boost &&
+              !!localSnapshotPlayer &&
+              localSnapshotPlayer.alive &&
+              localSnapshotPlayer.stamina > BOOST_EFFECT_STAMINA_EPS
             const localHead = localSnapshotPlayer?.snake[0] ?? null
             localHeadRef.current = localHead ? normalize(localHead) : null
             const camera = updateCamera(localHead, cameraUpRef)
@@ -380,6 +457,7 @@ export default function App() {
               },
             )
           }
+          updateBoostFx(boostActive)
           frameId = window.requestAnimationFrame(renderLoop)
         }
 
@@ -405,6 +483,7 @@ export default function App() {
       webglRef.current = null
       renderConfigRef.current = null
       headScreenRef.current = null
+      resetBoostFx()
     }
     // Renderer swaps are intentionally triggered by explicit backend preference only.
   }, [rendererPreference])
@@ -679,6 +758,7 @@ export default function App() {
               onContextMenu={(event) => event.preventDefault()}
             />
             <canvas ref={hudCanvasRef} className='hud-canvas' aria-hidden='true' />
+            <div ref={boostFxRef} className='boost-fx' aria-hidden='true' />
           </div>
           {localPlayer && !localPlayer.alive && (
             <div className='overlay'>

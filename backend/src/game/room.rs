@@ -1,9 +1,9 @@
 use super::constants::{
     BASE_PELLET_COUNT, BASE_SPEED, BOOST_MULTIPLIER, BOT_BOOST_DISTANCE, BOT_COUNT,
     BOT_MIN_STAMINA_TO_BOOST, COLOR_POOL, MAX_PELLETS, MAX_SPAWN_ATTEMPTS, MIN_SURVIVAL_LENGTH,
-    OXYGEN_DAMAGE_NODE_INTERVAL_SEC, OXYGEN_DRAIN_PER_SEC, OXYGEN_MAX, PLAYER_TIMEOUT_MS,
-    RESPAWN_COOLDOWN_MS, RESPAWN_RETRY_MS, SPAWN_CONE_ANGLE, STAMINA_DRAIN_PER_SEC, STAMINA_MAX,
-    STAMINA_RECHARGE_PER_SEC, TICK_MS, TURN_RATE,
+    OXYGEN_DRAIN_PER_SEC, OXYGEN_MAX, PLAYER_TIMEOUT_MS, RESPAWN_COOLDOWN_MS, RESPAWN_RETRY_MS,
+    SPAWN_CONE_ANGLE, STAMINA_DRAIN_PER_SEC, STAMINA_MAX, STAMINA_RECHARGE_PER_SEC, TICK_MS,
+    TURN_RATE,
 };
 use super::digestion::{add_digestion, advance_digestions, get_digestion_progress};
 use super::environment::{sample_lakes, Environment, LAKE_WATER_MASK_THRESHOLD};
@@ -858,24 +858,9 @@ impl RoomState {
             if sample.boundary > LAKE_WATER_MASK_THRESHOLD {
                 player.oxygen = (player.oxygen - OXYGEN_DRAIN_PER_SEC * dt_seconds).max(0.0);
                 if player.oxygen <= 0.0 {
-                    player.oxygen_damage_accumulator += dt_seconds;
-                    let mut drown_dead = false;
-                    while player.oxygen_damage_accumulator >= OXYGEN_DAMAGE_NODE_INTERVAL_SEC {
-                        player.oxygen_damage_accumulator -= OXYGEN_DAMAGE_NODE_INTERVAL_SEC;
-                        if player.snake.len() > MIN_SURVIVAL_LENGTH {
-                            player.snake.pop();
-                        } else {
-                            drown_dead = true;
-                            break;
-                        }
-                    }
-                    if drown_dead {
-                        oxygen_dead.insert(player.id.clone());
-                        death_reasons.entry(player.id.clone()).or_insert("oxygen");
-                        player.oxygen_damage_accumulator = 0.0;
-                    }
-                } else {
                     player.oxygen_damage_accumulator = 0.0;
+                    oxygen_dead.insert(player.id.clone());
+                    death_reasons.entry(player.id.clone()).or_insert("oxygen");
                 }
             } else {
                 player.oxygen = OXYGEN_MAX;
@@ -1770,9 +1755,9 @@ mod tests {
     }
 
     #[test]
-    fn oxygen_depletion_shrinks_snake_over_time() {
+    fn oxygen_depletion_kills_immediately_when_empty() {
         let mut state = make_full_lake_state();
-        let player_id = "player-oxygen-shrink".to_string();
+        let player_id = "player-oxygen-immediate".to_string();
         let mut player = make_player(
             &player_id,
             create_snake(Point {
@@ -1784,13 +1769,11 @@ mod tests {
         player.oxygen = 0.0;
         state.players.insert(player_id.clone(), player);
 
-        for _ in 0..20 {
-            state.tick();
-        }
+        state.tick();
 
         let player = state.players.get(&player_id).expect("player");
-        assert!(player.alive);
-        assert_eq!(player.snake.len(), 7);
+        assert!(!player.alive);
+        assert_eq!(player.score, 0);
     }
 
     #[test]
@@ -1807,9 +1790,7 @@ mod tests {
         player.oxygen = 0.0;
         state.players.insert(player_id.clone(), player);
 
-        for _ in 0..20 {
-            state.tick();
-        }
+        state.tick();
 
         let player = state.players.get(&player_id).expect("player");
         assert!(!player.alive);
@@ -1817,7 +1798,7 @@ mod tests {
     }
 
     #[test]
-    fn oxygen_damage_accumulator_resets_when_not_underwater() {
+    fn oxygen_replenishes_when_not_underwater() {
         let mut state = make_full_lake_state();
         let player_id = "player-oxygen-reset".to_string();
         let mut player = make_player(
@@ -1828,24 +1809,19 @@ mod tests {
                 z: 0.0,
             }),
         );
-        player.oxygen = 0.0;
+        player.oxygen = 0.5;
         state.players.insert(player_id.clone(), player);
 
-        for _ in 0..10 {
-            state.tick();
-        }
-
-        let half_accumulated = state
-            .players
-            .get(&player_id)
-            .expect("player")
-            .oxygen_damage_accumulator;
-        assert!(half_accumulated > 0.0 && half_accumulated < OXYGEN_DAMAGE_NODE_INTERVAL_SEC);
+        state.tick();
+        let oxygen_underwater = state.players.get(&player_id).expect("player").oxygen;
+        assert!(oxygen_underwater < 0.5);
+        assert!(oxygen_underwater > 0.0);
 
         state.environment.lakes.clear();
         state.tick();
 
         let player = state.players.get(&player_id).expect("player");
+        assert!(player.alive);
         assert_eq!(player.oxygen, OXYGEN_MAX);
         assert_eq!(player.oxygen_damage_accumulator, 0.0);
         assert_eq!(player.snake.len(), 8);

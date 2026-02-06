@@ -9,7 +9,6 @@ pub const STAMINA_DRAIN_PER_SEC: f64 = 0.6;
 pub const STAMINA_RECHARGE_PER_SEC: f64 = 0.35;
 pub const OXYGEN_MAX: f64 = 1.0;
 pub const OXYGEN_DRAIN_PER_SEC: f64 = 0.1;
-pub const OXYGEN_DAMAGE_NODE_INTERVAL_SEC: f64 = 1.0;
 pub const MIN_SURVIVAL_LENGTH: usize = 3;
 pub const DIGESTION_TRAVEL_SPEED_MULT: f64 = 3.0;
 pub const TURN_RATE: f64 = 0.3 / WORLD_SCALE;

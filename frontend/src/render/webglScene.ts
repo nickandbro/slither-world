@@ -224,8 +224,6 @@ const DEATH_VISIBILITY_CUTOFF = 0.02
 
 const WORLD_UP = new THREE.Vector3(0, 1, 0)
 const WORLD_RIGHT = new THREE.Vector3(1, 0, 0)
-const OXYGEN_DAMAGE_COLOR = new THREE.Color('#ff2d2d')
-const OXYGEN_DAMAGE_EMISSIVE = new THREE.Color('#ff0000')
 const LAKE_WATER_OVERDRAW = BASE_PLANET_RADIUS * 0.01
 const LAKE_WATER_SURFACE_LIFT = LAKE_WATER_OVERDRAW * 1.4
 const LAKE_WATER_EDGE_EXPAND_ANGLE = 0.045
@@ -247,10 +245,6 @@ const LAKE_WATER_FRESNEL_STRENGTH = 0.35
 const LAKE_WATER_ALPHA_PULSE = 0.1
 const LAKE_WATER_EMISSIVE_BASE = 0.38
 const LAKE_WATER_EMISSIVE_PULSE = 0.08
-const OXYGEN_DAMAGE_ACTIVE_THRESHOLD = 1e-4
-const OXYGEN_DAMAGE_BLINK_SPEED = 14
-const OXYGEN_DAMAGE_BLINK_STRENGTH = 0.78
-const OXYGEN_DAMAGE_BLINK_EMISSIVE_BOOST = 0.95
 const LAKE_WATER_MASK_THRESHOLD = 0
 const LAKE_GRID_MASK_THRESHOLD = LAKE_WATER_MASK_THRESHOLD
 const LAKE_EXCLUSION_THRESHOLD = 0.18
@@ -4062,25 +4056,6 @@ const createScene = async (
       visual.bowlMaterial.opacity = (0.45 + tint * 0.22) * opacity
     }
     visual.bowl.visible = underwater && visual.group.visible
-
-    const oxygenDamageActive =
-      player.alive && underwater && player.oxygen <= OXYGEN_DAMAGE_ACTIVE_THRESHOLD
-    if (oxygenDamageActive) {
-      const blinkActive = Math.sin(performance.now() * 0.001 * OXYGEN_DAMAGE_BLINK_SPEED) > 0
-      if (blinkActive) {
-        const tint = OXYGEN_DAMAGE_BLINK_STRENGTH
-        const baseEmissive = isLocal ? 0.3 : 0.12
-        const baseColor = new THREE.Color(visual.color)
-        const applyDamageBlink = (material: THREE.MeshStandardMaterial) => {
-          material.color.lerpColors(baseColor, OXYGEN_DAMAGE_COLOR, tint)
-          material.emissive.lerpColors(baseColor, OXYGEN_DAMAGE_EMISSIVE, tint)
-          material.emissiveIntensity = baseEmissive + OXYGEN_DAMAGE_BLINK_EMISSIVE_BOOST * tint
-        }
-        applyDamageBlink(visual.tube.material)
-        applyDamageBlink(visual.head.material)
-        applyDamageBlink(visual.tail.material)
-      }
-    }
 
     let forward = tempVectorB
     let hasForward = false
