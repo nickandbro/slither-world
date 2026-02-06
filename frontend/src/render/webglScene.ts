@@ -328,15 +328,19 @@ const DESERT_BIOME_CENTER = new THREE.Vector3(
   0.06571894222701674,
 ).normalize()
 const DESERT_BIOME_MIN_DOT = Math.cos(DESERT_BIOME_ANGLE)
-const CACTUS_TRUNK_HEIGHT = TREE_HEIGHT * 0.95
-const CACTUS_TRUNK_RADIUS = TREE_TRUNK_RADIUS
-const CACTUS_ARM_LOWER_HEIGHT = CACTUS_TRUNK_HEIGHT * 0.34
-const CACTUS_ARM_UPPER_HEIGHT = CACTUS_TRUNK_HEIGHT * 0.24
-const CACTUS_ARM_RADIUS = CACTUS_TRUNK_RADIUS * 0.62
-const CACTUS_ARM_BASE_HEIGHT = CACTUS_TRUNK_HEIGHT * 0.5
-const CACTUS_ARM_BASE_OFFSET = CACTUS_TRUNK_RADIUS * 1.02
-const CACTUS_ARM_LOWER_TILT = Math.PI * 0.28
-const CACTUS_ARM_UPPER_TILT = Math.PI * 0.2
+const CACTUS_TRUNK_HEIGHT = TREE_HEIGHT * 0.96
+const CACTUS_TRUNK_RADIUS = TREE_TRUNK_RADIUS * 0.88
+const CACTUS_LEFT_ARM_BASE_HEIGHT = CACTUS_TRUNK_HEIGHT * 0.36
+const CACTUS_RIGHT_ARM_BASE_HEIGHT = CACTUS_TRUNK_HEIGHT * 0.57
+const CACTUS_LEFT_ARM_RADIUS = CACTUS_TRUNK_RADIUS * 0.58
+const CACTUS_RIGHT_ARM_RADIUS = CACTUS_TRUNK_RADIUS * 0.5
+const CACTUS_TRUNK_TUBE_SEGMENTS = 18
+const CACTUS_ARM_TUBE_SEGMENTS = 14
+const CACTUS_TUBE_RADIAL_SEGMENTS = 8
+const CACTUS_UNIFORM_SCALE_MULTIPLIER = 1.0
+const CACTUS_MIN_UNIFORM_SCALE = 0.98
+const CACTUS_MAX_UNIFORM_SCALE = 1.2
+const CACTUS_BASE_SINK = CACTUS_TRUNK_RADIUS * 0.18
 const MOUNTAIN_COUNT = 8
 const MOUNTAIN_VARIANTS = 3
 const MOUNTAIN_OUTLINE_SAMPLES = 64
@@ -2605,15 +2609,15 @@ const createScene = async (
       flatShading: true,
     })
     const cactusBodyMaterial = new THREE.MeshStandardMaterial({
-      color: '#6f8f3f',
+      color: '#228f44',
       roughness: 0.88,
-      metalness: 0.04,
+      metalness: 0.03,
       flatShading: true,
     })
     const cactusArmMat = new THREE.MeshStandardMaterial({
-      color: '#7fa14d',
-      roughness: 0.85,
-      metalness: 0.05,
+      color: '#279a4b',
+      roughness: 0.87,
+      metalness: 0.03,
       flatShading: true,
     })
     treeLeafMaterial = leafMaterial
@@ -2650,55 +2654,55 @@ const createScene = async (
     treeTrunkMesh.count = treeInstanceCount
     environmentGroup.add(treeTrunkMesh)
 
-    const armReach = Math.sin(CACTUS_ARM_LOWER_TILT) * CACTUS_ARM_LOWER_HEIGHT
-    const armRise = Math.cos(CACTUS_ARM_LOWER_TILT) * CACTUS_ARM_LOWER_HEIGHT
-    const upperArmBaseX = CACTUS_ARM_BASE_OFFSET + armReach * 0.92
-    const upperArmBaseY = CACTUS_ARM_BASE_HEIGHT + armRise * 0.92
-    const cactusPartSpecs = [
-      {
-        x: -CACTUS_ARM_BASE_OFFSET,
-        y: CACTUS_ARM_BASE_HEIGHT,
-        tilt: CACTUS_ARM_LOWER_TILT,
-        height: CACTUS_ARM_LOWER_HEIGHT,
-        radiusTop: CACTUS_ARM_RADIUS * 0.92,
-        radiusBottom: CACTUS_ARM_RADIUS,
-      },
-      {
-        x: -upperArmBaseX,
-        y: upperArmBaseY,
-        tilt: CACTUS_ARM_UPPER_TILT,
-        height: CACTUS_ARM_UPPER_HEIGHT,
-        radiusTop: CACTUS_ARM_RADIUS * 0.82,
-        radiusBottom: CACTUS_ARM_RADIUS * 0.92,
-      },
-      {
-        x: CACTUS_ARM_BASE_OFFSET,
-        y: CACTUS_ARM_BASE_HEIGHT,
-        tilt: -CACTUS_ARM_LOWER_TILT,
-        height: CACTUS_ARM_LOWER_HEIGHT,
-        radiusTop: CACTUS_ARM_RADIUS * 0.92,
-        radiusBottom: CACTUS_ARM_RADIUS,
-      },
-      {
-        x: upperArmBaseX,
-        y: upperArmBaseY,
-        tilt: -CACTUS_ARM_UPPER_TILT,
-        height: CACTUS_ARM_UPPER_HEIGHT,
-        radiusTop: CACTUS_ARM_RADIUS * 0.82,
-        radiusBottom: CACTUS_ARM_RADIUS * 0.92,
-      },
+    const trunkSpinePoints = [
+      new THREE.Vector3(0, 0, 0),
+      new THREE.Vector3(0, CACTUS_TRUNK_HEIGHT * 0.3, 0),
+      new THREE.Vector3(0, CACTUS_TRUNK_HEIGHT * 0.68, 0),
+      new THREE.Vector3(0, CACTUS_TRUNK_HEIGHT, 0),
     ]
-    for (const spec of cactusPartSpecs) {
-      const geometry = new THREE.CylinderGeometry(
-        spec.radiusTop,
-        spec.radiusBottom,
-        spec.height,
-        7,
-        1,
+    const leftArmSpinePoints = [
+      new THREE.Vector3(-CACTUS_TRUNK_RADIUS * 0.25, CACTUS_LEFT_ARM_BASE_HEIGHT, 0),
+      new THREE.Vector3(-CACTUS_TRUNK_RADIUS * 0.95, CACTUS_LEFT_ARM_BASE_HEIGHT + CACTUS_TRUNK_HEIGHT * 0.09, 0),
+      new THREE.Vector3(-CACTUS_TRUNK_RADIUS * 1.42, CACTUS_LEFT_ARM_BASE_HEIGHT + CACTUS_TRUNK_HEIGHT * 0.26, 0),
+      new THREE.Vector3(-CACTUS_TRUNK_RADIUS * 1.34, CACTUS_LEFT_ARM_BASE_HEIGHT + CACTUS_TRUNK_HEIGHT * 0.47, 0),
+    ]
+    const rightArmSpinePoints = [
+      new THREE.Vector3(CACTUS_TRUNK_RADIUS * 0.22, CACTUS_RIGHT_ARM_BASE_HEIGHT, 0),
+      new THREE.Vector3(CACTUS_TRUNK_RADIUS * 0.78, CACTUS_RIGHT_ARM_BASE_HEIGHT + CACTUS_TRUNK_HEIGHT * 0.07, 0),
+      new THREE.Vector3(CACTUS_TRUNK_RADIUS * 1.08, CACTUS_RIGHT_ARM_BASE_HEIGHT + CACTUS_TRUNK_HEIGHT * 0.21, 0),
+      new THREE.Vector3(CACTUS_TRUNK_RADIUS * 1.02, CACTUS_RIGHT_ARM_BASE_HEIGHT + CACTUS_TRUNK_HEIGHT * 0.37, 0),
+    ]
+
+    const trunkCurve = new THREE.CatmullRomCurve3(trunkSpinePoints, false, 'centripetal', 0.25)
+    cactusTrunkGeometry = new THREE.TubeGeometry(
+      trunkCurve,
+      CACTUS_TRUNK_TUBE_SEGMENTS,
+      CACTUS_TRUNK_RADIUS,
+      CACTUS_TUBE_RADIAL_SEGMENTS,
+      false,
+    )
+    cactusTrunkMesh = new THREE.InstancedMesh(cactusTrunkGeometry, cactusBodyMaterial, TREE_COUNT)
+    cactusTrunkMesh.instanceMatrix.setUsage(THREE.StaticDrawUsage)
+    cactusTrunkMesh.frustumCulled = false
+    cactusTrunkMesh.count = 0
+    environmentGroup.add(cactusTrunkMesh)
+
+    const cactusArmSpecs: Array<{
+      points: THREE.Vector3[]
+      radius: number
+    }> = [
+      { points: leftArmSpinePoints, radius: CACTUS_LEFT_ARM_RADIUS },
+      { points: rightArmSpinePoints, radius: CACTUS_RIGHT_ARM_RADIUS },
+    ]
+    for (const spec of cactusArmSpecs) {
+      const curve = new THREE.CatmullRomCurve3(spec.points, false, 'centripetal', 0.25)
+      const geometry = new THREE.TubeGeometry(
+        curve,
+        CACTUS_ARM_TUBE_SEGMENTS,
+        spec.radius,
+        CACTUS_TUBE_RADIAL_SEGMENTS,
+        false,
       )
-      geometry.translate(0, spec.height / 2, 0)
-      geometry.rotateZ(spec.tilt)
-      geometry.translate(spec.x, spec.y, 0)
       cactusPartGeometries.push(geometry)
       const mesh = new THREE.InstancedMesh(geometry, cactusArmMat, TREE_COUNT)
       mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage)
@@ -2707,19 +2711,49 @@ const createScene = async (
       cactusPartMeshes.push(mesh)
       environmentGroup.add(mesh)
     }
-    cactusTrunkGeometry = new THREE.CylinderGeometry(
-      CACTUS_TRUNK_RADIUS * 0.92,
-      CACTUS_TRUNK_RADIUS,
-      CACTUS_TRUNK_HEIGHT,
-      8,
-      1,
-    )
-    cactusTrunkGeometry.translate(0, CACTUS_TRUNK_HEIGHT / 2, 0)
-    cactusTrunkMesh = new THREE.InstancedMesh(cactusTrunkGeometry, cactusBodyMaterial, TREE_COUNT)
-    cactusTrunkMesh.instanceMatrix.setUsage(THREE.StaticDrawUsage)
-    cactusTrunkMesh.frustumCulled = false
-    cactusTrunkMesh.count = 0
-    environmentGroup.add(cactusTrunkMesh)
+
+    const cactusSphereSpecs: Array<{
+      point: THREE.Vector3
+      radius: number
+      material: THREE.Material
+    }> = [
+      {
+        point: trunkSpinePoints[trunkSpinePoints.length - 1].clone(),
+        radius: CACTUS_TRUNK_RADIUS * 0.92,
+        material: cactusBodyMaterial,
+      },
+      {
+        point: leftArmSpinePoints[0].clone(),
+        radius: CACTUS_LEFT_ARM_RADIUS * 0.95,
+        material: cactusBodyMaterial,
+      },
+      {
+        point: leftArmSpinePoints[leftArmSpinePoints.length - 1].clone(),
+        radius: CACTUS_LEFT_ARM_RADIUS * 0.88,
+        material: cactusArmMat,
+      },
+      {
+        point: rightArmSpinePoints[0].clone(),
+        radius: CACTUS_RIGHT_ARM_RADIUS * 0.95,
+        material: cactusBodyMaterial,
+      },
+      {
+        point: rightArmSpinePoints[rightArmSpinePoints.length - 1].clone(),
+        radius: CACTUS_RIGHT_ARM_RADIUS * 0.88,
+        material: cactusArmMat,
+      },
+    ]
+    for (const spec of cactusSphereSpecs) {
+      const geometry = new THREE.SphereGeometry(spec.radius, 8, 6)
+      geometry.translate(spec.point.x, spec.point.y, spec.point.z)
+      cactusPartGeometries.push(geometry)
+      const mesh = new THREE.InstancedMesh(geometry, spec.material, TREE_COUNT)
+      mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage)
+      mesh.frustumCulled = false
+      mesh.count = 0
+      cactusPartMeshes.push(mesh)
+      environmentGroup.add(mesh)
+    }
 
     mountainMaterial = new THREE.MeshStandardMaterial({
       color: '#8f8f8f',
@@ -2897,7 +2931,7 @@ const createScene = async (
     }
     cactusTrunkSourceMatrices = []
     cactusPartSourceMatrices = cactusPartMeshes.map(() => [])
-    const cactusBaseRadius = PLANET_RADIUS + TREE_BASE_OFFSET
+    const cactusBaseRadius = PLANET_RADIUS + TREE_BASE_OFFSET - CACTUS_BASE_SINK
     const appliedCactusCount = Math.min(treeInstanceCount, cactusTrees.length)
     for (let i = 0; i < appliedCactusCount; i += 1) {
       const cactus = cactusTrees[i]
@@ -2906,7 +2940,12 @@ const createScene = async (
       baseQuat.setFromUnitVectors(up, normal)
       twistQuat.setFromAxisAngle(up, cactus.twist)
       baseQuat.multiply(twistQuat)
-      baseScale.set(widthScale, cactus.heightScale, widthScale)
+      const cactusScale = clamp(
+        widthScale * CACTUS_UNIFORM_SCALE_MULTIPLIER,
+        CACTUS_MIN_UNIFORM_SCALE,
+        CACTUS_MAX_UNIFORM_SCALE,
+      )
+      baseScale.set(cactusScale, cactusScale, cactusScale)
       position.copy(normal).multiplyScalar(cactusBaseRadius)
       baseMatrix.compose(position, baseQuat, baseScale)
       cactusTrunkSourceMatrices.push(baseMatrix.clone())
