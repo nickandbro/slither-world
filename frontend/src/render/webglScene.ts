@@ -4050,7 +4050,23 @@ const createScene = async (
     return capGeometry
   }
 
-  const applyDigestionBulges = (tubeGeometry: THREE.TubeGeometry, digestions: DigestionVisual[]) => {
+  const computeDigestionStartOffset = (curvePoints: THREE.Vector3[]) => {
+    if (curvePoints.length < 2) return 0
+    let totalLength = 0
+    for (let i = 1; i < curvePoints.length; i += 1) {
+      totalLength += curvePoints[i - 1].distanceTo(curvePoints[i])
+    }
+    if (totalLength <= 1e-6) return 0
+    const headNodeLength = curvePoints[0].distanceTo(curvePoints[1])
+    if (headNodeLength <= 1e-6) return 0
+    return clamp(headNodeLength / totalLength, 0, 0.95)
+  }
+
+  const applyDigestionBulges = (
+    tubeGeometry: THREE.TubeGeometry,
+    digestions: DigestionVisual[],
+    headStartOffset: number,
+  ) => {
     if (!digestions.length) return 0
     const params = tubeGeometry.parameters as { radialSegments?: number; tubularSegments?: number }
     const radialSegments = params.radialSegments ?? 8
@@ -4061,11 +4077,13 @@ const createScene = async (
     if (!positions) return 0
 
     const bulgeByRing = new Array<number>(ringCount).fill(0)
-    const startOffset = Math.min(
+    const staticStartOffset = Math.min(
       DIGESTION_START_MAX,
       DIGESTION_START_RINGS / Math.max(1, ringCount - 1),
     )
-    const endOffset = startOffset
+    const startOffset = clamp(Math.max(staticStartOffset, headStartOffset), 0, 0.95)
+    const endOffset = staticStartOffset
+    const headStartRing = Math.ceil(startOffset * Math.max(1, ringCount - 1))
     for (const digestion of digestions) {
       const strength = clamp(digestion.strength, 0, 1)
       if (strength <= 0) continue
@@ -4078,10 +4096,10 @@ const createScene = async (
       const end = Math.min(ringCount - 1, Math.ceil(center + influenceRadius))
       const sigma = Math.max(0.5, influenceRadius * 0.7)
       const tailFade = smoothstep(0, 0.016, 1 - mapped)
-      const headFade = smoothstep(0.008, 0.11, mapped)
-      const travelFade = Math.min(headFade, tailFade)
+      const travelFade = tailFade
       if (travelFade <= 0) continue
       for (let ring = start; ring <= end; ring += 1) {
+        if (ring < headStartRing) continue
         const dist = ring - center
         const normalized = dist / sigma
         const weight = Math.exp(-0.5 * normalized * normalized)
@@ -5004,9 +5022,14 @@ const createScene = async (
       const baseCurve = new THREE.CatmullRomCurve3(curvePoints, false, 'centripetal')
       const tubularSegments = Math.max(8, curvePoints.length * 4)
       const tubeGeometry = new THREE.TubeGeometry(baseCurve, tubularSegments, radius, 10, false)
+      const digestionStartOffset = computeDigestionStartOffset(curvePoints)
       let maxAppliedBulge = 0
       if (digestionState.visuals.length) {
-        maxAppliedBulge = applyDigestionBulges(tubeGeometry, digestionState.visuals)
+        maxAppliedBulge = applyDigestionBulges(
+          tubeGeometry,
+          digestionState.visuals,
+          digestionStartOffset,
+        )
       }
       if (debugEnabled) {
         snakeDigestionDebug.set(player.id, {
