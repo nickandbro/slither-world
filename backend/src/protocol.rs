@@ -1,7 +1,7 @@
 use crate::game::types::Point;
 use uuid::Uuid;
 
-pub const VERSION: u8 = 5;
+pub const VERSION: u8 = 6;
 
 pub const TYPE_JOIN: u8 = 0x01;
 pub const TYPE_INPUT: u8 = 0x02;
@@ -131,6 +131,10 @@ impl Encoder {
     }
 
     pub fn write_u16(&mut self, value: u16) {
+        self.buffer.extend_from_slice(&value.to_le_bytes());
+    }
+
+    pub fn write_i16(&mut self, value: i16) {
         self.buffer.extend_from_slice(&value.to_le_bytes());
     }
 

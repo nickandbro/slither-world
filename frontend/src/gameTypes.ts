@@ -1,5 +1,6 @@
 export type {
   Point,
+  PelletSnapshot,
   PlayerSnapshot,
   GameStateSnapshot,
   Environment,

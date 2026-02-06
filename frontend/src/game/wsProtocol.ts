@@ -2,6 +2,7 @@ import type {
   DigestionSnapshot,
   Environment,
   GameStateSnapshot,
+  PelletSnapshot,
   PlayerSnapshot,
   Point,
 } from './types'
@@ -11,7 +12,7 @@ export type PlayerMeta = {
   color: string
 }
 
-const VERSION = 5
+const VERSION = 6
 
 const TYPE_JOIN = 0x01
 const TYPE_INPUT = 0x02
@@ -35,6 +36,9 @@ const SNAKE_DETAIL_WINDOW = 1
 const SNAKE_DETAIL_STUB = 2
 
 const MAX_STRING_BYTES = 255
+const PELLET_NORMAL_MAX = 32767
+const PELLET_SIZE_MIN = 0.6
+const PELLET_SIZE_MAX = 1.15
 
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
@@ -158,7 +162,7 @@ function decodeInit(reader: Reader, meta: Map<string, PlayerMeta>): DecodedMessa
   const pelletsCount = reader.readU16()
   if (playerId === null || now === null || pelletsCount === null) return null
 
-  const pellets = readPoints(reader, pelletsCount)
+  const pellets = readPellets(reader, pelletsCount)
   if (!pellets) return null
 
   const totalPlayers = reader.readU16()
@@ -190,7 +194,7 @@ function decodeState(reader: Reader, meta: Map<string, PlayerMeta>): DecodedMess
   const pelletsCount = reader.readU16()
   if (now === null || pelletsCount === null) return null
 
-  const pellets = readPoints(reader, pelletsCount)
+  const pellets = readPellets(reader, pelletsCount)
   if (!pellets) return null
 
   const totalPlayers = reader.readU16()
@@ -278,8 +282,9 @@ function readPlayerStates(reader: Reader, meta: Map<string, PlayerMeta>): Player
     for (let j = 0; j < digestionsLen; j += 1) {
       const digestionId = reader.readU32()
       const progress = reader.readF32()
-      if (digestionId === null || progress === null) return null
-      digestions.push({ id: digestionId, progress })
+      const strength = reader.readF32()
+      if (digestionId === null || progress === null || strength === null) return null
+      digestions.push({ id: digestionId, progress, strength })
     }
 
     const metaEntry = meta.get(id)
@@ -444,6 +449,43 @@ function readPoints(reader: Reader, count: number): Point[] | null {
   return points
 }
 
+function readPellets(reader: Reader, count: number): PelletSnapshot[] | null {
+  const pellets: PelletSnapshot[] = []
+  for (let i = 0; i < count; i += 1) {
+    const id = reader.readU32()
+    const qx = reader.readI16()
+    const qy = reader.readI16()
+    const qz = reader.readI16()
+    const colorIndex = reader.readU8()
+    const sizeQ = reader.readU8()
+    if (
+      id === null ||
+      qx === null ||
+      qy === null ||
+      qz === null ||
+      colorIndex === null ||
+      sizeQ === null
+    ) {
+      return null
+    }
+    const x = qx / PELLET_NORMAL_MAX
+    const y = qy / PELLET_NORMAL_MAX
+    const z = qz / PELLET_NORMAL_MAX
+    const len = Math.hypot(x, y, z)
+    const invLen = Number.isFinite(len) && len > 1e-6 ? 1 / len : 0
+    const sizeT = sizeQ / 255
+    pellets.push({
+      id,
+      x: invLen > 0 ? x * invLen : 0,
+      y: invLen > 0 ? y * invLen : 0,
+      z: invLen > 0 ? z * invLen : 1,
+      colorIndex,
+      size: PELLET_SIZE_MIN + (PELLET_SIZE_MAX - PELLET_SIZE_MIN) * sizeT,
+    })
+  }
+  return pellets
+}
+
 function writeHeader(view: DataView, offset: number, messageType: number, flags: number) {
   view.setUint8(offset, VERSION)
   view.setUint8(offset + 1, messageType)
@@ -501,6 +543,13 @@ class Reader {
   readU16(): number | null {
     if (!this.ensure(2)) return null
     const value = this.view.getUint16(this.offset, true)
+    this.offset += 2
+    return value
+  }
+
+  readI16(): number | null {
+    if (!this.ensure(2)) return null
+    const value = this.view.getInt16(this.offset, true)
     this.offset += 2
     return value
   }

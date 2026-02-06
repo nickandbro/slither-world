@@ -7,6 +7,16 @@ export type Point = {
 export type DigestionSnapshot = {
   id: number
   progress: number
+  strength: number
+}
+
+export type PelletSnapshot = {
+  id: number
+  x: number
+  y: number
+  z: number
+  colorIndex: number
+  size: number
 }
 
 export type PlayerSnapshot = {
@@ -65,7 +75,7 @@ export type Environment = {
 
 export type GameStateSnapshot = {
   now: number
-  pellets: Point[]
+  pellets: PelletSnapshot[]
   players: PlayerSnapshot[]
   totalPlayers: number
 }

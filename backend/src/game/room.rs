@@ -2,10 +2,16 @@ use super::constants::{
     BASE_PELLET_COUNT, BASE_SPEED, BOOST_MULTIPLIER, BOT_BOOST_DISTANCE, BOT_COUNT,
     BOT_MIN_STAMINA_TO_BOOST, COLOR_POOL, MAX_PELLETS, MAX_SPAWN_ATTEMPTS, MIN_SURVIVAL_LENGTH,
     OXYGEN_DRAIN_PER_SEC, OXYGEN_MAX, PLAYER_TIMEOUT_MS, RESPAWN_COOLDOWN_MS, RESPAWN_RETRY_MS,
-    SPAWN_CONE_ANGLE, SPAWN_PLAYER_MIN_DISTANCE, STAMINA_DRAIN_PER_SEC, STAMINA_MAX,
-    STAMINA_RECHARGE_PER_SEC, TICK_MS, TURN_RATE,
+    SMALL_PELLET_ATTRACT_RADIUS, SMALL_PELLET_ATTRACT_SPEED, SMALL_PELLET_CONSUME_ANGLE,
+    SMALL_PELLET_DIGESTION_STRENGTH, SMALL_PELLET_GROWTH_FRACTION, SMALL_PELLET_LOCK_CONE_ANGLE,
+    SMALL_PELLET_MOUTH_FORWARD, SMALL_PELLET_SHRINK_MIN_RATIO, SMALL_PELLET_SIZE_MAX,
+    SMALL_PELLET_SIZE_MIN, SMALL_PELLET_SPAWN_HEAD_EXCLUSION_ANGLE, SMALL_PELLET_VIEW_MARGIN_MAX,
+    SMALL_PELLET_VIEW_MARGIN_MIN, SMALL_PELLET_VISIBLE_MAX, SMALL_PELLET_VISIBLE_MIN,
+    SMALL_PELLET_ZOOM_MAX_CAMERA_DISTANCE, SMALL_PELLET_ZOOM_MIN_CAMERA_DISTANCE, SPAWN_CONE_ANGLE,
+    SPAWN_PLAYER_MIN_DISTANCE, STAMINA_DRAIN_PER_SEC, STAMINA_MAX, STAMINA_RECHARGE_PER_SEC,
+    TICK_MS, TURN_RATE,
 };
-use super::digestion::{add_digestion, advance_digestions, get_digestion_progress};
+use super::digestion::{add_digestion_with_strength, advance_digestions, get_digestion_progress};
 use super::environment::{
     sample_lakes, Environment, LAKE_WATER_MASK_THRESHOLD, PLANET_RADIUS, SNAKE_RADIUS,
     TREE_TRUNK_RADIUS,
@@ -17,7 +23,7 @@ use super::math::{
 };
 use super::physics::apply_snake_with_collisions;
 use super::snake::{create_snake, rotate_snake};
-use super::types::{Player, Point, SnakeNode};
+use super::types::{Pellet, PelletState, Player, Point, SnakeNode};
 use crate::protocol;
 use crate::shared::names::sanitize_player_name;
 use rand::Rng;
@@ -64,7 +70,8 @@ struct SessionEntry {
 struct RoomState {
     sessions: HashMap<String, SessionEntry>,
     players: HashMap<String, Player>,
-    pellets: Vec<Point>,
+    pellets: Vec<Pellet>,
+    next_pellet_id: u32,
     environment: Environment,
 }
 
@@ -125,6 +132,15 @@ struct VisiblePlayer<'a> {
     window: SnakeWindow,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct HeadAttractor {
+    head: Point,
+    forward: Point,
+    mouth: Point,
+}
+
+const SMALL_PELLET_COLOR_COUNT: u8 = 12;
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum JsonClientMessage {
@@ -156,6 +172,7 @@ impl Room {
                 sessions: HashMap::new(),
                 players: HashMap::new(),
                 pellets: Vec::new(),
+                next_pellet_id: 0,
                 environment: Environment::generate(),
             }),
             running: AtomicBool::new(false),
@@ -536,11 +553,64 @@ impl RoomState {
         visible_players
     }
 
-    fn pellet_visible(pellet: Point, view: Option<(Point, f64)>) -> bool {
-        let Some((view_center, view_cos)) = view else {
-            return true;
+    fn pellet_zoom_t(camera_distance: Option<f64>) -> f64 {
+        let distance = camera_distance
+            .unwrap_or((VIEW_CAMERA_DISTANCE_MIN + VIEW_CAMERA_DISTANCE_MAX) * 0.5)
+            .clamp(
+                SMALL_PELLET_ZOOM_MIN_CAMERA_DISTANCE,
+                SMALL_PELLET_ZOOM_MAX_CAMERA_DISTANCE,
+            );
+        let denom = (SMALL_PELLET_ZOOM_MAX_CAMERA_DISTANCE - SMALL_PELLET_ZOOM_MIN_CAMERA_DISTANCE)
+            .max(1e-6);
+        (distance - SMALL_PELLET_ZOOM_MIN_CAMERA_DISTANCE) / denom
+    }
+
+    fn pellet_view_params(&self, session_id: &str) -> Option<(Point, f64, usize)> {
+        let session = self.sessions.get(session_id)?;
+        let player_id = session.player_id.as_ref()?;
+        let player = self.players.get(player_id)?;
+        let default_center = player
+            .snake
+            .first()
+            .map(|node| Point {
+                x: node.x,
+                y: node.y,
+                z: node.z,
+            })
+            .and_then(parse_axis);
+        let view_center = session.view_center.or(default_center)?;
+        let view_radius = session
+            .view_radius
+            .unwrap_or(1.0)
+            .clamp(VIEW_RADIUS_MIN, VIEW_RADIUS_MAX);
+        let zoom_t = Self::pellet_zoom_t(session.camera_distance);
+        let visible_count = ((SMALL_PELLET_VISIBLE_MIN as f64)
+            + ((SMALL_PELLET_VISIBLE_MAX - SMALL_PELLET_VISIBLE_MIN) as f64) * zoom_t)
+            .round()
+            .max(1.0) as usize;
+        let extra_margin = SMALL_PELLET_VIEW_MARGIN_MIN
+            + (SMALL_PELLET_VIEW_MARGIN_MAX - SMALL_PELLET_VIEW_MARGIN_MIN) * zoom_t;
+        let visible_cos = (view_radius + VIEW_RADIUS_MARGIN + extra_margin).cos();
+        Some((view_center, visible_cos, visible_count))
+    }
+
+    fn visible_pellets_for_session<'a>(&'a self, session_id: &str) -> Vec<&'a Pellet> {
+        let absolute_max = u16::MAX as usize;
+        let Some((view_center, view_cos, max_visible)) = self.pellet_view_params(session_id) else {
+            return self.pellets.iter().take(absolute_max).collect();
         };
-        dot(view_center, pellet) >= view_cos
+        let capped_visible = max_visible.min(absolute_max);
+        let mut visible = Vec::with_capacity(capped_visible.min(self.pellets.len()));
+        for pellet in &self.pellets {
+            if dot(view_center, pellet.normal) < view_cos {
+                continue;
+            }
+            visible.push(pellet);
+            if visible.len() >= capped_visible {
+                break;
+            }
+        }
+        visible
     }
 
     fn human_count(&self) -> usize {
@@ -601,7 +671,7 @@ impl RoomState {
         if self.bot_count() == 0 {
             return;
         }
-        let pellets = self.pellets.clone();
+        let pellets: Vec<Point> = self.pellets.iter().map(|pellet| pellet.normal).collect();
         let bot_ids: Vec<String> = self
             .players
             .iter()
@@ -718,6 +788,7 @@ impl RoomState {
             last_seen: Self::now_millis(),
             respawn_at,
             snake,
+            pellet_growth_fraction: 0.0,
             next_digestion_id: 0,
             digestions: Vec::new(),
         }
@@ -810,18 +881,278 @@ impl RoomState {
         false
     }
 
-    fn ensure_pellets(&mut self) {
-        let mut rng = rand::thread_rng();
-        while self.pellets.len() < BASE_PELLET_COUNT {
-            let theta = rng.gen::<f64>() * std::f64::consts::PI * 2.0;
-            let phi = rng.gen::<f64>() * std::f64::consts::PI;
-            self.pellets.push(point_from_spherical(theta, phi));
+    fn next_small_pellet_id(&mut self) -> u32 {
+        let id = self.next_pellet_id;
+        self.next_pellet_id = self.next_pellet_id.wrapping_add(1);
+        id
+    }
+
+    fn random_small_pellet(&mut self, rng: &mut impl Rng) -> Pellet {
+        let theta = rng.gen::<f64>() * std::f64::consts::PI * 2.0;
+        let phi = rng.gen::<f64>() * std::f64::consts::PI;
+        let normal = point_from_spherical(theta, phi);
+        let size = rng.gen_range(SMALL_PELLET_SIZE_MIN..=SMALL_PELLET_SIZE_MAX);
+        Pellet {
+            id: self.next_small_pellet_id(),
+            normal,
+            color_index: rng.gen_range(0..SMALL_PELLET_COLOR_COUNT),
+            base_size: size,
+            current_size: size,
+            state: PelletState::Idle,
         }
+    }
+
+    fn is_far_enough_from_heads(&self, point: Point) -> bool {
+        let min_dot = SMALL_PELLET_SPAWN_HEAD_EXCLUSION_ANGLE.cos();
+        for player in self.players.values() {
+            if !player.alive {
+                continue;
+            }
+            let Some(head) = player.snake.first() else {
+                continue;
+            };
+            let head_point = Point {
+                x: head.x,
+                y: head.y,
+                z: head.z,
+            };
+            if dot(head_point, point) > min_dot {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn spawn_small_pellet_with_rng(&mut self, rng: &mut impl Rng) -> Option<Pellet> {
+        const SPAWN_ATTEMPTS: usize = 20;
+        for _ in 0..SPAWN_ATTEMPTS {
+            let pellet = self.random_small_pellet(rng);
+            if self.is_far_enough_from_heads(pellet.normal) {
+                return Some(pellet);
+            }
+        }
+        None
+    }
+
+    fn ensure_pellets(&mut self) {
+        if self.pellets.len() > MAX_PELLETS {
+            let excess = self.pellets.len() - MAX_PELLETS;
+            self.pellets.drain(0..excess);
+        }
+        let target = BASE_PELLET_COUNT.min(MAX_PELLETS);
+        if self.pellets.len() >= target {
+            return;
+        }
+        let mut rng = rand::thread_rng();
+        let mut attempts = 0usize;
+        let max_attempts = (target.saturating_sub(self.pellets.len()) * 24).max(64);
+        while self.pellets.len() < target && attempts < max_attempts {
+            if let Some(pellet) = self.spawn_small_pellet_with_rng(&mut rng) {
+                self.pellets.push(pellet);
+            }
+            attempts += 1;
+        }
+    }
+
+    fn build_head_attractors(&self) -> HashMap<String, HeadAttractor> {
+        let mut attractors = HashMap::with_capacity(self.players.len());
+        for (id, player) in &self.players {
+            if !player.alive {
+                continue;
+            }
+            let Some(head_node) = player.snake.first() else {
+                continue;
+            };
+            let head = Point {
+                x: head_node.x,
+                y: head_node.y,
+                z: head_node.z,
+            };
+            let head = normalize(head);
+
+            let mut forward = if player.snake.len() > 1 {
+                let next_node = player.snake[1].clone();
+                let next = normalize(Point {
+                    x: next_node.x,
+                    y: next_node.y,
+                    z: next_node.z,
+                });
+                let raw = Point {
+                    x: head.x - next.x,
+                    y: head.y - next.y,
+                    z: head.z - next.z,
+                };
+                let projected = Point {
+                    x: raw.x - head.x * dot(raw, head),
+                    y: raw.y - head.y * dot(raw, head),
+                    z: raw.z - head.z * dot(raw, head),
+                };
+                if length(projected) > 1e-6 {
+                    normalize(projected)
+                } else {
+                    Point {
+                        x: 0.0,
+                        y: 0.0,
+                        z: 0.0,
+                    }
+                }
+            } else {
+                Point {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                }
+            };
+
+            if length(forward) <= 1e-6 {
+                let fallback = cross(player.axis, head);
+                if length(fallback) > 1e-6 {
+                    forward = normalize(fallback);
+                } else {
+                    let up = Point {
+                        x: 0.0,
+                        y: 1.0,
+                        z: 0.0,
+                    };
+                    let world_right = Point {
+                        x: 1.0,
+                        y: 0.0,
+                        z: 0.0,
+                    };
+                    let cross_up = cross(head, up);
+                    if length(cross_up) > 1e-6 {
+                        forward = normalize(cross_up);
+                    } else {
+                        forward = normalize(cross(head, world_right));
+                    }
+                }
+            }
+
+            let mouth = normalize(Point {
+                x: head.x + forward.x * SMALL_PELLET_MOUTH_FORWARD,
+                y: head.y + forward.y * SMALL_PELLET_MOUTH_FORWARD,
+                z: head.z + forward.z * SMALL_PELLET_MOUTH_FORWARD,
+            });
+            attractors.insert(
+                id.clone(),
+                HeadAttractor {
+                    head,
+                    forward,
+                    mouth,
+                },
+            );
+        }
+        attractors
+    }
+
+    fn find_pellet_target(
+        pellet: Point,
+        attractors: &HashMap<String, HeadAttractor>,
+    ) -> Option<(String, HeadAttractor)> {
+        let attract_cos = SMALL_PELLET_ATTRACT_RADIUS.cos();
+        let lock_cone_cos = SMALL_PELLET_LOCK_CONE_ANGLE.cos();
+        let mut best: Option<(String, HeadAttractor, f64)> = None;
+        for (id, attractor) in attractors {
+            let head_dot = dot(attractor.head, pellet);
+            if head_dot < attract_cos {
+                continue;
+            }
+            let toward = Point {
+                x: pellet.x - attractor.head.x * head_dot,
+                y: pellet.y - attractor.head.y * head_dot,
+                z: pellet.z - attractor.head.z * head_dot,
+            };
+            let toward_len = length(toward);
+            if toward_len > 1e-6 {
+                let toward_dir = Point {
+                    x: toward.x / toward_len,
+                    y: toward.y / toward_len,
+                    z: toward.z / toward_len,
+                };
+                if dot(attractor.forward, toward_dir) < lock_cone_cos {
+                    continue;
+                }
+            }
+            match best {
+                Some((_, _, best_dot)) if head_dot <= best_dot => {}
+                _ => best = Some((id.clone(), *attractor, head_dot)),
+            }
+        }
+        best.map(|(id, attractor, _)| (id, attractor))
+    }
+
+    fn consume_small_pellets(&mut self, consumed: HashMap<String, usize>) {
+        for (player_id, count) in consumed {
+            let Some(player) = self.players.get_mut(&player_id) else {
+                continue;
+            };
+            if !player.alive || count == 0 {
+                continue;
+            }
+            player.pellet_growth_fraction += count as f64 * SMALL_PELLET_GROWTH_FRACTION;
+            while player.pellet_growth_fraction >= 1.0 {
+                player.pellet_growth_fraction -= 1.0;
+                player.score += 1;
+                add_digestion_with_strength(player, SMALL_PELLET_DIGESTION_STRENGTH);
+            }
+        }
+    }
+
+    fn update_small_pellets(&mut self, dt_seconds: f64) {
+        if self.pellets.is_empty() {
+            return;
+        }
+        let attractors = self.build_head_attractors();
+        let consume_cos = SMALL_PELLET_CONSUME_ANGLE.cos();
+        let step = SMALL_PELLET_ATTRACT_SPEED * dt_seconds;
+        let mut consumed_by: HashMap<String, usize> = HashMap::new();
+        let mut i = 0usize;
+        while i < self.pellets.len() {
+            let target = {
+                let pellet = &self.pellets[i];
+                match &pellet.state {
+                    PelletState::Attracting { target_player_id } => attractors
+                        .get(target_player_id)
+                        .copied()
+                        .map(|attractor| (target_player_id.clone(), attractor))
+                        .or_else(|| Self::find_pellet_target(pellet.normal, &attractors)),
+                    PelletState::Idle => Self::find_pellet_target(pellet.normal, &attractors),
+                }
+            };
+
+            if let Some((target_id, attractor)) = target {
+                let pellet = &mut self.pellets[i];
+                pellet.state = PelletState::Attracting {
+                    target_player_id: target_id.clone(),
+                };
+
+                let to_mouth_dot = clamp(dot(pellet.normal, attractor.mouth), -1.0, 1.0);
+                if to_mouth_dot >= consume_cos {
+                    *consumed_by.entry(target_id).or_insert(0) += 1;
+                    self.pellets.swap_remove(i);
+                    continue;
+                }
+
+                pellet.normal = rotate_toward(pellet.normal, attractor.mouth, step);
+                let after_dot = clamp(dot(pellet.normal, attractor.mouth), -1.0, 1.0);
+                let angle = after_dot.acos();
+                let ratio = clamp(angle / SMALL_PELLET_ATTRACT_RADIUS, 0.0, 1.0) as f32;
+                let shrink =
+                    SMALL_PELLET_SHRINK_MIN_RATIO + (1.0 - SMALL_PELLET_SHRINK_MIN_RATIO) * ratio;
+                pellet.current_size = pellet.base_size * shrink;
+            } else {
+                let pellet = &mut self.pellets[i];
+                pellet.state = PelletState::Idle;
+                pellet.current_size = pellet.base_size;
+            }
+            i += 1;
+        }
+
+        self.consume_small_pellets(consumed_by);
     }
 
     fn tick(&mut self) {
         let now = Self::now_millis();
-        self.ensure_pellets();
         let dt_seconds = TICK_MS as f64 / 1000.0;
         let mut move_steps: HashMap<String, i32> = HashMap::new();
 
@@ -834,6 +1165,7 @@ impl RoomState {
         });
 
         self.ensure_bots();
+        self.ensure_pellets();
         self.update_bots();
         self.auto_respawn_players(now);
 
@@ -981,38 +1313,8 @@ impl RoomState {
             self.handle_death(&id);
         }
 
-        let player_ids: Vec<String> = self.players.keys().cloned().collect();
-        for id in &player_ids {
-            let Some(player) = self.players.get_mut(id) else {
-                continue;
-            };
-            if !player.alive {
-                continue;
-            }
-            let mut i = self.pellets.len();
-            while i > 0 {
-                i -= 1;
-                if !collision(
-                    Point {
-                        x: player.snake[0].x,
-                        y: player.snake[0].y,
-                        z: player.snake[0].z,
-                    },
-                    self.pellets[i],
-                ) {
-                    continue;
-                }
-                self.pellets.remove(i);
-                player.score += 1;
-                add_digestion(player);
-                if self.pellets.len() < MAX_PELLETS {
-                    let mut rng = rand::thread_rng();
-                    let theta = rng.gen::<f64>() * std::f64::consts::PI * 2.0;
-                    let phi = rng.gen::<f64>() * std::f64::consts::PI;
-                    self.pellets.push(point_from_spherical(theta, phi));
-                }
-            }
-        }
+        self.update_small_pellets(dt_seconds);
+        self.ensure_pellets();
 
         let player_ids: Vec<String> = self.players.keys().cloned().collect();
         for id in &player_ids {
@@ -1030,34 +1332,53 @@ impl RoomState {
     }
 
     fn handle_death(&mut self, player_id: &str) {
-        let Some(player) = self.players.get_mut(player_id) else {
-            return;
+        let (is_bot, dropped_points) = {
+            let Some(player) = self.players.get_mut(player_id) else {
+                return;
+            };
+            if !player.alive {
+                return;
+            }
+            player.alive = false;
+            player.respawn_at = Some(Self::now_millis() + RESPAWN_COOLDOWN_MS);
+            player.digestions.clear();
+            player.next_digestion_id = 0;
+            player.pellet_growth_fraction = 0.0;
+            player.oxygen_damage_accumulator = 0.0;
+            player.score = 0;
+            let dropped_points = player
+                .snake
+                .iter()
+                .skip(1)
+                .map(|node| Point {
+                    x: node.x,
+                    y: node.y,
+                    z: node.z,
+                })
+                .collect::<Vec<_>>();
+            (player.is_bot, dropped_points)
         };
-        if !player.alive {
-            return;
-        }
-        tracing::debug!(player_id, is_bot = player.is_bot, "player died");
-        player.alive = false;
-        player.respawn_at = Some(Self::now_millis() + RESPAWN_COOLDOWN_MS);
-        player.digestions.clear();
-        player.next_digestion_id = 0;
-        player.oxygen_damage_accumulator = 0.0;
+        tracing::debug!(player_id, is_bot, "player died");
 
-        for node in player.snake.iter().skip(1) {
-            self.pellets.push(Point {
-                x: node.x,
-                y: node.y,
-                z: node.z,
+        let mut rng = rand::thread_rng();
+        for point in dropped_points {
+            let size = rng.gen_range(SMALL_PELLET_SIZE_MIN..=SMALL_PELLET_SIZE_MAX);
+            let color_index = rng.gen_range(0..SMALL_PELLET_COLOR_COUNT);
+            let pellet_id = self.next_small_pellet_id();
+            self.pellets.push(Pellet {
+                id: pellet_id,
+                normal: point,
+                color_index,
+                base_size: size,
+                current_size: size,
+                state: PelletState::Idle,
             });
         }
 
-        let max_pellets = u16::MAX as usize;
-        if self.pellets.len() > max_pellets {
-            let excess = self.pellets.len() - max_pellets;
+        if self.pellets.len() > MAX_PELLETS {
+            let excess = self.pellets.len() - MAX_PELLETS;
             self.pellets.drain(0..excess);
         }
-
-        player.score = 0;
     }
 
     fn respawn_player(&mut self, player_id: &str) {
@@ -1080,6 +1401,7 @@ impl RoomState {
         player.oxygen_damage_accumulator = 0.0;
         player.respawn_at = None;
         player.snake = spawned.snake;
+        player.pellet_growth_fraction = 0.0;
         player.digestions.clear();
         player.next_digestion_id = 0;
         tracing::debug!(player_id, is_bot = player.is_bot, "player respawned");
@@ -1092,9 +1414,10 @@ impl RoomState {
             .map(|player| player.id_bytes)
             .unwrap_or([0u8; 16]);
         let visible_players = self.visible_players_for_session(session_id);
+        let visible_pellets = self.visible_pellets_for_session(session_id);
         let total_players = self.players.len().min(u16::MAX as usize);
         let visible_player_count = visible_players.len().min(u16::MAX as usize);
-        let pellet_count = self.pellets.len().min(u16::MAX as usize);
+        let pellet_count = visible_pellets.len().min(u16::MAX as usize);
         let now = Self::now_millis();
         let mut capacity = 4 + 16 + 8 + 2 + pellet_count * 12 + 2 + 2;
         for player in self.players.values().take(total_players) {
@@ -1118,7 +1441,7 @@ impl RoomState {
             }
             capacity += 1;
             if window.include_digestions() {
-                capacity += player.digestions.len() * 8;
+                capacity += player.digestions.len() * 12;
             }
         }
         capacity += self.environment.encoded_len();
@@ -1128,10 +1451,8 @@ impl RoomState {
         encoder.write_uuid(&player_bytes);
         encoder.write_i64(now);
         encoder.write_u16(pellet_count as u16);
-        for pellet in self.pellets.iter().take(pellet_count) {
-            encoder.write_f32(pellet.x as f32);
-            encoder.write_f32(pellet.y as f32);
-            encoder.write_f32(pellet.z as f32);
+        for pellet in visible_pellets.into_iter().take(pellet_count) {
+            self.write_pellet(&mut encoder, pellet);
         }
 
         encoder.write_u16(total_players as u16);
@@ -1153,17 +1474,11 @@ impl RoomState {
     }
 
     fn build_state_payload_for_session(&self, now: i64, session_id: &str) -> Vec<u8> {
-        let view = self.session_view_params(session_id);
         let visible_players = self.visible_players_for_session(session_id);
+        let visible_pellets = self.visible_pellets_for_session(session_id);
         let total_players = self.players.len().min(u16::MAX as usize);
         let visible_player_count = visible_players.len().min(u16::MAX as usize);
-
-        let visible_pellets = self
-            .pellets
-            .iter()
-            .filter(|pellet| Self::pellet_visible(**pellet, view))
-            .count();
-        let visible_pellet_count = visible_pellets.min(u16::MAX as usize);
+        let visible_pellet_count = visible_pellets.len().min(u16::MAX as usize);
 
         let mut capacity = 4 + 8 + 2 + visible_pellet_count * 12 + 2 + 2;
         for visible in visible_players.iter().take(visible_player_count) {
@@ -1181,7 +1496,7 @@ impl RoomState {
             }
             capacity += 1;
             if window.include_digestions() {
-                capacity += player.digestions.len() * 8;
+                capacity += player.digestions.len() * 12;
             }
         }
 
@@ -1189,18 +1504,8 @@ impl RoomState {
         encoder.write_header(protocol::TYPE_STATE, 0);
         encoder.write_i64(now);
         encoder.write_u16(visible_pellet_count as u16);
-        let mut written_visible_pellets = 0usize;
-        for pellet in &self.pellets {
-            if !Self::pellet_visible(*pellet, view) {
-                continue;
-            }
-            if written_visible_pellets >= visible_pellet_count {
-                break;
-            }
-            encoder.write_f32(pellet.x as f32);
-            encoder.write_f32(pellet.y as f32);
-            encoder.write_f32(pellet.z as f32);
-            written_visible_pellets += 1;
+        for pellet in visible_pellets.into_iter().take(visible_pellet_count) {
+            self.write_pellet(&mut encoder, pellet);
         }
 
         encoder.write_u16(total_players as u16);
@@ -1258,6 +1563,30 @@ impl RoomState {
 
     fn write_player_state(&self, encoder: &mut protocol::Encoder, player: &Player) {
         self.write_player_state_with_window(encoder, player, SnakeWindow::full(player.snake.len()));
+    }
+
+    fn quantize_pellet_normal(value: f64) -> i16 {
+        let clamped = clamp(value, -1.0, 1.0);
+        (clamped * i16::MAX as f64).round() as i16
+    }
+
+    fn quantize_pellet_size(size: f32) -> u8 {
+        let range = (SMALL_PELLET_SIZE_MAX - SMALL_PELLET_SIZE_MIN).max(1e-4);
+        let t = ((size - SMALL_PELLET_SIZE_MIN) / range).clamp(0.0, 1.0);
+        (t * u8::MAX as f32).round() as u8
+    }
+
+    fn write_pellet(&self, encoder: &mut protocol::Encoder, pellet: &Pellet) {
+        encoder.write_u32(pellet.id);
+        encoder.write_i16(Self::quantize_pellet_normal(pellet.normal.x));
+        encoder.write_i16(Self::quantize_pellet_normal(pellet.normal.y));
+        encoder.write_i16(Self::quantize_pellet_normal(pellet.normal.z));
+        encoder.write_u8(
+            pellet
+                .color_index
+                .min(SMALL_PELLET_COLOR_COUNT.saturating_sub(1)),
+        );
+        encoder.write_u8(Self::quantize_pellet_size(pellet.current_size));
     }
 
     fn write_player_state_with_window(
@@ -1319,6 +1648,7 @@ impl RoomState {
         for digestion in player.digestions.iter().take(digestion_len as usize) {
             encoder.write_u32(digestion.id);
             encoder.write_f32(get_digestion_progress(digestion) as f32);
+            encoder.write_f32(digestion.strength);
         }
     }
 
@@ -1397,6 +1727,7 @@ mod tests {
             last_seen: 0,
             respawn_at: None,
             snake,
+            pellet_growth_fraction: 0.0,
             next_digestion_id: 0,
             digestions: Vec::new(),
         }
@@ -1418,7 +1749,19 @@ mod tests {
             sessions: HashMap::new(),
             players: HashMap::new(),
             pellets: Vec::new(),
+            next_pellet_id: 0,
             environment: Environment::generate(),
+        }
+    }
+
+    fn make_pellet(id: u32, normal: Point) -> Pellet {
+        Pellet {
+            id,
+            normal,
+            color_index: 0,
+            base_size: 1.0,
+            current_size: 1.0,
+            state: PelletState::Idle,
         }
     }
 
@@ -1454,7 +1797,7 @@ mod tests {
         assert!(snake_len <= total_len);
         *offset += snake_len as usize * 12;
         let digestion_len = read_u8(bytes, offset);
-        *offset += digestion_len as usize * 8;
+        *offset += digestion_len as usize * 12;
     }
 
     fn decode_state_counts(payload: &[u8]) -> (u16, u16) {
@@ -1574,9 +1917,9 @@ mod tests {
 
         assert_eq!(state.pellets.len(), snake.len() - 1);
         for (pellet, node) in state.pellets.iter().zip(snake.iter().skip(1)) {
-            assert_eq!(pellet.x, node.x);
-            assert_eq!(pellet.y, node.y);
-            assert_eq!(pellet.z, node.z);
+            assert_eq!(pellet.normal.x, node.x);
+            assert_eq!(pellet.normal.y, node.y);
+            assert_eq!(pellet.normal.z, node.z);
         }
     }
 
@@ -1584,14 +1927,20 @@ mod tests {
     fn death_pellets_clamp_to_u16_max() {
         let mut state = make_state();
         let base_len = u16::MAX as usize - 2;
-        state.pellets = vec![
-            Point {
-                x: 0.0,
-                y: 0.0,
-                z: 0.0
-            };
-            base_len
-        ];
+        state.pellets = (0..base_len)
+            .map(|index| Pellet {
+                id: index as u32,
+                normal: Point {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                color_index: 0,
+                base_size: SMALL_PELLET_SIZE_MIN,
+                current_size: SMALL_PELLET_SIZE_MIN,
+                state: PelletState::Idle,
+            })
+            .collect();
 
         let snake = make_snake(5, 100.0);
         let player_id = "player-2".to_string();
@@ -1603,9 +1952,9 @@ mod tests {
         assert_eq!(state.pellets.len(), u16::MAX as usize);
         let tail = &state.pellets[state.pellets.len() - 4..];
         for (pellet, node) in tail.iter().zip(snake.iter().skip(1)) {
-            assert_eq!(pellet.x, node.x);
-            assert_eq!(pellet.y, node.y);
-            assert_eq!(pellet.z, node.z);
+            assert_eq!(pellet.normal.x, node.x);
+            assert_eq!(pellet.normal.y, node.y);
+            assert_eq!(pellet.normal.z, node.z);
         }
     }
 
@@ -1618,6 +1967,7 @@ mod tests {
             remaining: 2,
             total: 4,
             growth_steps: 1,
+            strength: 0.35,
         });
 
         let mut encoder = protocol::Encoder::with_capacity(256);
@@ -1649,6 +1999,99 @@ mod tests {
         let encoded_progress = f32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
         let expected_progress = get_digestion_progress(&player.digestions[0]) as f32;
         assert!((encoded_progress - expected_progress).abs() < 1e-6);
+        offset += 4;
+
+        let encoded_strength = f32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
+        assert!((encoded_strength - player.digestions[0].strength).abs() < 1e-6);
+    }
+
+    #[test]
+    fn small_pellet_locks_and_shrinks_toward_target_head() {
+        let mut state = make_state();
+        let player_id = "pellet-lock-player".to_string();
+        let snake = vec![
+            SnakeNode {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+                pos_queue: VecDeque::new(),
+            },
+            SnakeNode {
+                x: 0.9805806756909201,
+                y: -0.19611613513818402,
+                z: 0.0,
+                pos_queue: VecDeque::new(),
+            },
+        ];
+        state
+            .players
+            .insert(player_id.clone(), make_player(&player_id, snake));
+        state.pellets.push(make_pellet(
+            7,
+            normalize(Point {
+                x: 1.0,
+                y: 0.08,
+                z: 0.0,
+            }),
+        ));
+
+        state.update_small_pellets(TICK_MS as f64 / 1000.0);
+
+        assert_eq!(state.pellets.len(), 1);
+        let pellet = &state.pellets[0];
+        match &pellet.state {
+            PelletState::Attracting { target_player_id } => {
+                assert_eq!(target_player_id, &player_id);
+            }
+            PelletState::Idle => panic!("pellet should lock to a nearby head"),
+        }
+        assert!(pellet.current_size < pellet.base_size);
+    }
+
+    #[test]
+    fn small_pellet_growth_is_fractional_before_full_score_tick() {
+        let mut state = make_state();
+        let player_id = "pellet-growth-player".to_string();
+        let snake = vec![
+            SnakeNode {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+                pos_queue: VecDeque::new(),
+            },
+            SnakeNode {
+                x: 0.9805806756909201,
+                y: -0.19611613513818402,
+                z: 0.0,
+                pos_queue: VecDeque::new(),
+            },
+        ];
+        state
+            .players
+            .insert(player_id.clone(), make_player(&player_id, snake));
+        let mouth = normalize(Point {
+            x: 1.0,
+            y: SMALL_PELLET_MOUTH_FORWARD,
+            z: 0.0,
+        });
+        for i in 0..7u32 {
+            state.pellets.push(make_pellet(i, mouth));
+        }
+
+        state.update_small_pellets(TICK_MS as f64 / 1000.0);
+        let player_after_partial = state.players.get(&player_id).expect("player");
+        assert_eq!(player_after_partial.score, 0);
+        assert_eq!(player_after_partial.digestions.len(), 0);
+        assert!(player_after_partial.pellet_growth_fraction > 0.8);
+        assert!(player_after_partial.pellet_growth_fraction < 0.9);
+
+        state.pellets.push(make_pellet(99, mouth));
+        state.update_small_pellets(TICK_MS as f64 / 1000.0);
+        let player_after_full = state.players.get(&player_id).expect("player");
+        assert_eq!(player_after_full.score, 1);
+        assert_eq!(player_after_full.digestions.len(), 1);
+        assert!(player_after_full.pellet_growth_fraction < 0.01);
+        assert!(player_after_full.digestions[0].strength <= 1.0);
     }
 
     #[test]

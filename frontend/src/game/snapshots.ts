@@ -1,4 +1,10 @@
-import type { DigestionSnapshot, GameStateSnapshot, PlayerSnapshot, Point } from './types'
+import type {
+  DigestionSnapshot,
+  GameStateSnapshot,
+  PelletSnapshot,
+  PlayerSnapshot,
+  Point,
+} from './types'
 import { clamp, lerp, lerpPoint } from './math'
 
 export type TimedSnapshot = GameStateSnapshot & {
@@ -22,11 +28,13 @@ function blendDigestions(a: DigestionSnapshot[], b: DigestionSnapshot[], t: numb
           0,
           MAX_DIGESTION_PROGRESS,
         ),
+        strength: clamp(lerp(digestionA.strength, digestionB.strength, t), 0.05, 1),
       })
     } else {
       digestions.push({
         id: digestionB.id,
         progress: clamp(digestionB.progress, 0, MAX_DIGESTION_PROGRESS),
+        strength: clamp(digestionB.strength, 0.05, 1),
       })
     }
   }
@@ -37,11 +45,46 @@ function blendDigestions(a: DigestionSnapshot[], b: DigestionSnapshot[], t: numb
       digestions.push({
         id: digestionA.id,
         progress: clamp(digestionA.progress, 0, MAX_DIGESTION_PROGRESS),
+        strength: clamp(digestionA.strength, 0.05, 1),
       })
     }
   }
 
   return digestions
+}
+
+function blendPellets(a: PelletSnapshot[], b: PelletSnapshot[], t: number) {
+  const pellets: PelletSnapshot[] = []
+  const pelletsA = new Map(a.map((pellet) => [pellet.id, pellet]))
+  const pelletsB = new Set(b.map((pellet) => pellet.id))
+
+  for (const pelletB of b) {
+    const pelletA = pelletsA.get(pelletB.id)
+    if (pelletA) {
+      pellets.push({
+        id: pelletB.id,
+        x: lerp(pelletA.x, pelletB.x, t),
+        y: lerp(pelletA.y, pelletB.y, t),
+        z: lerp(pelletA.z, pelletB.z, t),
+        colorIndex: pelletB.colorIndex,
+        size: Math.max(0, lerp(pelletA.size, pelletB.size, t)),
+      })
+    } else {
+      pellets.push({ ...pelletB })
+    }
+  }
+
+  if (t < 0.9) {
+    const fade = 1 - t / 0.9
+    for (const pelletA of a) {
+      if (pelletsB.has(pelletA.id)) continue
+      const fadedSize = pelletA.size * fade
+      if (fadedSize <= 0.01) continue
+      pellets.push({ ...pelletA, size: fadedSize })
+    }
+  }
+
+  return pellets
 }
 
 function canBlendSnakeWindow(a: PlayerSnapshot, b: PlayerSnapshot) {
@@ -128,7 +171,7 @@ function blendSnapshots(a: GameStateSnapshot, b: GameStateSnapshot, t: number): 
 
   return {
     now: lerp(a.now, b.now, t),
-    pellets: t < 0.5 ? a.pellets : b.pellets,
+    pellets: blendPellets(a.pellets, b.pellets, t),
     players,
     totalPlayers: t < 0.5 ? a.totalPlayers : b.totalPlayers,
   }

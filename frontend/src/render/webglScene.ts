@@ -6,6 +6,7 @@ import type {
   DigestionSnapshot,
   Environment,
   GameStateSnapshot,
+  PelletSnapshot,
   PlayerSnapshot,
   Point,
 } from '../game/types'
@@ -37,7 +38,7 @@ type TongueState = {
 }
 
 type PelletOverride = {
-  index: number
+  id: number
   position: THREE.Vector3
 }
 
@@ -306,8 +307,23 @@ const SNAKE_SLOPE_INSERT_RADIUS_DELTA = SNAKE_RADIUS * 0.4
 const EYE_RADIUS = SNAKE_RADIUS * 0.62
 const PUPIL_RADIUS = EYE_RADIUS * 0.4
 const PUPIL_OFFSET = EYE_RADIUS - PUPIL_RADIUS * 0.6
-const PELLET_RADIUS = SNAKE_RADIUS * 0.75
-const PELLET_OFFSET = 0.035
+const PELLET_RADIUS = SNAKE_RADIUS * 0.34
+const PELLET_OFFSET = 0.02
+const PELLET_GROUND_CACHE_NORMAL_EPS = 0.0000005
+const PELLET_COLORS = [
+  '#ff5f6d',
+  '#ffc857',
+  '#5cff8d',
+  '#5dc9ff',
+  '#9f7bff',
+  '#ff7bcb',
+  '#ffd86b',
+  '#6bffea',
+  '#8be15b',
+  '#ff9642',
+  '#6f8bff',
+  '#f9ff6b',
+]
 const TONGUE_MAX_LENGTH = HEAD_RADIUS * 2.8
 const TONGUE_MAX_RANGE = HEAD_RADIUS * 3.1
 const TONGUE_NEAR_RANGE = HEAD_RADIUS * 2.4
@@ -324,11 +340,11 @@ const TONGUE_GRAB_EPS = HEAD_RADIUS * 0.12
 const TONGUE_PELLET_MATCH = HEAD_RADIUS * 1.6
 const TAIL_CAP_SEGMENTS = 5
 const TAIL_DIR_MIN_RATIO = 0.35
-const DIGESTION_BULGE = 0.55
-const DIGESTION_WIDTH = 2.5
-const DIGESTION_MAX_BULGE = 0.85
-const DIGESTION_START_RINGS = 3
-const DIGESTION_START_MAX = 0.18
+const DIGESTION_BULGE = 0.14
+const DIGESTION_WIDTH = 1.2
+const DIGESTION_MAX_BULGE = 0.22
+const DIGESTION_START_RINGS = 1
+const DIGESTION_START_MAX = 0.06
 const DIGESTION_TRAVEL_EASE = 1
 const TAIL_ADD_SMOOTH_MS = 180
 const TAIL_EXTEND_RATE_UP = 0.14
@@ -1539,12 +1555,13 @@ const createScene = async (
     emissiveIntensity: 0.3,
   })
 
-  const pelletGeometry = new THREE.SphereGeometry(PELLET_RADIUS, 14, 14)
+  const pelletGeometry = new THREE.SphereGeometry(PELLET_RADIUS, 8, 8)
   const pelletMaterial = new THREE.MeshStandardMaterial({
-    color: '#ffb703',
-    emissive: '#b86a00',
-    emissiveIntensity: 0.45,
-    roughness: 0.25,
+    color: '#ffffff',
+    emissive: '#2d2d2d',
+    emissiveIntensity: 0.35,
+    roughness: 0.22,
+    metalness: 0.02,
   })
   let treeTierGeometries: THREE.BufferGeometry[] = []
   let treeTierMeshes: THREE.InstancedMesh[] = []
@@ -1591,6 +1608,8 @@ const createScene = async (
   let localGroundingInfo: SnakeGroundingInfo | null = null
   let pelletMesh: THREE.InstancedMesh | null = null
   let pelletCapacity = 0
+  const pelletGroundCache = new Map<number, { x: number; y: number; z: number; radius: number }>()
+  const pelletIdsSeen = new Set<number>()
   let viewportWidth = 1
   let viewportHeight = 1
   let lastFrameTime = performance.now()
@@ -1620,6 +1639,9 @@ const createScene = async (
   const tempVectorF = new THREE.Vector3()
   const tempVectorG = new THREE.Vector3()
   const tempVectorH = new THREE.Vector3()
+  const pelletScaleTemp = new THREE.Vector3(1, 1, 1)
+  const pelletColorTemp = new THREE.Color()
+  const identityQuat = new THREE.Quaternion()
   const patchCenterQuat = new THREE.Quaternion()
   const lakeSampleTemp = new THREE.Vector3()
   const tempQuat = new THREE.Quaternion()
@@ -1793,6 +1815,7 @@ const createScene = async (
   const disposeEnvironment = () => {
     visiblePlanetPatchCount = 0
     terrainContactSampler = null
+    pelletGroundCache.clear()
     if (planetMesh) {
       world.remove(planetMesh)
       planetMesh.geometry.dispose()
@@ -4034,7 +4057,8 @@ const createScene = async (
       const travelT = clamp(digestion.progress, 0, 1)
       const travelBiased = Math.pow(travelT, DIGESTION_TRAVEL_EASE)
       const growth = clamp(digestion.progress - 1, 0, 1)
-      visuals.push({ t: travelBiased, strength: 1 - growth })
+      const strength = clamp(digestion.strength, 0.05, 1) * (1 - growth)
+      visuals.push({ t: travelBiased, strength })
       if (growth > tailGrowth) tailGrowth = growth
     }
 
@@ -4208,13 +4232,54 @@ const createScene = async (
     return null
   }
 
+  const getPelletTerrainRadius = (pellet: PelletSnapshot) => {
+    const nx = pellet.x
+    const ny = pellet.y
+    const nz = pellet.z
+    const cached = pelletGroundCache.get(pellet.id)
+    if (cached) {
+      const dx = cached.x - nx
+      const dy = cached.y - ny
+      const dz = cached.z - nz
+      if (dx * dx + dy * dy + dz * dz <= PELLET_GROUND_CACHE_NORMAL_EPS) {
+        return cached.radius
+      }
+    }
+    tempVectorE.set(nx, ny, nz)
+    if (tempVectorE.lengthSq() <= 1e-8) {
+      tempVectorE.set(0, 0, 1)
+    } else {
+      tempVectorE.normalize()
+    }
+    const radius = getTerrainRadius(tempVectorE)
+    pelletGroundCache.set(pellet.id, {
+      x: tempVectorE.x,
+      y: tempVectorE.y,
+      z: tempVectorE.z,
+      radius,
+    })
+    return radius
+  }
+
+  const getPelletSurfacePosition = (pellet: PelletSnapshot, out: THREE.Vector3) => {
+    const radius = getPelletTerrainRadius(pellet)
+    out.set(pellet.x, pellet.y, pellet.z)
+    if (out.lengthSq() <= 1e-8) {
+      out.set(0, 0, 1)
+    } else {
+      out.normalize()
+    }
+    out.multiplyScalar(radius + PELLET_OFFSET)
+    return out
+  }
+
   const updateTongue = (
     playerId: string,
     visual: SnakeVisual,
     headPosition: THREE.Vector3,
     headNormal: THREE.Vector3,
     forward: THREE.Vector3,
-    pellets: Point[] | null,
+    pellets: PelletSnapshot[] | null,
     deltaSeconds: number,
   ): PelletOverride | null => {
     let state = tongueStates.get(playerId)
@@ -4232,7 +4297,7 @@ const createScene = async (
     let candidatePosition: THREE.Vector3 | null = null
     let candidateDistance = Infinity
     let hasCandidate = false
-    let matchedIndex = -1
+    let matchedPelletId: number | null = null
     let matchedPosition: THREE.Vector3 | null = null
 
     if (!pellets || pellets.length === 0) {
@@ -4244,24 +4309,21 @@ const createScene = async (
     } else {
       if (state.targetPosition) {
         let bestDistanceSq = Infinity
-        let bestIndex = -1
+        let bestPelletId: number | null = null
         let bestPosition: THREE.Vector3 | null = null
         for (let i = 0; i < pellets.length; i += 1) {
           const pellet = pellets[i]
-          tempVectorE
-            .set(pellet.x, pellet.y, pellet.z)
-            .normalize()
-            .multiplyScalar(PLANET_RADIUS + PELLET_OFFSET)
+          getPelletSurfacePosition(pellet, tempVectorE)
           const distSq = tempVectorE.distanceToSquared(state.targetPosition)
           if (distSq < bestDistanceSq) {
             bestDistanceSq = distSq
-            bestIndex = i
+            bestPelletId = pellet.id
             bestPosition = tempVectorE.clone()
           }
         }
         const matchThresholdSq = TONGUE_PELLET_MATCH * TONGUE_PELLET_MATCH
-        if (bestIndex >= 0 && bestPosition && bestDistanceSq <= matchThresholdSq) {
-          matchedIndex = bestIndex
+        if (bestPelletId !== null && bestPosition && bestDistanceSq <= matchThresholdSq) {
+          matchedPelletId = bestPelletId
           matchedPosition = bestPosition
           state.targetPosition.copy(bestPosition)
         } else if (state.mode === 'retract') {
@@ -4298,10 +4360,7 @@ const createScene = async (
       if (!hasCandidate && state.mode === 'idle') {
         for (let i = 0; i < pellets.length; i += 1) {
           const pellet = pellets[i]
-          tempVectorE
-            .set(pellet.x, pellet.y, pellet.z)
-            .normalize()
-            .multiplyScalar(PLANET_RADIUS + PELLET_OFFSET)
+          getPelletSurfacePosition(pellet, tempVectorE)
           tempVectorF.copy(tempVectorE).sub(mouthPosition)
           const distance = tempVectorF.length()
           tempVectorG.copy(tempVectorF).addScaledVector(headNormal, -tempVectorF.dot(headNormal))
@@ -4342,7 +4401,7 @@ const createScene = async (
 
     if (state.mode === 'extend' && hasCandidate && state.length >= desiredLength - TONGUE_GRAB_EPS) {
       state.mode = 'retract'
-      state.carrying = matchedIndex >= 0 && matchedPosition !== null
+      state.carrying = matchedPelletId !== null && matchedPosition !== null
       if (!state.carrying) {
         state.targetPosition = null
       }
@@ -4360,7 +4419,7 @@ const createScene = async (
     let targetPosition = state.targetPosition
 
     if (state.mode === 'retract' && state.carrying && targetPosition && pellets && pellets.length > 0) {
-      if (matchedIndex >= 0 && matchedPosition) {
+      if (matchedPelletId !== null && matchedPosition) {
         if (state.targetPosition) {
           state.targetPosition.copy(matchedPosition)
         } else {
@@ -4374,7 +4433,7 @@ const createScene = async (
           tempVectorF.copy(forward)
         }
         const grabbedPos = mouthPosition.clone().addScaledVector(tempVectorF, state.length)
-        override = { index: matchedIndex, position: grabbedPos }
+        override = { id: matchedPelletId, position: grabbedPos }
       } else {
         state.carrying = false
         state.targetPosition = null
@@ -4416,7 +4475,7 @@ const createScene = async (
     player: PlayerSnapshot,
     isLocal: boolean,
     deltaSeconds: number,
-    pellets: Point[] | null,
+    pellets: PelletSnapshot[] | null,
   ): PelletOverride | null => {
     let visual = snakes.get(player.id)
     if (!visual) {
@@ -5188,7 +5247,7 @@ const createScene = async (
     players: PlayerSnapshot[],
     localPlayerId: string | null,
     deltaSeconds: number,
-    pellets: Point[] | null,
+    pellets: PelletSnapshot[] | null,
   ): PelletOverride | null => {
     const activeIds = new Set<string>()
     localGroundingInfo = null
@@ -5218,35 +5277,51 @@ const createScene = async (
     return pelletOverride
   }
 
-  const updatePellets = (pellets: Point[], override: PelletOverride | null) => {
+  const updatePellets = (pellets: PelletSnapshot[], override: PelletOverride | null) => {
     const count = pellets.length
-    if (!pelletMesh || pelletCapacity !== Math.max(count, 1)) {
+    if (!pelletMesh || pelletCapacity < Math.max(count, 1)) {
       if (pelletMesh) {
         pelletsGroup.remove(pelletMesh)
       }
-      pelletCapacity = Math.max(count, 1)
+      let nextCapacity = Math.max(1, pelletCapacity)
+      while (nextCapacity < count) {
+        nextCapacity *= 2
+      }
+      pelletCapacity = Math.max(nextCapacity, 1)
       pelletMesh = new THREE.InstancedMesh(pelletGeometry, pelletMaterial, pelletCapacity)
+      pelletMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
       pelletsGroup.add(pelletMesh)
     }
 
     if (!pelletMesh) return
     pelletMesh.count = count
     pelletMesh.visible = count > 0
+    pelletIdsSeen.clear()
 
     for (let i = 0; i < count; i += 1) {
-      if (override && override.index === i) {
+      const pellet = pellets[i]
+      pelletIdsSeen.add(pellet.id)
+      if (override && override.id === pellet.id) {
         tempVector.copy(override.position)
       } else {
-        const pellet = pellets[i]
-        tempVector
-          .set(pellet.x, pellet.y, pellet.z)
-          .normalize()
-          .multiplyScalar(PLANET_RADIUS + PELLET_OFFSET)
+        getPelletSurfacePosition(pellet, tempVector)
       }
-      tempMatrix.makeTranslation(tempVector.x, tempVector.y, tempVector.z)
+      pelletScaleTemp.setScalar(Math.max(0.12, pellet.size))
+      tempMatrix.compose(tempVector, identityQuat, pelletScaleTemp)
       pelletMesh.setMatrixAt(i, tempMatrix)
+      pelletColorTemp.set(PELLET_COLORS[pellet.colorIndex % PELLET_COLORS.length] ?? '#ffd166')
+      pelletMesh.setColorAt(i, pelletColorTemp)
     }
     pelletMesh.instanceMatrix.needsUpdate = true
+    if (pelletMesh.instanceColor) {
+      pelletMesh.instanceColor.needsUpdate = true
+    }
+
+    for (const id of pelletGroundCache.keys()) {
+      if (!pelletIdsSeen.has(id)) {
+        pelletGroundCache.delete(id)
+      }
+    }
   }
 
   const render = (
@@ -5430,6 +5505,8 @@ const createScene = async (
     if (pelletMesh) {
       pelletsGroup.remove(pelletMesh)
     }
+    pelletGroundCache.clear()
+    pelletIdsSeen.clear()
     for (const [id, visual] of snakes) {
       removeSnake(visual, id)
     }
