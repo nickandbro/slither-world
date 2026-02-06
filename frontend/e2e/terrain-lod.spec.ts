@@ -7,6 +7,7 @@ type TerrainLodInfo = {
   rebuildCount: number
   lastRebuildReason: 'force' | 'zoom' | 'detail' | 'center' | null
   centerMode: 'camera' | 'head'
+  wireframeEnabled: boolean
 }
 
 const getTerrainLodInfo = async (page: Page) => {
@@ -44,6 +45,21 @@ test.describe('terrain lod stabilization', () => {
     expect(beforeMove?.centerMode).toBe('camera')
     expect(beforeMove?.rings).toBe(72)
     expect(beforeMove?.segments).toBe(192)
+    expect(beforeMove?.wireframeEnabled).toBe(false)
+
+    const tessellationToggle = page.getByRole('checkbox', { name: 'Terrain tessellation' })
+    await tessellationToggle.check()
+    await expect(tessellationToggle).toBeChecked()
+    await page.waitForFunction(() => {
+      const debugApi = (
+        window as Window & {
+          __SNAKE_DEBUG__?: {
+            getTerrainLodInfo?: () => TerrainLodInfo
+          }
+        }
+      ).__SNAKE_DEBUG__
+      return debugApi?.getTerrainLodInfo?.()?.wireframeEnabled === true
+    })
 
     await page.mouse.move(140, 180)
     await page.mouse.move(520, 220)
@@ -55,6 +71,7 @@ test.describe('terrain lod stabilization', () => {
     expect(afterMove?.centerMode).toBe('camera')
     expect(afterMove?.rings).toBe(72)
     expect(afterMove?.segments).toBe(192)
+    expect(afterMove?.wireframeEnabled).toBe(true)
     expect(afterMove?.rebuildCount).toBeGreaterThanOrEqual(beforeMove?.rebuildCount ?? 0)
     expect(afterMove?.lastRebuildReason).not.toBe('detail')
   })
@@ -80,5 +97,6 @@ test.describe('terrain lod stabilization', () => {
     expect(info?.centerMode).toBe('camera')
     expect(info?.rings).toBe(72)
     expect(info?.segments).toBe(192)
+    expect(info?.wireframeEnabled).toBe(false)
   })
 })

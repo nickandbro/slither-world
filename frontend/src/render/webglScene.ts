@@ -132,6 +132,7 @@ export type RenderScene = {
     mountainOutline?: boolean
     lakeCollider?: boolean
     treeCollider?: boolean
+    terrainTessellation?: boolean
   }) => void
   dispose: () => void
 }
@@ -167,8 +168,9 @@ const LAKE_MIN_ANGLE = 0.9 / PLANET_SCALE
 const LAKE_MAX_ANGLE = 1.3 / PLANET_SCALE
 const LAKE_MIN_DEPTH = BASE_PLANET_RADIUS * 0.1
 const LAKE_MAX_DEPTH = BASE_PLANET_RADIUS * 0.17
-const LAKE_EDGE_FALLOFF = 0.08
-const LAKE_EDGE_SHARPNESS = 1.8
+// Wider and softer shoreline transition to reduce visible faceting pop at patch updates.
+const LAKE_EDGE_FALLOFF = 0.08 * 2.5
+const LAKE_EDGE_SHARPNESS = 1.8 / 2.4
 const LAKE_NOISE_AMPLITUDE = 0.55
 const LAKE_NOISE_FREQ_MIN = 3
 const LAKE_NOISE_FREQ_MAX = 6
@@ -194,11 +196,11 @@ const OXYGEN_DAMAGE_COLOR = new THREE.Color('#ff2d2d')
 const OXYGEN_DAMAGE_EMISSIVE = new THREE.Color('#ff0000')
 const LAKE_WATER_OVERDRAW = BASE_PLANET_RADIUS * 0.01
 const LAKE_TERRAIN_CLAMP_EPS = BASE_PLANET_RADIUS * 0.0012
-const LAKE_VISUAL_DEPTH_MULT = 2.56
+const LAKE_VISUAL_DEPTH_MULT = 1.75
 const LAKE_SHORE_DROP_BLEND_START = 0.05
-const LAKE_SHORE_DROP_BLEND_END = 0.62
-const LAKE_SHORE_DROP_EXP = 0.72
-const LAKE_SHORE_DROP_EXTRA_MAX = BASE_PLANET_RADIUS * 0.11
+const LAKE_SHORE_DROP_BLEND_END = 0.85
+const LAKE_SHORE_DROP_EXP = 1.2
+const LAKE_SHORE_DROP_EXTRA_MAX = BASE_PLANET_RADIUS * 0.045
 const LAKE_WATER_OPACITY = 0.65
 const LAKE_WATER_WAVE_SPEED = 0.65
 const LAKE_WATER_WAVE_SCALE = 22
@@ -1215,6 +1217,7 @@ const createScene = async (
   let treeDebugGroup: THREE.Group | null = null
   let treeDebugMaterial: THREE.LineBasicMaterial | null = null
   let treeDebugEnabled = false
+  let terrainTessellationDebugEnabled = false
 
   const environmentGroup = new THREE.Group()
   world.add(environmentGroup)
@@ -1337,6 +1340,7 @@ const createScene = async (
           rebuildCount: number
           lastRebuildReason: TerrainLodRebuildReason
           centerMode: TerrainLodCenterMode
+          wireframeEnabled: boolean
         }
       }
     | null = null
@@ -1361,6 +1365,7 @@ const createScene = async (
           rebuildCount: number
           lastRebuildReason: TerrainLodRebuildReason
           centerMode: TerrainLodCenterMode
+          wireframeEnabled: boolean
         }
       }
     }
@@ -1392,6 +1397,7 @@ const createScene = async (
         rebuildCount: planetPatchRebuildCount,
         lastRebuildReason: planetPatchLastRebuildReason,
         centerMode: PLANET_PATCH_CENTER_MODE,
+        wireframeEnabled: terrainTessellationDebugEnabled,
       }),
     }
     debugWindow.__SNAKE_DEBUG__ = debugApi
@@ -1931,6 +1937,7 @@ const createScene = async (
       roughness: 0.9,
       metalness: 0.05,
       side: PLANET_PATCH_LOD_ENABLED ? THREE.DoubleSide : THREE.FrontSide,
+      wireframe: terrainTessellationDebugEnabled,
     })
     if (PLANET_PATCH_LOD_ENABLED) {
       planetMesh = new THREE.Mesh(new THREE.BufferGeometry(), planetMaterial)
@@ -3947,6 +3954,7 @@ const createScene = async (
     mountainOutline?: boolean
     lakeCollider?: boolean
     treeCollider?: boolean
+    terrainTessellation?: boolean
   }) => {
     if (typeof flags.mountainOutline === 'boolean') {
       mountainDebugEnabled = flags.mountainOutline
@@ -3964,6 +3972,13 @@ const createScene = async (
       treeDebugEnabled = flags.treeCollider
       if (treeDebugGroup) {
         treeDebugGroup.visible = treeDebugEnabled
+      }
+    }
+    if (typeof flags.terrainTessellation === 'boolean') {
+      terrainTessellationDebugEnabled = flags.terrainTessellation
+      if (planetMesh?.material instanceof THREE.MeshStandardMaterial) {
+        planetMesh.material.wireframe = terrainTessellationDebugEnabled
+        planetMesh.material.needsUpdate = true
       }
     }
   }

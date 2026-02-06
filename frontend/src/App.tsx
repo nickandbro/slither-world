@@ -39,6 +39,7 @@ const MAX_EXTRAPOLATION_MS = 70
 const MOUNTAIN_DEBUG_KEY = 'spherical_snake_mountain_debug'
 const LAKE_DEBUG_KEY = 'spherical_snake_lake_debug'
 const TREE_DEBUG_KEY = 'spherical_snake_tree_debug'
+const TERRAIN_TESSELLATION_DEBUG_KEY = 'spherical_snake_terrain_tessellation_debug'
 const DEBUG_UI_ENABLED = import.meta.env.DEV || import.meta.env.VITE_E2E_DEBUG === '1'
 const getMountainDebug = () => {
   if (typeof window === 'undefined') return false
@@ -60,6 +61,14 @@ const getTreeDebug = () => {
   if (typeof window === 'undefined') return false
   try {
     return window.localStorage.getItem(TREE_DEBUG_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+const getTerrainTessellationDebug = () => {
+  if (typeof window === 'undefined') return false
+  try {
+    return window.localStorage.getItem(TERRAIN_TESSELLATION_DEBUG_KEY) === '1'
   } catch {
     return false
   }
@@ -145,11 +154,15 @@ export default function App() {
   const [mountainDebug, setMountainDebug] = useState(getMountainDebug)
   const [lakeDebug, setLakeDebug] = useState(getLakeDebug)
   const [treeDebug, setTreeDebug] = useState(getTreeDebug)
+  const [terrainTessellationDebug, setTerrainTessellationDebug] = useState(
+    getTerrainTessellationDebug,
+  )
   const environmentRef = useRef<Environment | null>(environment)
   const debugFlagsRef = useRef({
     mountainOutline: mountainDebug,
     lakeCollider: lakeDebug,
     treeCollider: treeDebug,
+    terrainTessellation: terrainTessellationDebug,
   })
   const playerIdRef = useRef<string | null>(playerId)
   const playerNameRef = useRef(playerName)
@@ -236,6 +249,10 @@ export default function App() {
       window.localStorage.setItem(MOUNTAIN_DEBUG_KEY, mountainDebug ? '1' : '0')
       window.localStorage.setItem(LAKE_DEBUG_KEY, lakeDebug ? '1' : '0')
       window.localStorage.setItem(TREE_DEBUG_KEY, treeDebug ? '1' : '0')
+      window.localStorage.setItem(
+        TERRAIN_TESSELLATION_DEBUG_KEY,
+        terrainTessellationDebug ? '1' : '0',
+      )
     } catch {
       // ignore persistence errors
     }
@@ -243,10 +260,11 @@ export default function App() {
       mountainOutline: mountainDebug,
       lakeCollider: lakeDebug,
       treeCollider: treeDebug,
+      terrainTessellation: terrainTessellationDebug,
     }
     const webgl = webglRef.current
     webgl?.setDebugFlags?.(debugFlagsRef.current)
-  }, [mountainDebug, lakeDebug, treeDebug])
+  }, [mountainDebug, lakeDebug, treeDebug, terrainTessellationDebug])
 
   useEffect(() => {
     if (score > bestScore) {
@@ -788,6 +806,14 @@ export default function App() {
                     onChange={(event) => setTreeDebug(event.target.checked)}
                   />
                   Tree colliders
+                </label>
+                <label className='debug-option'>
+                  <input
+                    type='checkbox'
+                    checked={terrainTessellationDebug}
+                    onChange={(event) => setTerrainTessellationDebug(event.target.checked)}
+                  />
+                  Terrain tessellation
                 </label>
               </div>
             </div>
