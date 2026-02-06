@@ -4068,6 +4068,7 @@ const createScene = async (
     tubeGeometry: THREE.TubeGeometry,
     digestions: DigestionVisual[],
     headStartOffset: number,
+    bulgeScale: number,
   ) => {
     if (!digestions.length) return 0
     const params = tubeGeometry.parameters as { radialSegments?: number; tubularSegments?: number }
@@ -4090,7 +4091,8 @@ const createScene = async (
       const strength = clamp(digestion.strength, 0, 1)
       if (strength <= 0) continue
       const influenceRadius = THREE.MathUtils.lerp(DIGESTION_WIDTH_MIN, DIGESTION_WIDTH_MAX, strength)
-      const bulgeStrength = THREE.MathUtils.lerp(DIGESTION_BULGE_MIN, DIGESTION_BULGE_MAX, strength)
+      const bulgeStrength =
+        THREE.MathUtils.lerp(DIGESTION_BULGE_MIN, DIGESTION_BULGE_MAX, strength) * bulgeScale
       const t = clamp(digestion.t, 0, 1)
       const mapped = startOffset + t * Math.max(0, 1 - startOffset - endOffset)
       const center = mapped * (ringCount - 1)
@@ -4124,7 +4126,7 @@ const createScene = async (
         DIGESTION_MAX_BULGE_MIN,
         DIGESTION_MAX_BULGE_MAX,
         edgeClamp,
-      )
+      ) * bulgeScale
       const rawBulge = Math.max(0, bulgeByRing[ring])
       if (rawBulge <= 0) {
         bulgeByRing[ring] = 0
@@ -4752,6 +4754,7 @@ const createScene = async (
     }
     tailGrowthStates.set(player.id, smoothedTailGrowth)
     const girthScale = clamp(player.girthScale, SNAKE_GIRTH_SCALE_MIN, SNAKE_GIRTH_SCALE_MAX)
+    const digestionBulgeScale = 1 / Math.max(SNAKE_GIRTH_SCALE_MIN, girthScale)
     const bodyScale = girthScale * (isLocal ? 1.1 : 1)
     const radius = SNAKE_RADIUS * bodyScale
     const radiusOffset = radius * SNAKE_LIFT_FACTOR
@@ -5043,6 +5046,7 @@ const createScene = async (
           tubeGeometry,
           digestionState.visuals,
           digestionStartOffset,
+          digestionBulgeScale,
         )
       }
       if (debugEnabled) {
