@@ -2089,7 +2089,7 @@ const createScene = async (
         if (!lake || !mesh) continue
         const centerPoint = tempVectorH
           .copy(lake.center)
-          .multiplyScalar(PLANET_RADIUS - lake.surfaceInset)
+          .multiplyScalar(PLANET_RADIUS + LAKE_WATER_OVERDRAW)
         const inView = isAngularVisible(
           lake.center.dot(cameraLocalDir),
           viewAngle,
@@ -2111,7 +2111,7 @@ const createScene = async (
     for (const lake of lakes) {
       const centerPoint = tempVectorH
         .copy(lake.center)
-        .multiplyScalar(PLANET_RADIUS - lake.surfaceInset)
+        .multiplyScalar(PLANET_RADIUS + LAKE_WATER_OVERDRAW)
       const visibleNow =
         isAngularVisible(
           lake.center.dot(cameraLocalDir),
@@ -2283,6 +2283,45 @@ const createScene = async (
       applyLakeDepressions(planetGeometry, lakes)
       planetPatchMaterial = planetMaterial
       buildPlanetPatchAtlas(planetGeometry, planetMaterial)
+
+      const rawShorelineGeometry = new THREE.WireframeGeometry(planetGeometry)
+      const shorelineOnlyGeometry = createShorelineGeometry(rawShorelineGeometry, lakes)
+      rawShorelineGeometry.dispose()
+      if ((shorelineOnlyGeometry.attributes.position?.count ?? 0) > 0) {
+        const shorelineLineMaterial = new THREE.LineBasicMaterial({
+          color: GRID_LINE_COLOR,
+          transparent: true,
+          opacity: SHORELINE_LINE_OPACITY,
+        })
+        shorelineLineMaterial.depthWrite = false
+        shorelineLineMesh = new THREE.LineSegments(shorelineOnlyGeometry, shorelineLineMaterial)
+        shorelineLineMesh.scale.setScalar(1.002)
+        world.add(shorelineLineMesh)
+      } else {
+        shorelineOnlyGeometry.dispose()
+      }
+
+      const shorelineFillGeometry = createShorelineFillGeometry(planetGeometry, lakes)
+      if ((shorelineFillGeometry.attributes.position?.count ?? 0) > 0) {
+        const shorelineFillMaterial = new THREE.MeshStandardMaterial({
+          color: SHORE_SAND_COLOR,
+          roughness: 0.92,
+          metalness: 0.05,
+          transparent: true,
+        })
+        shorelineFillMaterial.depthWrite = false
+        shorelineFillMaterial.depthTest = true
+        shorelineFillMaterial.polygonOffset = true
+        shorelineFillMaterial.polygonOffsetFactor = -1
+        shorelineFillMaterial.polygonOffsetUnits = -1
+        shorelineFillMesh = new THREE.Mesh(shorelineFillGeometry, shorelineFillMaterial)
+        shorelineFillMesh.renderOrder = 1
+        shorelineFillMesh.scale.setScalar(1.001)
+        world.add(shorelineFillMesh)
+      } else {
+        shorelineFillGeometry.dispose()
+      }
+
       planetGeometry.dispose()
       basePlanetGeometry.dispose()
     } else {
