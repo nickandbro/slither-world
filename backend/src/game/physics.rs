@@ -1,4 +1,4 @@
-use super::environment::{Environment, PLANET_RADIUS, SNAKE_RADIUS, TREE_TRUNK_RADIUS};
+use super::environment::{Environment, PLANET_RADIUS, TREE_TRUNK_RADIUS};
 use super::math::{clamp, cross, dot, length, normalize};
 use super::snake::{apply_snake_rotation_step, rotate_snake_around_axis};
 use super::types::{Point, SnakeNode};
@@ -6,11 +6,11 @@ use std::f64::consts::PI;
 
 const CONTACT_ITERATIONS: usize = 4;
 const STICK_THRESHOLD: f64 = 0.01;
-const SNAKE_ANGULAR_RADIUS: f64 = SNAKE_RADIUS / PLANET_RADIUS;
 
 pub fn apply_snake_with_collisions(
     snake: &mut Vec<SnakeNode>,
     axis: &mut Point,
+    snake_angular_radius: f64,
     step_velocity: f64,
     steps: i32,
     env: &Environment,
@@ -26,7 +26,8 @@ pub fn apply_snake_with_collisions(
             y: snake[0].y,
             z: snake[0].z,
         };
-        let (corrected_head, corrected_axis) = resolve_head_collisions(raw_head, *axis, env);
+        let (corrected_head, corrected_axis) =
+            resolve_head_collisions(raw_head, *axis, snake_angular_radius, env);
         let dot_value = clamp(
             dot(normalize(raw_head), normalize(corrected_head)),
             -1.0,
@@ -44,7 +45,12 @@ pub fn apply_snake_with_collisions(
     }
 }
 
-fn resolve_head_collisions(head: Point, axis: Point, env: &Environment) -> (Point, Point) {
+fn resolve_head_collisions(
+    head: Point,
+    axis: Point,
+    snake_angular_radius: f64,
+    env: &Environment,
+) -> (Point, Point) {
     let mut head = normalize(head);
     let mut tangent = cross(axis, head);
     if length(tangent) > 1e-6 {
@@ -59,7 +65,8 @@ fn resolve_head_collisions(head: Point, axis: Point, env: &Environment) -> (Poin
                 continue;
             }
             let tree_radius = (TREE_TRUNK_RADIUS * tree.width_scale) / PLANET_RADIUS;
-            if let Some((new_head, normal)) = resolve_circle_contact(head, tree.normal, tree_radius)
+            if let Some((new_head, normal)) =
+                resolve_circle_contact(head, tree.normal, tree_radius, snake_angular_radius)
             {
                 head = new_head;
                 tangent = project_tangent(tangent, normal);
@@ -68,7 +75,9 @@ fn resolve_head_collisions(head: Point, axis: Point, env: &Environment) -> (Poin
         }
 
         for mountain in &env.mountains {
-            if let Some((new_head, normal)) = resolve_mountain_contact(head, mountain) {
+            if let Some((new_head, normal)) =
+                resolve_mountain_contact(head, mountain, snake_angular_radius)
+            {
                 head = new_head;
                 tangent = project_tangent(tangent, normal);
                 any_contact = true;
@@ -89,10 +98,15 @@ fn resolve_head_collisions(head: Point, axis: Point, env: &Environment) -> (Poin
     (head, axis_out)
 }
 
-fn resolve_circle_contact(head: Point, center: Point, radius: f64) -> Option<(Point, Point)> {
+fn resolve_circle_contact(
+    head: Point,
+    center: Point,
+    radius: f64,
+    snake_angular_radius: f64,
+) -> Option<(Point, Point)> {
     let dot_value = clamp(dot(head, center), -1.0, 1.0);
     let angle = dot_value.acos();
-    let target_angle = radius + SNAKE_ANGULAR_RADIUS;
+    let target_angle = radius + snake_angular_radius;
     if !angle.is_finite() || angle >= target_angle {
         return None;
     }
@@ -116,6 +130,7 @@ fn resolve_circle_contact(head: Point, center: Point, radius: f64) -> Option<(Po
 fn resolve_mountain_contact(
     head: Point,
     mountain: &super::environment::MountainInstance,
+    snake_angular_radius: f64,
 ) -> Option<(Point, Point)> {
     let dot_value = clamp(dot(head, mountain.normal), -1.0, 1.0);
     let angle = dot_value.acos();
@@ -140,7 +155,7 @@ fn resolve_mountain_contact(
         theta += PI * 2.0;
     }
     let outline_radius = sample_outline_radius(&mountain.outline, theta);
-    let target_angle = outline_radius + SNAKE_ANGULAR_RADIUS;
+    let target_angle = outline_radius + snake_angular_radius;
     if angle >= target_angle {
         return None;
     }

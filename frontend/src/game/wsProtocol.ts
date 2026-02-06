@@ -12,7 +12,7 @@ export type PlayerMeta = {
   color: string
 }
 
-const VERSION = 6
+const VERSION = 7
 
 const TYPE_JOIN = 0x01
 const TYPE_INPUT = 0x02
@@ -231,6 +231,7 @@ function readPlayerStates(reader: Reader, meta: Map<string, PlayerMeta>): Player
     const score = reader.readI32()
     const stamina = reader.readF32()
     const oxygen = reader.readF32()
+    const girthScale = reader.readF32()
     const snakeDetailRaw = reader.readU8()
     const snakeTotalLen = reader.readU16()
     if (
@@ -239,6 +240,7 @@ function readPlayerStates(reader: Reader, meta: Map<string, PlayerMeta>): Player
       score === null ||
       stamina === null ||
       oxygen === null ||
+      girthScale === null ||
       snakeDetailRaw === null ||
       snakeTotalLen === null
     ) {
@@ -295,6 +297,7 @@ function readPlayerStates(reader: Reader, meta: Map<string, PlayerMeta>): Player
       score,
       stamina,
       oxygen,
+      girthScale,
       alive: aliveRaw === 1,
       snakeDetail,
       snakeStart,

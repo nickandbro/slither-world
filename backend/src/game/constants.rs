@@ -52,6 +52,9 @@ pub const DIGESTION_GROWTH_STEPS: i64 = NODE_QUEUE_SIZE as i64;
 pub const BOT_COUNT: usize = 5;
 pub const BOT_BOOST_DISTANCE: f64 = 0.6 / WORLD_SCALE;
 pub const BOT_MIN_STAMINA_TO_BOOST: f64 = 0.6;
+pub const SNAKE_GIRTH_NODES_PER_STEP: usize = 10;
+pub const SNAKE_GIRTH_STEP_PERCENT: f64 = 0.10;
+pub const SNAKE_GIRTH_MAX_SCALE: f64 = 2.0;
 
 pub const COLOR_POOL: [&str; 8] = [
     "#ff6b6b", "#ffd166", "#06d6a0", "#4dabf7", "#f06595", "#845ef7", "#20c997", "#fcc419",

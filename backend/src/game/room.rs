@@ -10,9 +10,10 @@ use super::constants::{
     SMALL_PELLET_SHRINK_MIN_RATIO, SMALL_PELLET_SIZE_MAX, SMALL_PELLET_SIZE_MIN,
     SMALL_PELLET_SPAWN_HEAD_EXCLUSION_ANGLE, SMALL_PELLET_VIEW_MARGIN_MAX,
     SMALL_PELLET_VIEW_MARGIN_MIN, SMALL_PELLET_VISIBLE_MAX, SMALL_PELLET_VISIBLE_MIN,
-    SMALL_PELLET_ZOOM_MAX_CAMERA_DISTANCE, SMALL_PELLET_ZOOM_MIN_CAMERA_DISTANCE, SPAWN_CONE_ANGLE,
+    SMALL_PELLET_ZOOM_MAX_CAMERA_DISTANCE, SMALL_PELLET_ZOOM_MIN_CAMERA_DISTANCE,
+    SNAKE_GIRTH_MAX_SCALE, SNAKE_GIRTH_NODES_PER_STEP, SNAKE_GIRTH_STEP_PERCENT, SPAWN_CONE_ANGLE,
     SPAWN_PLAYER_MIN_DISTANCE, STAMINA_DRAIN_PER_SEC, STAMINA_MAX, STAMINA_RECHARGE_PER_SEC,
-    TICK_MS, TURN_RATE,
+    STARTING_LENGTH, TICK_MS, TURN_RATE,
 };
 use super::digestion::{add_digestion_with_strength, advance_digestions, get_digestion_progress};
 use super::environment::{
@@ -21,7 +22,8 @@ use super::environment::{
 };
 use super::input::parse_axis;
 use super::math::{
-    clamp, collision, cross, dot, length, normalize, point_from_spherical, random_axis,
+    base_collision_angular_radius, clamp, collision_distance_for_angular_radii,
+    collision_with_angular_radii, cross, dot, length, normalize, point_from_spherical, random_axis,
     rotate_toward, rotate_y, rotate_z,
 };
 use super::physics::apply_snake_with_collisions;
@@ -141,6 +143,15 @@ struct HeadAttractor {
     head: Point,
     forward: Point,
     mouth: Point,
+}
+
+#[derive(Debug)]
+struct PlayerCollisionSnapshot {
+    id: String,
+    alive: bool,
+    snake: Vec<Point>,
+    contact_angular_radius: f64,
+    body_angular_radius: f64,
 }
 
 const SMALL_PELLET_COLOR_COUNT: u8 = 12;
@@ -836,6 +847,9 @@ impl RoomState {
         if snake.is_empty() {
             return false;
         }
+        let candidate_girth_scale = 1.0;
+        let candidate_body_angular_radius =
+            Self::snake_body_angular_radius_for_scale(candidate_girth_scale);
         let candidate_head = Point {
             x: snake[0].x,
             y: snake[0].y,
@@ -849,12 +863,19 @@ impl RoomState {
             let Some(other_head) = player.snake.first() else {
                 continue;
             };
+            let other_body_angular_radius =
+                Self::snake_body_angular_radius_for_len(player.snake.len());
+            let dynamic_min_distance = collision_distance_for_angular_radii(
+                candidate_body_angular_radius,
+                other_body_angular_radius,
+            ) * 2.0;
+            let min_head_distance = dynamic_min_distance.max(SPAWN_PLAYER_MIN_DISTANCE);
             let distance = length(Point {
                 x: candidate_head.x - other_head.x,
                 y: candidate_head.y - other_head.y,
                 z: candidate_head.z - other_head.z,
             });
-            if distance < SPAWN_PLAYER_MIN_DISTANCE {
+            if distance < min_head_distance {
                 return true;
             }
         }
@@ -872,6 +893,8 @@ impl RoomState {
             if excluded_player_id == Some(player.id.as_str()) {
                 continue;
             }
+            let other_body_angular_radius =
+                Self::snake_body_angular_radius_for_len(player.snake.len());
             for node in &player.snake {
                 let node_point = Point {
                     x: node.x,
@@ -879,7 +902,12 @@ impl RoomState {
                     z: node.z,
                 };
                 for candidate in &candidate_points {
-                    if collision(*candidate, node_point) {
+                    if collision_with_angular_radii(
+                        *candidate,
+                        node_point,
+                        candidate_body_angular_radius,
+                        other_body_angular_radius,
+                    ) {
                         return true;
                     }
                 }
@@ -1316,6 +1344,32 @@ impl RoomState {
         self.consume_small_pellets(consumed_by);
     }
 
+    fn player_girth_scale_from_len(snake_len: usize) -> f64 {
+        let step_nodes = SNAKE_GIRTH_NODES_PER_STEP.max(1);
+        let added_nodes = snake_len.saturating_sub(STARTING_LENGTH);
+        let growth_per_node = SNAKE_GIRTH_STEP_PERCENT / step_nodes as f64;
+        let uncapped = 1.0 + (added_nodes as f64) * growth_per_node;
+        clamp(uncapped, 1.0, SNAKE_GIRTH_MAX_SCALE.max(1.0))
+    }
+
+    fn snake_contact_angular_radius_for_scale(girth_scale: f64) -> f64 {
+        (SNAKE_RADIUS / PLANET_RADIUS) * girth_scale.max(0.0)
+    }
+
+    fn snake_body_angular_radius_for_scale(girth_scale: f64) -> f64 {
+        base_collision_angular_radius() * girth_scale.max(0.0)
+    }
+
+    fn snake_contact_angular_radius_for_len(snake_len: usize) -> f64 {
+        let scale = Self::player_girth_scale_from_len(snake_len);
+        Self::snake_contact_angular_radius_for_scale(scale)
+    }
+
+    fn snake_body_angular_radius_for_len(snake_len: usize) -> f64 {
+        let scale = Self::player_girth_scale_from_len(snake_len);
+        Self::snake_body_angular_radius_for_scale(scale)
+    }
+
     fn tick(&mut self) {
         let now = Self::now_millis();
         let dt_seconds = TICK_MS as f64 / 1000.0;
@@ -1355,9 +1409,12 @@ impl RoomState {
             let speed_factor = if is_boosting { BOOST_MULTIPLIER } else { 1.0 };
             let step_count = (speed_factor.round() as i32).max(1);
             let step_velocity = (BASE_SPEED * speed_factor) / step_count as f64;
+            let snake_angular_radius =
+                Self::snake_contact_angular_radius_for_len(player.snake.len());
             apply_snake_with_collisions(
                 &mut player.snake,
                 &mut player.axis,
+                snake_angular_radius,
                 step_velocity,
                 step_count,
                 &self.environment,
@@ -1394,10 +1451,11 @@ impl RoomState {
             }
         }
 
-        let player_snapshots: Vec<(String, bool, Vec<Point>)> = self
+        let player_snapshots: Vec<PlayerCollisionSnapshot> = self
             .players
             .values()
             .map(|player| {
+                let girth_scale = Self::player_girth_scale_from_len(player.snake.len());
                 let snake_points = player
                     .snake
                     .iter()
@@ -1407,18 +1465,24 @@ impl RoomState {
                         z: node.z,
                     })
                     .collect::<Vec<_>>();
-                (player.id.clone(), player.alive, snake_points)
+                PlayerCollisionSnapshot {
+                    id: player.id.clone(),
+                    alive: player.alive,
+                    snake: snake_points,
+                    contact_angular_radius: Self::snake_contact_angular_radius_for_scale(
+                        girth_scale,
+                    ),
+                    body_angular_radius: Self::snake_body_angular_radius_for_scale(girth_scale),
+                }
             })
             .collect();
 
         let mut dead: HashSet<String> = HashSet::new();
-        let cactus_contact_margin = SNAKE_RADIUS / PLANET_RADIUS;
-
-        for (id, alive, snake) in &player_snapshots {
-            if !*alive || snake.is_empty() {
+        for snapshot in &player_snapshots {
+            if !snapshot.alive || snapshot.snake.is_empty() {
                 continue;
             }
-            let head = snake[0];
+            let head = snapshot.snake[0];
             for cactus in &self.environment.trees {
                 if cactus.width_scale >= 0.0 {
                     continue;
@@ -1429,43 +1493,57 @@ impl RoomState {
                 if !angle.is_finite() {
                     continue;
                 }
-                if angle < cactus_radius + cactus_contact_margin {
-                    dead.insert(id.clone());
+                if angle < cactus_radius + snapshot.contact_angular_radius {
+                    dead.insert(snapshot.id.clone());
                     death_reasons
-                        .entry(id.clone())
+                        .entry(snapshot.id.clone())
                         .or_insert("cactus_collision");
                     break;
                 }
             }
         }
 
-        for (id, alive, snake) in &player_snapshots {
-            if dead.contains(id) || !*alive || snake.len() < 3 {
+        for snapshot in &player_snapshots {
+            if dead.contains(&snapshot.id) || !snapshot.alive || snapshot.snake.len() < 3 {
                 continue;
             }
-            let head = snake[0];
-            for node in snake.iter().skip(2) {
-                if collision(head, *node) {
-                    dead.insert(id.clone());
-                    death_reasons.entry(id.clone()).or_insert("self_collision");
+            let head = snapshot.snake[0];
+            for node in snapshot.snake.iter().skip(2) {
+                if collision_with_angular_radii(
+                    head,
+                    *node,
+                    snapshot.body_angular_radius,
+                    snapshot.body_angular_radius,
+                ) {
+                    dead.insert(snapshot.id.clone());
+                    death_reasons
+                        .entry(snapshot.id.clone())
+                        .or_insert("self_collision");
                     break;
                 }
             }
-            if dead.contains(id) {
+            if dead.contains(&snapshot.id) {
                 continue;
             }
-            for (other_id, other_alive, other_snake) in &player_snapshots {
-                if !*other_alive || other_id == id {
+            for other_snapshot in &player_snapshots {
+                if !other_snapshot.alive || other_snapshot.id == snapshot.id {
                     continue;
                 }
-                for node in other_snake {
-                    if collision(head, *node) {
-                        dead.insert(id.clone());
-                        death_reasons.entry(id.clone()).or_insert("snake_collision");
+                for node in &other_snapshot.snake {
+                    if collision_with_angular_radii(
+                        head,
+                        *node,
+                        snapshot.body_angular_radius,
+                        other_snapshot.body_angular_radius,
+                    ) {
+                        dead.insert(snapshot.id.clone());
+                        death_reasons
+                            .entry(snapshot.id.clone())
+                            .or_insert("snake_collision");
                         break;
                     }
                 }
-                if dead.contains(id) {
+                if dead.contains(&snapshot.id) {
                     break;
                 }
             }
@@ -1598,7 +1676,7 @@ impl RoomState {
         for visible in visible_players.iter().take(visible_player_count) {
             let player = visible.player;
             let window = visible.window;
-            capacity += 16 + 1 + 4 + 4 + 4 + 1 + 2;
+            capacity += 16 + 1 + 4 + 4 + 4 + 4 + 1 + 2;
             match window.detail {
                 SnakeDetail::Full => {
                     capacity += 2 + window.len * 12;
@@ -1653,7 +1731,7 @@ impl RoomState {
         for visible in visible_players.iter().take(visible_player_count) {
             let player = visible.player;
             let window = visible.window;
-            capacity += 16 + 1 + 4 + 4 + 4 + 1 + 2;
+            capacity += 16 + 1 + 4 + 4 + 4 + 4 + 1 + 2;
             match window.detail {
                 SnakeDetail::Full => {
                     capacity += 2 + window.len * 12;
@@ -1769,6 +1847,8 @@ impl RoomState {
         encoder.write_i32(player.score as i32);
         encoder.write_f32(player.stamina as f32);
         encoder.write_f32(player.oxygen as f32);
+        let girth_scale = Self::player_girth_scale_from_len(player.snake.len());
+        encoder.write_f32(girth_scale as f32);
         let detail = match window.detail {
             SnakeDetail::Full => protocol::SNAKE_DETAIL_FULL,
             SnakeDetail::Window => protocol::SNAKE_DETAIL_WINDOW,
@@ -1953,6 +2033,7 @@ mod tests {
         *offset += 4; // score
         *offset += 4; // stamina
         *offset += 4; // oxygen
+        *offset += 4; // girth scale
         let detail = read_u8(bytes, offset);
         let total_len = read_u16(bytes, offset);
         let snake_len = match detail {
@@ -2015,6 +2096,17 @@ mod tests {
         }
         assert!(offset <= payload.len());
         (total_players, visible_players)
+    }
+
+    #[test]
+    fn girth_scale_grows_per_node_and_caps() {
+        assert!((RoomState::player_girth_scale_from_len(STARTING_LENGTH) - 1.0).abs() < 1e-9);
+        assert!((RoomState::player_girth_scale_from_len(STARTING_LENGTH + 1) - 1.01).abs() < 1e-9);
+        assert!((RoomState::player_girth_scale_from_len(STARTING_LENGTH + 9) - 1.09).abs() < 1e-9);
+        assert!((RoomState::player_girth_scale_from_len(STARTING_LENGTH + 10) - 1.1).abs() < 1e-9);
+        assert!((RoomState::player_girth_scale_from_len(STARTING_LENGTH + 15) - 1.15).abs() < 1e-9);
+        assert!((RoomState::player_girth_scale_from_len(STARTING_LENGTH + 20) - 1.2).abs() < 1e-9);
+        assert!((RoomState::player_girth_scale_from_len(STARTING_LENGTH + 500) - 2.0).abs() < 1e-9);
     }
 
     fn insert_session_with_view(
@@ -2295,6 +2387,10 @@ mod tests {
         let payload = encoder.into_vec();
 
         let mut offset = 16 + 1 + 4 + 4 + 4;
+        let encoded_girth_scale =
+            f32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
+        assert!((encoded_girth_scale - 1.0).abs() < 1e-6);
+        offset += 4;
         let detail = payload[offset];
         assert_eq!(detail, protocol::SNAKE_DETAIL_FULL);
         offset += 1;

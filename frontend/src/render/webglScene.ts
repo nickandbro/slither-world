@@ -334,6 +334,8 @@ const GRID_LINE_OPACITY = 0.16
 const SHORELINE_LINE_OPACITY = 0.24
 const SHORE_SAND_COLOR = '#d8c48a'
 const SNAKE_RADIUS = 0.045
+const SNAKE_GIRTH_SCALE_MIN = 1
+const SNAKE_GIRTH_SCALE_MAX = 2
 const HEAD_RADIUS = SNAKE_RADIUS * 1.35
 const SNAKE_LIFT_FACTOR = 0.85
 const SNAKE_UNDERWATER_CLEARANCE = SNAKE_RADIUS * 0.18
@@ -4393,6 +4395,7 @@ const createScene = async (
     headPosition: THREE.Vector3,
     headNormal: THREE.Vector3,
     forward: THREE.Vector3,
+    headScale: number,
     pellets: PelletSnapshot[] | null,
     deltaSeconds: number,
   ): PelletOverride | null => {
@@ -4410,8 +4413,15 @@ const createScene = async (
 
     const mouthPosition = tempVectorD
       .copy(headPosition)
-      .addScaledVector(forward, TONGUE_MOUTH_FORWARD)
-      .addScaledVector(headNormal, TONGUE_MOUTH_OUT)
+      .addScaledVector(forward, TONGUE_MOUTH_FORWARD * headScale)
+      .addScaledVector(headNormal, TONGUE_MOUTH_OUT * headScale)
+    const tongueMatchDistance = TONGUE_PELLET_MATCH * headScale
+    const tongueNearRange = TONGUE_NEAR_RANGE * headScale
+    const tongueMaxRange = TONGUE_MAX_RANGE * headScale
+    const tongueMaxLength = TONGUE_MAX_LENGTH * headScale
+    const tongueGrabEps = TONGUE_GRAB_EPS * headScale
+    const tongueHideThreshold = TONGUE_HIDE_THRESHOLD * headScale
+    const tongueForkLengthMax = TONGUE_FORK_LENGTH * headScale
 
     let desiredLength = 0
     let candidatePosition: THREE.Vector3 | null = null
@@ -4441,7 +4451,7 @@ const createScene = async (
             bestPosition = tempVectorE.clone()
           }
         }
-        const matchThresholdSq = TONGUE_PELLET_MATCH * TONGUE_PELLET_MATCH
+        const matchThresholdSq = tongueMatchDistance * tongueMatchDistance
         if (bestPelletId !== null && bestPosition && bestDistanceSq <= matchThresholdSq) {
           matchedPelletId = bestPelletId
           matchedPosition = bestPosition
@@ -4465,10 +4475,10 @@ const createScene = async (
           tempVectorG.multiplyScalar(1 / tangentLen)
         }
         const angle = tangentLen > 1e-6 ? Math.acos(clamp(forward.dot(tempVectorG), -1, 1)) : Math.PI
-        if (distance <= TONGUE_NEAR_RANGE && angle <= TONGUE_ANGLE_LIMIT) {
+        if (distance <= tongueNearRange && angle <= TONGUE_ANGLE_LIMIT) {
           candidatePosition = state.targetPosition
           candidateDistance = distance
-          desiredLength = Math.min(distance, TONGUE_MAX_LENGTH)
+          desiredLength = Math.min(distance, tongueMaxLength)
           hasCandidate = true
         } else {
           state.mode = 'retract'
@@ -4489,8 +4499,8 @@ const createScene = async (
           tempVectorG.multiplyScalar(1 / tangentLen)
           const angle = Math.acos(clamp(forward.dot(tempVectorG), -1, 1))
           if (angle > TONGUE_ANGLE_LIMIT) continue
-          if (distance > TONGUE_MAX_RANGE) continue
-          if (distance > TONGUE_NEAR_RANGE) continue
+          if (distance > tongueMaxRange) continue
+          if (distance > tongueNearRange) continue
           if (distance < candidateDistance) {
             candidateDistance = distance
             candidatePosition = tempVectorE.clone()
@@ -4499,7 +4509,7 @@ const createScene = async (
       }
 
       if (candidatePosition) {
-        desiredLength = Math.min(candidateDistance, TONGUE_MAX_LENGTH)
+        desiredLength = Math.min(candidateDistance, tongueMaxLength)
         state.targetPosition = candidatePosition
         state.mode = 'extend'
         state.carrying = false
@@ -4519,7 +4529,7 @@ const createScene = async (
       TONGUE_RETRACT_RATE,
     )
 
-    if (state.mode === 'extend' && hasCandidate && state.length >= desiredLength - TONGUE_GRAB_EPS) {
+    if (state.mode === 'extend' && hasCandidate && state.length >= desiredLength - tongueGrabEps) {
       state.mode = 'retract'
       state.carrying = matchedPelletId !== null && matchedPosition !== null
       if (!state.carrying) {
@@ -4527,7 +4537,7 @@ const createScene = async (
       }
     }
 
-    if (state.mode === 'retract' && state.length <= TONGUE_HIDE_THRESHOLD) {
+    if (state.mode === 'retract' && state.length <= tongueHideThreshold) {
       if (!state.carrying) {
         state.mode = 'idle'
         state.targetPosition = null
@@ -4560,7 +4570,7 @@ const createScene = async (
       }
     }
 
-    const isVisible = state.length > TONGUE_HIDE_THRESHOLD
+    const isVisible = state.length > tongueHideThreshold
     visual.tongue.visible = isVisible
     if (!isVisible) {
       return override
@@ -4580,10 +4590,10 @@ const createScene = async (
     visual.tongue.quaternion.copy(tempQuat)
 
     const tongueLength = Math.max(state.length, 0.001)
-    visual.tongueBase.scale.set(1, tongueLength, 1)
-    const forkLength = Math.min(TONGUE_FORK_LENGTH, tongueLength * 0.6)
-    visual.tongueForkLeft.scale.set(1, forkLength, 1)
-    visual.tongueForkRight.scale.set(1, forkLength, 1)
+    visual.tongueBase.scale.set(headScale, tongueLength, headScale)
+    const forkLength = Math.min(tongueForkLengthMax, tongueLength * 0.6)
+    visual.tongueForkLeft.scale.set(headScale, forkLength, headScale)
+    visual.tongueForkRight.scale.set(headScale, forkLength, headScale)
     visual.tongueForkLeft.position.set(0, tongueLength, 0)
     visual.tongueForkRight.position.set(0, tongueLength, 0)
 
@@ -4741,8 +4751,12 @@ const createScene = async (
       smoothedTailGrowth = Math.max(previousGrowth ?? 0, smoothedTailGrowth)
     }
     tailGrowthStates.set(player.id, smoothedTailGrowth)
-    const radius = isLocal ? SNAKE_RADIUS * 1.1 : SNAKE_RADIUS
+    const girthScale = clamp(player.girthScale, SNAKE_GIRTH_SCALE_MIN, SNAKE_GIRTH_SCALE_MAX)
+    const bodyScale = girthScale * (isLocal ? 1.1 : 1)
+    const radius = SNAKE_RADIUS * bodyScale
     const radiusOffset = radius * SNAKE_LIFT_FACTOR
+    const headScale = radius / SNAKE_RADIUS
+    const headRadius = HEAD_RADIUS * headScale
     let headCurvePoint: THREE.Vector3 | null = null
     let secondCurvePoint: THREE.Vector3 | null = null
     let tailCurveTail: THREE.Vector3 | null = null
@@ -5164,12 +5178,14 @@ const createScene = async (
       headNormal,
       snakeContactTangentTemp,
       headCenterlineRadius,
-      HEAD_RADIUS,
+      headRadius,
       groundingInfo,
     )
     const headPosition = headNormal
       .clone()
       .multiplyScalar(headCenterlineRadius + headLift)
+    visual.head.scale.setScalar(headScale)
+    visual.bowl.scale.setScalar(headScale)
     visual.head.position.copy(headPosition)
     visual.bowl.position.copy(headPosition)
 
@@ -5254,9 +5270,14 @@ const createScene = async (
     }
     right.normalize()
 
-    const eyeOut = HEAD_RADIUS * 0.16
-    const eyeForward = HEAD_RADIUS * 0.28
-    const eyeSpacing = HEAD_RADIUS * 0.52
+    visual.eyeLeft.scale.setScalar(headScale)
+    visual.eyeRight.scale.setScalar(headScale)
+    visual.pupilLeft.scale.setScalar(headScale)
+    visual.pupilRight.scale.setScalar(headScale)
+
+    const eyeOut = headRadius * 0.16
+    const eyeForward = headRadius * 0.28
+    const eyeSpacing = headRadius * 0.52
 
     const leftEyePosition = headPosition
       .clone()
@@ -5273,7 +5294,7 @@ const createScene = async (
     visual.eyeRight.position.copy(rightEyePosition)
 
     const clampedYaw = 0
-    const pupilSurfaceDistance = PUPIL_OFFSET
+    const pupilSurfaceDistance = PUPIL_OFFSET * headScale
 
     const updatePupil = (eyePosition: THREE.Vector3, eyeNormal: THREE.Vector3, output: THREE.Vector3) => {
       tempVectorH.copy(right)
@@ -5298,7 +5319,16 @@ const createScene = async (
     updatePupil(rightEyePosition, tempVectorG, visual.pupilRight.position)
 
     if (isLocal) {
-      tongueOverride = updateTongue(player.id, visual, headPosition, headNormal, forward, pellets, deltaSeconds)
+      tongueOverride = updateTongue(
+        player.id,
+        visual,
+        headPosition,
+        headNormal,
+        forward,
+        headScale,
+        pellets,
+        deltaSeconds,
+      )
     } else {
       visual.tongue.visible = false
       tongueStates.delete(player.id)
@@ -5639,8 +5669,14 @@ const createScene = async (
       const localPlayer = snapshot.players.find((player) => player.id === localPlayerId)
       const head = localPlayer?.snakeDetail !== 'stub' ? localPlayer?.snake[0] : undefined
       if (head) {
-        const radius = SNAKE_RADIUS * 1.1
+        const girthScale = clamp(
+          localPlayer?.girthScale ?? 1,
+          SNAKE_GIRTH_SCALE_MIN,
+          SNAKE_GIRTH_SCALE_MAX,
+        )
+        const radius = SNAKE_RADIUS * girthScale * 1.1
         const radiusOffset = radius * SNAKE_LIFT_FACTOR
+        const headRadius = HEAD_RADIUS * (radius / SNAKE_RADIUS)
         const headNormal = tempVectorC.set(head.x, head.y, head.z).normalize()
         snakeContactTangentTemp.set(0, 0, 0)
         if (localPlayer && localPlayer.snake.length > 1) {
@@ -5668,7 +5704,7 @@ const createScene = async (
           headNormal,
           snakeContactTangentTemp,
           headCenterlineRadius,
-          HEAD_RADIUS,
+          headRadius,
           null,
         )
         const headPosition = headNormal
