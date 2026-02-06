@@ -1328,6 +1328,13 @@ impl RoomState {
 
                 pellet.normal = rotate_toward(pellet.normal, attractor.mouth, step);
                 let after_dot = clamp(dot(pellet.normal, attractor.mouth), -1.0, 1.0);
+                if after_dot >= consume_cos {
+                    let entry = consumed_by.entry(target_id).or_insert((0, 0.0));
+                    entry.0 += 1;
+                    entry.1 += pellet.growth_fraction;
+                    self.pellets.swap_remove(i);
+                    continue;
+                }
                 let angle = after_dot.acos();
                 let ratio = clamp(angle / SMALL_PELLET_ATTRACT_RADIUS, 0.0, 1.0) as f32;
                 let shrink =
@@ -1568,9 +1575,6 @@ impl RoomState {
             self.handle_death(&id);
         }
 
-        self.update_small_pellets(dt_seconds);
-        self.ensure_pellets();
-
         let player_ids: Vec<String> = self.players.keys().cloned().collect();
         for id in &player_ids {
             let Some(player) = self.players.get_mut(id) else {
@@ -1582,6 +1586,11 @@ impl RoomState {
             let steps = *move_steps.get(&player.id).unwrap_or(&1);
             advance_digestions(player, steps);
         }
+
+        // Advance existing digestions before applying newly swallowed pellets so new bulges
+        // always begin from the same head-relative start regardless of boost step count.
+        self.update_small_pellets(dt_seconds);
+        self.ensure_pellets();
 
         self.broadcast_state();
     }
@@ -1900,13 +1909,20 @@ impl RoomState {
             }
         }
 
-        let digestion_len = if window.include_digestions() {
-            player.digestions.len().min(u8::MAX as usize) as u8
+        let digestion_total = if window.include_digestions() {
+            player.digestions.len()
         } else {
             0
         };
+        let digestion_len = digestion_total.min(u8::MAX as usize) as u8;
+        let digestion_start = digestion_total.saturating_sub(digestion_len as usize);
         encoder.write_u8(digestion_len);
-        for digestion in player.digestions.iter().take(digestion_len as usize) {
+        for digestion in player
+            .digestions
+            .iter()
+            .skip(digestion_start)
+            .take(digestion_len as usize)
+        {
             encoder.write_u32(digestion.id);
             encoder.write_f32(get_digestion_progress(digestion) as f32);
             encoder.write_f32(digestion.strength);
@@ -2442,6 +2458,47 @@ mod tests {
     }
 
     #[test]
+    fn write_player_state_encodes_most_recent_digestions_when_capped() {
+        let state = make_state();
+        let mut player = make_player("player-recent-digest", make_snake(2, 0.0));
+        for id in 0..300u32 {
+            player.digestions.push(Digestion {
+                id,
+                remaining: 2,
+                total: 4,
+                growth_steps: 1,
+                strength: 0.4,
+                grows: true,
+            });
+        }
+
+        let mut encoder = protocol::Encoder::with_capacity(8192);
+        state.write_player_state(&mut encoder, &player);
+        let payload = encoder.into_vec();
+
+        let mut offset = 16 + 1 + 4 + 4 + 4 + 4; // id, alive, score, stamina, oxygen, girth
+        let detail = payload[offset];
+        assert_eq!(detail, protocol::SNAKE_DETAIL_FULL);
+        offset += 1;
+
+        let _encoded_total_len = u16::from_le_bytes(payload[offset..offset + 2].try_into().unwrap());
+        offset += 2;
+        let encoded_window_len = u16::from_le_bytes(payload[offset..offset + 2].try_into().unwrap());
+        offset += 2;
+        offset += encoded_window_len as usize * 12;
+
+        let digestion_len = payload[offset] as usize;
+        assert_eq!(digestion_len, u8::MAX as usize);
+        offset += 1;
+
+        let first_id = u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
+        let last_offset = offset + (digestion_len - 1) * 12;
+        let last_id = u32::from_le_bytes(payload[last_offset..last_offset + 4].try_into().unwrap());
+        assert_eq!(first_id, 45);
+        assert_eq!(last_id, 299);
+    }
+
+    #[test]
     fn small_pellet_locks_and_shrinks_toward_target_head() {
         let mut state = make_state();
         let player_id = "pellet-lock-player".to_string();
@@ -2466,7 +2523,7 @@ mod tests {
             7,
             normalize(Point {
                 x: 1.0,
-                y: 0.08,
+                y: 0.18,
                 z: 0.0,
             }),
         ));
@@ -2592,6 +2649,81 @@ mod tests {
             .digestions
             .iter()
             .any(|digestion| digestion.grows));
+    }
+
+    #[test]
+    fn small_pellet_consumes_when_head_moves_more_than_consume_angle_between_ticks() {
+        let mut state = make_state();
+        let player_id = "pellet-moving-mouth-player".to_string();
+        let head = Point {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        let trailing = normalize(Point {
+            x: 1.0,
+            y: -0.05,
+            z: 0.0,
+        });
+        state.players.insert(
+            player_id.clone(),
+            make_player(
+                &player_id,
+                vec![
+                    SnakeNode {
+                        x: head.x,
+                        y: head.y,
+                        z: head.z,
+                        pos_queue: VecDeque::new(),
+                    },
+                    SnakeNode {
+                        x: trailing.x,
+                        y: trailing.y,
+                        z: trailing.z,
+                        pos_queue: VecDeque::new(),
+                    },
+                ],
+            ),
+        );
+        let travel_target = Point {
+            x: 0.0,
+            y: 1.0,
+            z: 0.0,
+        };
+        let pellet_start = rotate_toward(head, travel_target, SMALL_PELLET_CONSUME_ANGLE * 8.0);
+        state.pellets.push(make_pellet(701, pellet_start));
+
+        let dt_seconds = TICK_MS as f64 / 1000.0;
+        let head_step = SMALL_PELLET_CONSUME_ANGLE * 1.25;
+        for _ in 0..12 {
+            state.update_small_pellets(dt_seconds);
+            if state.pellets.is_empty() {
+                break;
+            }
+            let player = state.players.get_mut(&player_id).expect("player");
+            let old_head = Point {
+                x: player.snake[0].x,
+                y: player.snake[0].y,
+                z: player.snake[0].z,
+            };
+            let next_head = rotate_toward(old_head, travel_target, head_step);
+            player.snake[1] = SnakeNode {
+                x: old_head.x,
+                y: old_head.y,
+                z: old_head.z,
+                pos_queue: VecDeque::new(),
+            };
+            player.snake[0] = SnakeNode {
+                x: next_head.x,
+                y: next_head.y,
+                z: next_head.z,
+                pos_queue: VecDeque::new(),
+            };
+        }
+
+        assert!(state.pellets.is_empty());
+        let player_after = state.players.get(&player_id).expect("player");
+        assert_eq!(player_after.digestions.len(), 1);
     }
 
     #[test]

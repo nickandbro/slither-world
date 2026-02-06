@@ -28,12 +28,15 @@ pub fn add_digestion_with_strength(player: &mut Player, strength: f32, grows: bo
 
 pub fn advance_digestions(player: &mut Player, steps: i32) {
     let step_count = steps.max(1) as i32;
+
     for _ in 0..step_count {
         let mut growth_taken = false;
 
         let mut i = 0;
         while i < player.digestions.len() {
             if !player.digestions[i].grows {
+                // Keep purely visual digestions tied to movement steps so ring travel
+                // stays in sync with boosted movement speed.
                 player.digestions[i].remaining -= 1;
                 if player.digestions[i].remaining <= 0 {
                     player.digestions.remove(i);
@@ -213,5 +216,38 @@ mod tests {
 
         let progress = get_digestion_progress(&digestion);
         assert!((progress - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn non_growing_digestion_advances_with_boost_steps() {
+        let mut player = make_player();
+        player.digestions.push(Digestion {
+            id: 1,
+            remaining: 10,
+            total: 10,
+            growth_steps: 0,
+            strength: 0.4,
+            grows: false,
+        });
+
+        advance_digestions(&mut player, 2);
+        assert_eq!(player.digestions.len(), 1);
+        assert_eq!(player.digestions[0].remaining, 8);
+    }
+
+    #[test]
+    fn non_growing_digestion_removed_when_boost_steps_exhaust_remaining() {
+        let mut player = make_player();
+        player.digestions.push(Digestion {
+            id: 1,
+            remaining: 2,
+            total: 2,
+            growth_steps: 0,
+            strength: 0.4,
+            grows: false,
+        });
+
+        advance_digestions(&mut player, 3);
+        assert!(player.digestions.is_empty());
     }
 }

@@ -97,15 +97,6 @@ type TailDebugState = {
   lastDirAngleBucket: number
 }
 
-type SnakeDigestionDebug = {
-  snapshotCount: number
-  maxSnapshotStrength: number
-  maxSnapshotProgress: number
-  visualCount: number
-  maxVisualStrength: number
-  maxAppliedBulge: number
-}
-
 type DeathState = {
   start: number
 }
@@ -394,13 +385,16 @@ const TAIL_CAP_SEGMENTS = 5
 const TAIL_DIR_MIN_RATIO = 0.35
 const DIGESTION_BULGE_MIN = 0.22
 const DIGESTION_BULGE_MAX = 0.54
+const DIGESTION_BULGE_GIRTH_MIN_SCALE = 0.25
+const DIGESTION_BULGE_GIRTH_CURVE = 2.6
+const DIGESTION_BULGE_RADIUS_CURVE = 1.4
 const DIGESTION_WIDTH_MIN = 1.6
 const DIGESTION_WIDTH_MAX = 2.9
 const DIGESTION_MAX_BULGE_MIN = 0.55
 const DIGESTION_MAX_BULGE_MAX = 0.82
-const DIGESTION_START_RINGS = 0
-const DIGESTION_START_MAX = 0
+const DIGESTION_START_NODE_INDEX = 1
 const DIGESTION_TRAVEL_EASE = 1
+const DIGESTION_GROWTH_TAIL_OFFSET = 0.06
 const TAIL_ADD_SMOOTH_MS = 180
 const TAIL_EXTEND_RATE_UP = 0.14
 const TAIL_EXTEND_RATE_DOWN = 2.6
@@ -1681,7 +1675,6 @@ const createScene = async (
   const lastTailTotalLengths = new Map<string, number>()
   const tailGrowthStates = new Map<string, number>()
   const tailDebugStates = new Map<string, TailDebugState>()
-  const snakeDigestionDebug = new Map<string, SnakeDigestionDebug>()
   const tongueStates = new Map<string, TongueState>()
   const tempVector = new THREE.Vector3()
   const tempVectorB = new THREE.Vector3()
@@ -1741,7 +1734,6 @@ const createScene = async (
         }
         getSnakeGroundingInfo: () => SnakeGroundingInfo | null
         getSnakeIds: () => string[]
-        getSnakeDigestionInfo: (id: string) => SnakeDigestionDebug | null
       }
     | null = null
 
@@ -1780,7 +1772,6 @@ const createScene = async (
         }
         getSnakeGroundingInfo: () => SnakeGroundingInfo | null
         getSnakeIds: () => string[]
-        getSnakeDigestionInfo: (id: string) => SnakeDigestionDebug | null
       }
     }
     debugApi = {
@@ -1834,19 +1825,6 @@ const createScene = async (
             }
           : null,
       getSnakeIds: () => Array.from(snakes.keys()),
-      getSnakeDigestionInfo: (id: string) => {
-        const info = snakeDigestionDebug.get(id)
-        return info
-          ? {
-              snapshotCount: info.snapshotCount,
-              maxSnapshotStrength: info.maxSnapshotStrength,
-              maxSnapshotProgress: info.maxSnapshotProgress,
-              visualCount: info.visualCount,
-              maxVisualStrength: info.maxVisualStrength,
-              maxAppliedBulge: info.maxAppliedBulge,
-            }
-          : null
-      },
     }
     debugWindow.__SNAKE_DEBUG__ = debugApi
   }
@@ -1865,7 +1843,6 @@ const createScene = async (
     lastTailTotalLengths.delete(id)
     tailGrowthStates.delete(id)
     tailDebugStates.delete(id)
-    snakeDigestionDebug.delete(id)
     tongueStates.delete(id)
   }
 
@@ -4054,14 +4031,9 @@ const createScene = async (
 
   const computeDigestionStartOffset = (curvePoints: THREE.Vector3[]) => {
     if (curvePoints.length < 2) return 0
-    let totalLength = 0
-    for (let i = 1; i < curvePoints.length; i += 1) {
-      totalLength += curvePoints[i - 1].distanceTo(curvePoints[i])
-    }
-    if (totalLength <= 1e-6) return 0
-    const headNodeLength = curvePoints[0].distanceTo(curvePoints[1])
-    if (headNodeLength <= 1e-6) return 0
-    return clamp(headNodeLength / totalLength, 0, 0.95)
+    const segmentCount = Math.max(1, curvePoints.length - 1)
+    const startNode = Math.round(clamp(DIGESTION_START_NODE_INDEX, 0, segmentCount))
+    return clamp(startNode / segmentCount, 0, 0.95)
   }
 
   const applyDigestionBulges = (
@@ -4080,12 +4052,7 @@ const createScene = async (
     if (!positions) return 0
 
     const bulgeByRing = new Array<number>(ringCount).fill(0)
-    const staticStartOffset = Math.min(
-      DIGESTION_START_MAX,
-      DIGESTION_START_RINGS / Math.max(1, ringCount - 1),
-    )
-    const startOffset = clamp(Math.max(staticStartOffset, headStartOffset), 0, 0.95)
-    const endOffset = staticStartOffset
+    const startOffset = clamp(headStartOffset, 0, 0.95)
     const headStartRing = Math.ceil(startOffset * Math.max(1, ringCount - 1))
     for (const digestion of digestions) {
       const strength = clamp(digestion.strength, 0, 1)
@@ -4094,7 +4061,7 @@ const createScene = async (
       const bulgeStrength =
         THREE.MathUtils.lerp(DIGESTION_BULGE_MIN, DIGESTION_BULGE_MAX, strength) * bulgeScale
       const t = clamp(digestion.t, 0, 1)
-      const mapped = startOffset + t * Math.max(0, 1 - startOffset - endOffset)
+      const mapped = startOffset + t * Math.max(0, 1 - startOffset)
       const center = mapped * (ringCount - 1)
       const start = Math.max(0, Math.floor(center - influenceRadius))
       const end = Math.min(ringCount - 1, Math.ceil(center + influenceRadius))
@@ -4172,9 +4139,13 @@ const createScene = async (
     let tailGrowth = 0
 
     for (const digestion of digestions) {
-      const travelT = clamp(digestion.progress, 0, 1)
-      const travelBiased = Math.pow(travelT, DIGESTION_TRAVEL_EASE)
       const growth = clamp(digestion.progress - 1, 0, 1)
+      const travelProgress = clamp(digestion.progress, 0, 1)
+      const travelT =
+        growth > 0
+          ? 1 - (1 - growth) * DIGESTION_GROWTH_TAIL_OFFSET
+          : travelProgress
+      const travelBiased = Math.pow(clamp(travelT, 0, 1), DIGESTION_TRAVEL_EASE)
       const strength = clamp(digestion.strength, 0.05, 1) * (1 - growth)
       visuals.push({ t: travelBiased, strength })
       if (growth > tailGrowth) tailGrowth = growth
@@ -4716,28 +4687,6 @@ const createScene = async (
     lastSnakeLengths.set(player.id, nodes.length)
     const digestionState = buildDigestionVisuals(player.digestions)
     const targetTailGrowth = digestionState.tailGrowth
-    const maxSnapshotStrength =
-      debugEnabled && player.digestions.length > 0
-        ? Math.max(...player.digestions.map((digestion) => digestion.strength))
-        : 0
-    const maxSnapshotProgress =
-      debugEnabled && player.digestions.length > 0
-        ? Math.max(...player.digestions.map((digestion) => digestion.progress))
-        : 0
-    const maxVisualStrength =
-      debugEnabled && digestionState.visuals.length > 0
-        ? Math.max(...digestionState.visuals.map((visual) => visual.strength))
-        : 0
-    if (debugEnabled) {
-      snakeDigestionDebug.set(player.id, {
-        snapshotCount: player.digestions.length,
-        maxSnapshotStrength,
-        maxSnapshotProgress,
-        visualCount: digestionState.visuals.length,
-        maxVisualStrength,
-        maxAppliedBulge: 0,
-      })
-    }
     const previousGrowth = tailGrowthStates.get(player.id)
     let smoothedTailGrowth = targetTailGrowth
     if (previousGrowth !== undefined && targetTailGrowth < previousGrowth) {
@@ -4754,7 +4703,19 @@ const createScene = async (
     }
     tailGrowthStates.set(player.id, smoothedTailGrowth)
     const girthScale = clamp(player.girthScale, SNAKE_GIRTH_SCALE_MIN, SNAKE_GIRTH_SCALE_MAX)
-    const digestionBulgeScale = 1 / Math.max(SNAKE_GIRTH_SCALE_MIN, girthScale)
+    const girthT = clamp(
+      (girthScale - SNAKE_GIRTH_SCALE_MIN) /
+        Math.max(1e-6, SNAKE_GIRTH_SCALE_MAX - SNAKE_GIRTH_SCALE_MIN),
+      0,
+      1,
+    )
+    const girthNonLinearScale = THREE.MathUtils.lerp(
+      1,
+      DIGESTION_BULGE_GIRTH_MIN_SCALE,
+      Math.pow(girthT, DIGESTION_BULGE_GIRTH_CURVE),
+    )
+    const radiusCompScale = Math.pow(1 / Math.max(girthScale, 1), DIGESTION_BULGE_RADIUS_CURVE)
+    const digestionBulgeScale = girthNonLinearScale * radiusCompScale
     const bodyScale = girthScale * (isLocal ? 1.1 : 1)
     const radius = SNAKE_RADIUS * bodyScale
     const radiusOffset = radius * SNAKE_LIFT_FACTOR
@@ -5040,24 +5001,8 @@ const createScene = async (
       const tubularSegments = Math.max(8, curvePoints.length * 4)
       const tubeGeometry = new THREE.TubeGeometry(baseCurve, tubularSegments, radius, 10, false)
       const digestionStartOffset = computeDigestionStartOffset(curvePoints)
-      let maxAppliedBulge = 0
       if (digestionState.visuals.length) {
-        maxAppliedBulge = applyDigestionBulges(
-          tubeGeometry,
-          digestionState.visuals,
-          digestionStartOffset,
-          digestionBulgeScale,
-        )
-      }
-      if (debugEnabled) {
-        snakeDigestionDebug.set(player.id, {
-          snapshotCount: player.digestions.length,
-          maxSnapshotStrength,
-          maxSnapshotProgress,
-          visualCount: digestionState.visuals.length,
-          maxVisualStrength,
-          maxAppliedBulge,
-        })
+        applyDigestionBulges(tubeGeometry, digestionState.visuals, digestionStartOffset, digestionBulgeScale)
       }
       visual.tube.geometry.dispose()
       visual.tube.geometry = tubeGeometry
