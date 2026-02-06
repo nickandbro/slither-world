@@ -175,18 +175,7 @@ export default function App() {
   }, [gameState, playerId])
 
   const score = localPlayer?.score ?? 0
-  const oxygenPct = localPlayer ? Math.round(clamp(localPlayer.oxygen, 0, 1) * 100) : 0
-  const oxygenLow = oxygenPct <= 35
   const playersOnline = gameState?.totalPlayers ?? 0
-  const staminaPlayers = useMemo(() => {
-    if (!gameState) return []
-    const localId = playerId
-    return [...gameState.players].sort((a, b) => {
-      if (a.id === localId) return -1
-      if (b.id === localId) return 1
-      return b.score - a.score
-    })
-  }, [gameState, playerId])
   const rendererStatus = useMemo(() => {
     if (!activeRenderer) return 'Renderer: Initializing...'
     if (rendererFallbackReason) {
@@ -354,8 +343,9 @@ export default function App() {
           if (config && webgl) {
             const snapshot = getRenderSnapshot()
             const localId = playerIdRef.current
-            const localHead =
-              snapshot?.players.find((player) => player.id === localId)?.snake[0] ?? null
+            const localSnapshotPlayer =
+              snapshot?.players.find((player) => player.id === localId) ?? null
+            const localHead = localSnapshotPlayer?.snake[0] ?? null
             localHeadRef.current = localHead ? normalize(localHead) : null
             const camera = updateCamera(localHead, cameraUpRef)
             cameraRef.current = camera
@@ -366,6 +356,12 @@ export default function App() {
               cameraDistanceRef.current,
             )
             headScreenRef.current = headScreen
+            const oxygenPct = localSnapshotPlayer
+              ? clamp(localSnapshotPlayer.oxygen, 0, 1) * 100
+              : null
+            const staminaPct = localSnapshotPlayer
+              ? clamp(localSnapshotPlayer.stamina, 0, 1) * 100
+              : null
             drawHud(
               hudCtx,
               config,
@@ -373,6 +369,15 @@ export default function App() {
               headScreen,
               pointerRef.current.active ? pointerRef.current.distance : null,
               pointerRef.current.active ? pointerRef.current.maxRange : null,
+              {
+                pct: oxygenPct,
+                low: oxygenPct !== null && oxygenPct <= 35,
+                anchor: headScreen,
+              },
+              {
+                pct: staminaPct,
+                anchor: headScreen,
+              },
             )
           }
           frameId = window.requestAnimationFrame(renderLoop)
@@ -674,47 +679,6 @@ export default function App() {
               onContextMenu={(event) => event.preventDefault()}
             />
             <canvas ref={hudCanvasRef} className='hud-canvas' aria-hidden='true' />
-            {staminaPlayers.length > 0 && (
-              <div className='stamina-panel' aria-label='Stamina meters'>
-                {staminaPlayers.map((player) => {
-                  const pct = Math.round(clamp(player.stamina, 0, 1) * 100)
-                  const displayName =
-                    player.id === playerId ? `${player.name} (You)` : player.name
-                  const rowClass = [
-                    'stamina-row',
-                    player.id === playerId ? 'is-local' : '',
-                    player.alive ? '' : 'is-dead',
-                  ]
-                    .filter(Boolean)
-                    .join(' ')
-                  return (
-                    <div key={player.id} className={rowClass}>
-                      <div className='stamina-header'>
-                        <span className='stamina-name'>{displayName}</span>
-                        <span className='stamina-value'>{pct}%</span>
-                      </div>
-                      <div className='stamina-bar'>
-                        <div className='stamina-fill' style={{ width: `${pct}%` }} />
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-            {localPlayer && (
-              <div className='oxygen-panel' aria-label='Oxygen meter'>
-                <div className='oxygen-header'>
-                  <span className='oxygen-label'>O2</span>
-                  <span className='oxygen-value'>{oxygenPct}%</span>
-                </div>
-                <div className='oxygen-bar'>
-                  <div
-                    className={['oxygen-fill', oxygenLow ? 'is-low' : ''].filter(Boolean).join(' ')}
-                    style={{ width: `${oxygenPct}%` }}
-                  />
-                </div>
-              </div>
-            )}
           </div>
           {localPlayer && !localPlayer.alive && (
             <div className='overlay'>
