@@ -131,7 +131,10 @@ const createBoostDraftTexture = () => {
       const swirlA = Math.sin((u * 6.8 + v * 3.9) * Math.PI * 2) * 0.5 + 0.5
       const swirlB = Math.sin((u * 11.2 - v * 2.7) * Math.PI * 2) * 0.5 + 0.5
       const noise = 0.84 + 0.16 * (swirlA * 0.6 + swirlB * 0.4)
-      const alpha = clamp(noise, 0, 1)
+      const seamDistance = Math.min(u, 1 - u)
+      const seamFade = smoothstep(0, 0.08, seamDistance)
+      const equatorFade = 1 - smoothstep(0.72, 1, v)
+      const alpha = clamp(noise * seamFade * equatorFade, 0, 1)
       const alphaByte = Math.round(alpha * 255)
       const offset = (y * width + x) * 4
       imageData.data[offset] = 255
@@ -458,9 +461,9 @@ const BOOST_DRAFT_BASE_RADIUS = HEAD_RADIUS * 1.28
 const BOOST_DRAFT_FRONT_OFFSET = HEAD_RADIUS * 0.34
 const BOOST_DRAFT_LIFT = HEAD_RADIUS * 0.08
 const BOOST_DRAFT_PULSE_SPEED = 8.4
-const BOOST_DRAFT_OPACITY = 0.17
-const BOOST_DRAFT_EDGE_FADE_START = 0.9
-const BOOST_DRAFT_EDGE_FADE_END = 1.02
+const BOOST_DRAFT_OPACITY = 0.51
+const BOOST_DRAFT_EDGE_FADE_START = 0.8
+const BOOST_DRAFT_EDGE_FADE_END = 1.0
 const BOOST_DRAFT_COLOR_A = new THREE.Color('#56d9ff')
 const BOOST_DRAFT_COLOR_B = new THREE.Color('#ffffff')
 const BOOST_DRAFT_COLOR_SHIFT_SPEED = 3.8
@@ -3606,7 +3609,7 @@ const createScene = async (
     })
     material.depthWrite = false
     material.depthTest = true
-    material.alphaTest = 0.001
+    material.alphaTest = 0
     const materialUserData = material.userData as BoostDraftMaterialUserData
     if (webglShaderHooksEnabled) {
       material.onBeforeCompile = (shader) => {
@@ -3642,7 +3645,7 @@ float boostNoiseB = sin((boostLocal.z * 11.3) - (boostLocal.x * 7.6) - boostDraf
 float boostColorMix = clamp(0.28 + 0.72 * (boostNoiseA * 0.58 + boostNoiseB * 0.42), 0.0, 1.0);
 vec3 boostColor = mix(vec3(0.337, 0.851, 1.0), vec3(1.0), boostColorMix);
 diffuseColor.rgb = boostColor;
-diffuseColor.a *= boostDraftOpacity * (0.25 + (boostEdgeFade * 0.75));`,
+diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
           )
       }
     }
