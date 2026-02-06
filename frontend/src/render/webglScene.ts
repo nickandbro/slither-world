@@ -180,6 +180,17 @@ const PLANET_PATCH_VIEW_MARGIN = 0.18
 const PLANET_PATCH_HIDE_EXTRA = 0.06
 const PLANET_OBJECT_VIEW_MARGIN = 0.14
 const PLANET_OBJECT_HIDE_EXTRA = 0.06
+const PLANET_EDGE_PRELOAD_START_ANGLE = 0.45
+const PLANET_EDGE_PRELOAD_END_ANGLE = 1.25
+const TREE_EDGE_PRELOAD_MARGIN = 0.22
+const TREE_EDGE_PRELOAD_HIDE_EXTRA = 0.14
+const TREE_EDGE_PRELOAD_OCCLUSION_LEAD = 1.9
+const ROCK_EDGE_PRELOAD_MARGIN = 0.2
+const ROCK_EDGE_PRELOAD_HIDE_EXTRA = 0.12
+const ROCK_EDGE_PRELOAD_OCCLUSION_LEAD = 1.55
+const PEBBLE_EDGE_PRELOAD_MARGIN = 0.16
+const PEBBLE_EDGE_PRELOAD_HIDE_EXTRA = 0.1
+const PEBBLE_EDGE_PRELOAD_OCCLUSION_LEAD = 1.4
 const PLANET_PATCH_OUTER_MIN = 0.22
 const PLANET_PATCH_OUTER_MAX = 1.4
 const LAKE_SURFACE_ICOSPHERE_DETAIL = 18
@@ -216,6 +227,12 @@ const WORLD_RIGHT = new THREE.Vector3(1, 0, 0)
 const OXYGEN_DAMAGE_COLOR = new THREE.Color('#ff2d2d')
 const OXYGEN_DAMAGE_EMISSIVE = new THREE.Color('#ff0000')
 const LAKE_WATER_OVERDRAW = BASE_PLANET_RADIUS * 0.01
+const LAKE_WATER_SURFACE_LIFT = LAKE_WATER_OVERDRAW * 1.4
+const LAKE_WATER_EDGE_EXPAND_ANGLE = 0.045
+const LAKE_WATER_EDGE_EXPAND_BOUNDARY = 0.12
+const LAKE_VISIBILITY_EXTRA_RADIUS = 0.1
+const LAKE_VISIBILITY_MARGIN = 0.32
+const LAKE_VISIBILITY_HIDE_EXTRA = 0.18
 const LAKE_TERRAIN_CLAMP_EPS = BASE_PLANET_RADIUS * 0.0012
 const LAKE_VISUAL_DEPTH_MULT = 1.75
 const LAKE_SHORE_DROP_BLEND_START = 0.05
@@ -717,7 +734,7 @@ const createLakeSurfaceGeometry = (sampleGeometry: THREE.BufferGeometry, lakes: 
         maxWaterLevel = Math.max(maxWaterLevel, waterLevel)
         if (samples[s].depth > waterLevel) includedByDepth = true
       }
-      if (samples[s].sample.boundary > LAKE_WATER_MASK_THRESHOLD) {
+      if (samples[s].sample.boundary > LAKE_WATER_MASK_THRESHOLD - LAKE_WATER_EDGE_EXPAND_BOUNDARY) {
         includedByBoundary = true
       }
     }
@@ -744,7 +761,8 @@ const createLakeSurfaceGeometry = (sampleGeometry: THREE.BufferGeometry, lakes: 
       if (includedByBoundary) stats.includedByBoundary += 1
     }
 
-    const surfaceRadius = PLANET_RADIUS - bestSample.sample.lake.surfaceInset
+    const surfaceRadius =
+      PLANET_RADIUS - bestSample.sample.lake.surfaceInset + LAKE_WATER_SURFACE_LIFT
     normal.copy(a).normalize()
     lakePositions.push(normal.x * surfaceRadius, normal.y * surfaceRadius, normal.z * surfaceRadius)
     lakeNormals.push(normal.x, normal.y, normal.z)
@@ -796,6 +814,7 @@ const createLakeMaskMaterial = (lake: Lake) => {
     shader.uniforms.lakeBitangent = { value: lake.bitangent }
     shader.uniforms.lakeRadius = { value: lake.radius }
     shader.uniforms.lakeEdgeFalloff = { value: lake.edgeFalloff }
+    shader.uniforms.lakeEdgeExpand = { value: LAKE_WATER_EDGE_EXPAND_ANGLE }
     shader.uniforms.lakeEdgeSharpness = { value: LAKE_EDGE_SHARPNESS }
     shader.uniforms.lakeNoiseAmplitude = { value: lake.noiseAmplitude }
     shader.uniforms.lakeNoiseFrequency = { value: lake.noiseFrequency }
@@ -823,6 +842,7 @@ uniform vec3 lakeTangent;
 uniform vec3 lakeBitangent;
 uniform float lakeRadius;
 uniform float lakeEdgeFalloff;
+uniform float lakeEdgeExpand;
 uniform float lakeEdgeSharpness;
 uniform float lakeNoiseAmplitude;
 uniform float lakeNoiseFrequency;
@@ -853,7 +873,7 @@ float lakeWavePattern(vec3 normal, float time) {
 float lakeEdgeBlend(vec3 normal) {
   float dotValue = clamp(dot(lakeCenter, normal), -1.0, 1.0);
   float angle = acos(dotValue);
-  if (angle >= lakeRadius + lakeEdgeFalloff) return 0.0;
+  if (angle >= lakeRadius + lakeEdgeFalloff + lakeEdgeExpand) return 0.0;
   vec3 temp = normal - lakeCenter * dotValue;
   float x = dot(temp, lakeTangent);
   float y = dot(temp, lakeBitangent);
@@ -868,7 +888,7 @@ float lakeEdgeBlend(vec3 normal) {
     lakeRadius * (1.0 + lakeNoiseAmplitude * noiseNormalized),
     lakeRadius * 0.65,
     lakeRadius * 1.35
-  );
+  ) + lakeEdgeExpand;
   if (angle >= edgeRadius) return 0.0;
   float shelfRadius = max(1e-3, edgeRadius - lakeEdgeFalloff);
   float edgeT = clamp((edgeRadius - angle) / lakeEdgeFalloff, 0.0, 1.0);
@@ -1351,6 +1371,7 @@ const createScene = async (
   const cameraLocalDirTemp = new THREE.Vector3()
   const directionTemp = new THREE.Vector3()
   const rayDirTemp = new THREE.Vector3()
+  const occlusionPointTemp = new THREE.Vector3()
   const tongueUp = new THREE.Vector3(0, 1, 0)
   const debugEnabled = import.meta.env.DEV || import.meta.env.VITE_E2E_DEBUG === '1'
   let debugApi:
@@ -1909,6 +1930,8 @@ const createScene = async (
     viewAngle: number,
     wasVisible: boolean,
     margin = PLANET_OBJECT_VIEW_MARGIN,
+    hideExtra = PLANET_OBJECT_HIDE_EXTRA,
+    occlusionLead = 1,
   ) => {
     const radiusFromCenter = point.length()
     if (!Number.isFinite(radiusFromCenter) || radiusFromCenter <= 1e-6) return false
@@ -1923,10 +1946,17 @@ const createScene = async (
         angularRadius,
         wasVisible,
         margin,
-        PLANET_OBJECT_HIDE_EXTRA,
+        hideExtra,
       )
     ) {
       return false
+    }
+    if (pointRadius > 1e-6 && occlusionLead > 0) {
+      occlusionPointTemp
+        .copy(directionTemp)
+        .multiplyScalar(pointRadius * occlusionLead)
+        .add(point)
+      return !isOccludedByPlanet(occlusionPointTemp, cameraLocalPos)
     }
     return !isOccludedByPlanet(point, cameraLocalPos)
   }
@@ -2071,11 +2101,7 @@ const createScene = async (
     visiblePlanetPatchCount = visibleCount
   }
 
-  const updateLakeVisibility = (
-    cameraLocalPos: THREE.Vector3,
-    cameraLocalDir: THREE.Vector3,
-    viewAngle: number,
-  ) => {
+  const updateLakeVisibility = (cameraLocalDir: THREE.Vector3, viewAngle: number) => {
     if (lakeMeshes.length === 0 || lakes.length === 0) {
       visibleLakeCount = 0
       return
@@ -2087,18 +2113,16 @@ const createScene = async (
         const lake = lakes[i]
         const mesh = lakeMeshes[i]
         if (!lake || !mesh) continue
-        const centerPoint = tempVectorH
-          .copy(lake.center)
-          .multiplyScalar(PLANET_RADIUS + LAKE_WATER_OVERDRAW)
+        const effectiveRadius = lake.radius + LAKE_VISIBILITY_EXTRA_RADIUS
         const inView = isAngularVisible(
           lake.center.dot(cameraLocalDir),
           viewAngle,
-          lake.radius,
+          effectiveRadius,
           mesh.visible,
-          PLANET_OBJECT_VIEW_MARGIN,
-          PLANET_OBJECT_HIDE_EXTRA,
+          LAKE_VISIBILITY_MARGIN,
+          LAKE_VISIBILITY_HIDE_EXTRA,
         )
-        const visibleNow = inView && !isOccludedByPlanet(centerPoint, cameraLocalPos)
+        const visibleNow = inView
         mesh.visible = visibleNow
         if (visibleNow) visible += 1
       }
@@ -2109,18 +2133,16 @@ const createScene = async (
     let anyVisible = false
     let visible = 0
     for (const lake of lakes) {
-      const centerPoint = tempVectorH
-        .copy(lake.center)
-        .multiplyScalar(PLANET_RADIUS + LAKE_WATER_OVERDRAW)
+      const effectiveRadius = lake.radius + LAKE_VISIBILITY_EXTRA_RADIUS
       const visibleNow =
         isAngularVisible(
           lake.center.dot(cameraLocalDir),
           viewAngle,
-          lake.radius,
+          effectiveRadius,
           anyVisible,
-          PLANET_OBJECT_VIEW_MARGIN,
-          PLANET_OBJECT_HIDE_EXTRA,
-        ) && !isOccludedByPlanet(centerPoint, cameraLocalPos)
+          LAKE_VISIBILITY_MARGIN,
+          LAKE_VISIBILITY_HIDE_EXTRA,
+        )
       if (visibleNow) {
         anyVisible = true
         visible += 1
@@ -2137,6 +2159,21 @@ const createScene = async (
     cameraLocalDir: THREE.Vector3,
     viewAngle: number,
   ) => {
+    const edgePreload = smoothstep(
+      PLANET_EDGE_PRELOAD_START_ANGLE,
+      PLANET_EDGE_PRELOAD_END_ANGLE,
+      viewAngle,
+    )
+    const treeMargin = PLANET_OBJECT_VIEW_MARGIN + TREE_EDGE_PRELOAD_MARGIN * edgePreload
+    const treeHideExtra = PLANET_OBJECT_HIDE_EXTRA + TREE_EDGE_PRELOAD_HIDE_EXTRA * edgePreload
+    const treeOcclusionLead = 1 + TREE_EDGE_PRELOAD_OCCLUSION_LEAD * edgePreload
+    const rockMargin = PLANET_OBJECT_VIEW_MARGIN + ROCK_EDGE_PRELOAD_MARGIN * edgePreload
+    const rockHideExtra = PLANET_OBJECT_HIDE_EXTRA + ROCK_EDGE_PRELOAD_HIDE_EXTRA * edgePreload
+    const rockOcclusionLead = 1 + ROCK_EDGE_PRELOAD_OCCLUSION_LEAD * edgePreload
+    const pebbleMargin = PLANET_OBJECT_VIEW_MARGIN + PEBBLE_EDGE_PRELOAD_MARGIN * edgePreload
+    const pebbleHideExtra = PLANET_OBJECT_HIDE_EXTRA + PEBBLE_EDGE_PRELOAD_HIDE_EXTRA * edgePreload
+    const pebbleOcclusionLead = 1 + PEBBLE_EDGE_PRELOAD_OCCLUSION_LEAD * edgePreload
+
     const nextTreeVisible: number[] = []
     for (let i = 0; i < treeCullEntries.length; i += 1) {
       const entry = treeCullEntries[i]
@@ -2149,6 +2186,9 @@ const createScene = async (
           cameraLocalDir,
           viewAngle,
           wasVisible,
+          treeMargin,
+          treeHideExtra,
+          treeOcclusionLead,
         ) ||
         isPointVisible(
           entry.topPoint,
@@ -2157,6 +2197,9 @@ const createScene = async (
           cameraLocalDir,
           viewAngle,
           wasVisible,
+          treeMargin,
+          treeHideExtra,
+          treeOcclusionLead,
         )
       treeVisibilityState[i] = visible
       if (visible) nextTreeVisible.push(i)
@@ -2203,6 +2246,9 @@ const createScene = async (
             cameraLocalDir,
             viewAngle,
             wasVisible,
+            rockMargin,
+            rockHideExtra,
+            rockOcclusionLead,
           ) ||
           isPointVisible(
             entry.peakPoint,
@@ -2211,6 +2257,9 @@ const createScene = async (
             cameraLocalDir,
             viewAngle,
             wasVisible,
+            rockMargin,
+            rockHideExtra,
+            rockOcclusionLead,
           )
         state[i] = visible
         if (visible) nextVariantVisible.push(i)
@@ -2246,6 +2295,9 @@ const createScene = async (
         cameraLocalDir,
         viewAngle,
         wasVisible,
+        pebbleMargin,
+        pebbleHideExtra,
+        pebbleOcclusionLead,
       )
       pebbleVisibilityState[i] = visible
       if (visible) nextPebbleVisible.push(i)
@@ -2379,7 +2431,7 @@ const createScene = async (
       for (const lake of lakes) {
         const lakeMaterial = createLakeMaskMaterial(lake)
         const lakeMesh = new THREE.Mesh(lakeSurfaceGeometry, lakeMaterial)
-        lakeMesh.scale.setScalar(PLANET_RADIUS - lake.surfaceInset)
+        lakeMesh.scale.setScalar(PLANET_RADIUS - lake.surfaceInset + LAKE_WATER_SURFACE_LIFT)
         lakeMesh.renderOrder = 2
         world.add(lakeMesh)
         lakeMeshes.push(lakeMesh)
@@ -2739,7 +2791,7 @@ const createScene = async (
     const aspect = viewportHeight > 0 ? viewportWidth / viewportHeight : 1
     const viewAngle = computeVisibleSurfaceAngle(camera.position.z, aspect)
     updatePlanetPatchVisibility(cameraLocalDirTemp, viewAngle)
-    updateLakeVisibility(cameraLocalPosTemp, cameraLocalDirTemp, viewAngle)
+    updateLakeVisibility(cameraLocalDirTemp, viewAngle)
     updateEnvironmentVisibility(cameraLocalPosTemp, cameraLocalDirTemp, viewAngle)
 
     rebuildMountainDebug()
@@ -4357,7 +4409,7 @@ const createScene = async (
     if (PLANET_PATCH_ENABLED) {
       updatePlanetPatchVisibility(cameraLocalDirTemp, viewAngle)
     }
-    updateLakeVisibility(cameraLocalPosTemp, cameraLocalDirTemp, viewAngle)
+    updateLakeVisibility(cameraLocalDirTemp, viewAngle)
     updateEnvironmentVisibility(cameraLocalPosTemp, cameraLocalDirTemp, viewAngle)
 
     const lakeTimeSeconds = now * 0.001
