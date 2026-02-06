@@ -65,6 +65,7 @@ type BoostTrailState = {
   retiring: boolean
   retireStartedAt: number
   retireInitialCount: number
+  retireCut: number
   dirty: boolean
 }
 
@@ -395,7 +396,7 @@ const BOOST_TRAIL_CURVE_SEGMENTS_PER_POINT = 10
 const BOOST_TRAIL_WIDTH = SNAKE_RADIUS * 0.42
 const BOOST_TRAIL_EDGE_FADE_CAP = 0.22
 const BOOST_TRAIL_SIDE_FADE_CAP = 0.28
-const BOOST_TRAIL_OPACITY = 0.8
+const BOOST_TRAIL_OPACITY = 0.55
 const BOOST_TRAIL_ALPHA_TEXTURE_WIDTH = 256
 const BOOST_TRAIL_ALPHA_TEXTURE_HEIGHT = 64
 const BOOST_TRAIL_COLOR = '#3a3129'
@@ -1800,7 +1801,8 @@ const createScene = async (
         let oldestCreatedAt = Number.POSITIVE_INFINITY
         let newestCreatedAt = 0
         for (const trail of trails) {
-          sampleCount += trail.samples.length
+          const visibleRatio = trail.retiring ? Math.max(0, 1 - trail.retireCut) : 1
+          sampleCount += Math.ceil(trail.samples.length * visibleRatio)
           boosting = boosting || trail.boosting
           retiring = retiring || trail.retiring
           const oldest = trail.samples[0]
@@ -3744,6 +3746,7 @@ const createScene = async (
       retiring: false,
       retireStartedAt: 0,
       retireInitialCount: 0,
+      retireCut: 0,
       dirty: false,
     }
   }
@@ -3859,11 +3862,16 @@ const createScene = async (
     if (trail.samples.length === 0) {
       trail.retiring = false
       trail.retireInitialCount = 0
+      trail.retireCut = 0
       return
     }
     trail.retiring = true
     trail.retireStartedAt = nowMs
     trail.retireInitialCount = trail.samples.length
+    if (trail.retireCut !== 0) {
+      trail.retireCut = 0
+      markBoostTrailDirty(trail)
+    }
   }
 
   const advanceBoostTrailRetirement = (trail: BoostTrailState, nowMs: number) => {
@@ -3871,10 +3879,8 @@ const createScene = async (
     const durationMs = BOOST_TRAIL_FADE_SECONDS * 1000
     const elapsed = Math.max(0, nowMs - trail.retireStartedAt)
     const t = durationMs > 0 ? clamp(elapsed / durationMs, 0, 1) : 1
-    const targetRemain = Math.max(0, Math.ceil((1 - t) * trail.retireInitialCount))
-    if (trail.samples.length > targetRemain) {
-      const removeCount = trail.samples.length - targetRemain
-      trail.samples.splice(0, removeCount)
+    if (Math.abs(trail.retireCut - t) > 1e-4) {
+      trail.retireCut = t
       markBoostTrailDirty(trail)
     }
     if (t >= 1 || trail.samples.length === 0) {
@@ -3884,6 +3890,7 @@ const createScene = async (
       }
       trail.retiring = false
       trail.retireInitialCount = 0
+      trail.retireCut = 0
     }
   }
 
@@ -3931,6 +3938,8 @@ const createScene = async (
         ? new Uint32Array(segmentCount * 6)
         : new Uint16Array(segmentCount * 6)
     const halfWidth = BOOST_TRAIL_WIDTH * 0.5
+    const retireCut = trail.retiring ? clamp(trail.retireCut, 0, 0.9999) : 0
+    const retireDenominator = Math.max(1e-4, 1 - retireCut)
 
     for (let i = 0; i < centerCount; i += 1) {
       const center = projectedPoints[i]
@@ -3970,7 +3979,10 @@ const createScene = async (
 
       const leftVertexIndex = i * 2
       const rightVertexIndex = leftVertexIndex + 1
-      const u = centerCount > 1 ? i / (centerCount - 1) : 0
+      const baseU = centerCount > 1 ? i / (centerCount - 1) : 0
+      const u = trail.retiring
+        ? clamp((baseU - retireCut) / retireDenominator, 0, 1)
+        : baseU
 
       trailOffsetTemp.copy(center).addScaledVector(trailSideTemp, halfWidth)
       trailReprojectPointTemp.copy(trailOffsetTemp)
@@ -4069,6 +4081,10 @@ const createScene = async (
       if (activeTrail.retiring) {
         activeTrail.retiring = false
         activeTrail.retireInitialCount = 0
+        if (activeTrail.retireCut !== 0) {
+          activeTrail.retireCut = 0
+          markBoostTrailDirty(activeTrail)
+        }
       }
       if (tailContactNormal) {
         trailSlerpNormalTemp.copy(tailContactNormal)
