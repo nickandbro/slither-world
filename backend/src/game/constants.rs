@@ -21,18 +21,12 @@ pub const RESPAWN_RETRY_MS: i64 = 500;
 pub const PLAYER_TIMEOUT_MS: i64 = 15000;
 pub const SPAWN_CONE_ANGLE: f64 = std::f64::consts::PI / 3.0;
 pub const MAX_SPAWN_ATTEMPTS: usize = 32;
+pub const SPAWN_PLAYER_MIN_DISTANCE: f64 = COLLISION_DISTANCE * 2.0;
 pub const DIGESTION_GROWTH_STEPS: i64 = NODE_QUEUE_SIZE as i64;
-pub const BOT_COUNT: usize = 2;
+pub const BOT_COUNT: usize = 20;
 pub const BOT_BOOST_DISTANCE: f64 = 0.6 / WORLD_SCALE;
 pub const BOT_MIN_STAMINA_TO_BOOST: f64 = 0.6;
 
 pub const COLOR_POOL: [&str; 8] = [
-  "#ff6b6b",
-  "#ffd166",
-  "#06d6a0",
-  "#4dabf7",
-  "#f06595",
-  "#845ef7",
-  "#20c997",
-  "#fcc419",
+    "#ff6b6b", "#ffd166", "#06d6a0", "#4dabf7", "#f06595", "#845ef7", "#20c997", "#fcc419",
 ];

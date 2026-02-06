@@ -314,6 +314,29 @@ const TREE_MAX_SCALE = 1.15
 const TREE_MIN_ANGLE = 0.42
 const TREE_MIN_HEIGHT = SNAKE_RADIUS * 9.5
 const TREE_MAX_HEIGHT = TREE_MIN_HEIGHT * 1.5
+const DESERT_CACTUS_COUNT = 8
+const DESERT_BIOME_ANGLE = 0.86
+const DESERT_BIOME_BLEND = 0.12
+const DESERT_DUNE_PRIMARY = BASE_PLANET_RADIUS * 0.065
+const DESERT_DUNE_SECONDARY = BASE_PLANET_RADIUS * 0.03
+const DESERT_DUNE_TERTIARY = BASE_PLANET_RADIUS * 0.018
+const DESERT_GROUND_COLOR = new THREE.Color('#d8bf78')
+const FOREST_GROUND_COLOR = new THREE.Color('#6ea95a')
+const DESERT_BIOME_CENTER = new THREE.Vector3(
+  -0.19391259652276868,
+  0.9788150619715452,
+  0.06571894222701674,
+).normalize()
+const DESERT_BIOME_MIN_DOT = Math.cos(DESERT_BIOME_ANGLE)
+const CACTUS_TRUNK_HEIGHT = TREE_HEIGHT * 0.95
+const CACTUS_TRUNK_RADIUS = TREE_TRUNK_RADIUS
+const CACTUS_ARM_LOWER_HEIGHT = CACTUS_TRUNK_HEIGHT * 0.34
+const CACTUS_ARM_UPPER_HEIGHT = CACTUS_TRUNK_HEIGHT * 0.24
+const CACTUS_ARM_RADIUS = CACTUS_TRUNK_RADIUS * 0.62
+const CACTUS_ARM_BASE_HEIGHT = CACTUS_TRUNK_HEIGHT * 0.5
+const CACTUS_ARM_BASE_OFFSET = CACTUS_TRUNK_RADIUS * 1.02
+const CACTUS_ARM_LOWER_TILT = Math.PI * 0.28
+const CACTUS_ARM_UPPER_TILT = Math.PI * 0.2
 const MOUNTAIN_COUNT = 8
 const MOUNTAIN_VARIANTS = 3
 const MOUNTAIN_OUTLINE_SAMPLES = 64
@@ -434,6 +457,9 @@ const createLakes = (seed: number, count: number) => {
   const pickCenter = (radius: number, out: THREE.Vector3) => {
     for (let attempt = 0; attempt < 80; attempt += 1) {
       randomOnSphere(rng, out)
+      if (isDesertBiome(out)) {
+        continue
+      }
       let ok = true
       for (const lake of lakes) {
         const minSeparation = (radius + lake.radius) * 0.75
@@ -443,6 +469,10 @@ const createLakes = (seed: number, count: number) => {
         }
       }
       if (ok) return out
+    }
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      randomOnSphere(rng, out)
+      if (!isDesertBiome(out)) return out
     }
     return randomOnSphere(rng, out)
   }
@@ -608,17 +638,46 @@ const getVisualLakeTerrainDepth = (sample: ReturnType<typeof sampleLakes>) => {
   return Math.max(deepened, sample.lake.surfaceInset + LAKE_TERRAIN_CLAMP_EPS)
 }
 
+const isDesertBiome = (normal: THREE.Vector3) => normal.dot(DESERT_BIOME_CENTER) >= DESERT_BIOME_MIN_DOT
+
+const sampleDesertBlend = (normal: THREE.Vector3) => {
+  const angle = Math.acos(clamp(normal.dot(DESERT_BIOME_CENTER), -1, 1))
+  const start = Math.max(0, DESERT_BIOME_ANGLE - DESERT_BIOME_BLEND)
+  const end = DESERT_BIOME_ANGLE + DESERT_BIOME_BLEND
+  return 1 - smoothstep(start, end, angle)
+}
+
+const sampleDuneOffset = (normal: THREE.Vector3) => {
+  const lon = Math.atan2(normal.z, normal.x)
+  const lat = Math.asin(clamp(normal.y, -1, 1))
+  const waveA = Math.sin(lon * 3.1 + lat * 1.7)
+  const waveB = Math.sin(lon * 5.8 - lat * 2.6 + 1.2)
+  const waveC = Math.cos((normal.x * 2.9 + normal.z * 2.15) * Math.PI + lat * 0.75)
+  return waveA * DESERT_DUNE_PRIMARY + waveB * DESERT_DUNE_SECONDARY + waveC * DESERT_DUNE_TERTIARY
+}
+
 const applyLakeDepressions = (geometry: THREE.BufferGeometry, lakes: Lake[]) => {
   const positions = geometry.attributes.position
   const normal = new THREE.Vector3()
   const temp = new THREE.Vector3()
+  const colors = new Float32Array(positions.count * 3)
+  const deltaR = DESERT_GROUND_COLOR.r - FOREST_GROUND_COLOR.r
+  const deltaG = DESERT_GROUND_COLOR.g - FOREST_GROUND_COLOR.g
+  const deltaB = DESERT_GROUND_COLOR.b - FOREST_GROUND_COLOR.b
   for (let i = 0; i < positions.count; i += 1) {
     normal.set(positions.getX(i), positions.getY(i), positions.getZ(i)).normalize()
     const sample = sampleLakes(normal, lakes, temp)
     const depth = getVisualLakeTerrainDepth(sample)
-    const radius = PLANET_RADIUS - depth
+    const desertBlend = sampleDesertBlend(normal)
+    const duneOffset = sampleDuneOffset(normal) * desertBlend
+    const radius = PLANET_RADIUS + duneOffset - depth
     positions.setXYZ(i, normal.x * radius, normal.y * radius, normal.z * radius)
+    const colorIndex = i * 3
+    colors[colorIndex] = FOREST_GROUND_COLOR.r + deltaR * desertBlend
+    colors[colorIndex + 1] = FOREST_GROUND_COLOR.g + deltaG * desertBlend
+    colors[colorIndex + 2] = FOREST_GROUND_COLOR.b + deltaB * desertBlend
   }
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3))
   positions.needsUpdate = true
   geometry.computeVertexNormals()
   geometry.computeBoundingSphere()
@@ -1304,6 +1363,12 @@ const createScene = async (
   let treeTrunkMesh: THREE.InstancedMesh | null = null
   let treeLeafMaterial: THREE.MeshStandardMaterial | null = null
   let treeTrunkMaterial: THREE.MeshStandardMaterial | null = null
+  let cactusPartGeometries: THREE.BufferGeometry[] = []
+  let cactusPartMeshes: THREE.InstancedMesh[] = []
+  let cactusTrunkGeometry: THREE.BufferGeometry | null = null
+  let cactusTrunkMesh: THREE.InstancedMesh | null = null
+  let cactusMaterial: THREE.MeshStandardMaterial | null = null
+  let cactusArmMaterial: THREE.MeshStandardMaterial | null = null
   let mountainGeometries: THREE.BufferGeometry[] = []
   let mountainMeshes: THREE.InstancedMesh[] = []
   let mountainMaterial: THREE.MeshStandardMaterial | null = null
@@ -1315,7 +1380,10 @@ const createScene = async (
   let treeCullEntries: TreeCullEntry[] = []
   let treeVisibilityState: boolean[] = []
   let treeVisibleIndices: number[] = []
+  let cactusTrunkSourceMatrices: THREE.Matrix4[] = []
+  let cactusPartSourceMatrices: THREE.Matrix4[][] = []
   let visibleTreeCount = 0
+  let visibleCactusCount = 0
   let mountainSourceMatricesByVariant: THREE.Matrix4[][] = []
   let mountainCullEntriesByVariant: MountainCullEntry[][] = []
   let mountainVisibilityStateByVariant: boolean[][] = []
@@ -1390,6 +1458,8 @@ const createScene = async (
         getEnvironmentCullInfo: () => {
           totalTrees: number
           visibleTrees: number
+          totalCactuses: number
+          visibleCactuses: number
           totalMountains: number
           visibleMountains: number
           totalPebbles: number
@@ -1424,6 +1494,8 @@ const createScene = async (
         getEnvironmentCullInfo: () => {
           totalTrees: number
           visibleTrees: number
+          totalCactuses: number
+          visibleCactuses: number
           totalMountains: number
           visibleMountains: number
           totalPebbles: number
@@ -1465,6 +1537,8 @@ const createScene = async (
       getEnvironmentCullInfo: () => ({
         totalTrees: treeCullEntries.length,
         visibleTrees: visibleTreeCount,
+        totalCactuses: cactusTrunkSourceMatrices.length,
+        visibleCactuses: visibleCactusCount,
         totalMountains: mountains.length,
         visibleMountains: visibleMountainCount,
         totalPebbles: pebbleCullEntries.length,
@@ -1597,6 +1671,12 @@ const createScene = async (
     if (treeTrunkMesh) {
       environmentGroup.remove(treeTrunkMesh)
     }
+    for (const mesh of cactusPartMeshes) {
+      environmentGroup.remove(mesh)
+    }
+    if (cactusTrunkMesh) {
+      environmentGroup.remove(cactusTrunkMesh)
+    }
     for (const mesh of mountainMeshes) {
       environmentGroup.remove(mesh)
     }
@@ -1621,6 +1701,23 @@ const createScene = async (
       treeTrunkMaterial.dispose()
       treeTrunkMaterial = null
     }
+    for (const geometry of cactusPartGeometries) {
+      geometry.dispose()
+    }
+    cactusPartGeometries = []
+    cactusPartMeshes = []
+    if (cactusTrunkGeometry) {
+      cactusTrunkGeometry.dispose()
+      cactusTrunkGeometry = null
+    }
+    if (cactusMaterial) {
+      cactusMaterial.dispose()
+      cactusMaterial = null
+    }
+    if (cactusArmMaterial) {
+      cactusArmMaterial.dispose()
+      cactusArmMaterial = null
+    }
 
     for (const geometry of mountainGeometries) {
       geometry.dispose()
@@ -1643,10 +1740,13 @@ const createScene = async (
     pebbleMesh = null
     treeTrunkSourceMatrices = []
     treeTierSourceMatrices = []
+    cactusTrunkSourceMatrices = []
+    cactusPartSourceMatrices = []
     treeCullEntries = []
     treeVisibilityState = []
     treeVisibleIndices = []
     visibleTreeCount = 0
+    visibleCactusCount = 0
     mountainSourceMatricesByVariant = []
     mountainCullEntriesByVariant = []
     mountainVisibilityStateByVariant = []
@@ -1842,7 +1942,8 @@ const createScene = async (
     const point = new THREE.Vector3()
 
     for (const tree of trees) {
-      const angle = (TREE_TRUNK_RADIUS * tree.widthScale) / PLANET_RADIUS
+      if (tree.widthScale >= 0) continue
+      const angle = (TREE_TRUNK_RADIUS * Math.abs(tree.widthScale)) / PLANET_RADIUS
       if (!Number.isFinite(angle) || angle <= 0) continue
       buildTangentBasis(tree.normal, tangent, bitangent)
       const positions: number[] = []
@@ -1961,6 +2062,8 @@ const createScene = async (
   ) => {
     const positionAttr = planetGeometry.getAttribute('position')
     if (!(positionAttr instanceof THREE.BufferAttribute)) return
+    const colorRaw = planetGeometry.getAttribute('color')
+    const colorAttr = colorRaw instanceof THREE.BufferAttribute ? colorRaw : null
     const normalRaw = planetGeometry.getAttribute('normal')
     const normalAttr = normalRaw instanceof THREE.BufferAttribute ? normalRaw : null
     const indexAttr = planetGeometry.getIndex()
@@ -1968,6 +2071,7 @@ const createScene = async (
     const buckets = Array.from({ length: patchCount }, () => ({
       positions: [] as number[],
       normals: [] as number[],
+      colors: [] as number[],
     }))
     const triCount = indexAttr
       ? Math.floor(indexAttr.count / 3)
@@ -1992,6 +2096,14 @@ const createScene = async (
       } else {
         out.set(0, 1, 0)
       }
+    }
+    const pushColor = (bucket: { colors: number[] }, index: number) => {
+      if (!colorAttr) return
+      bucket.colors.push(
+        colorAttr.getX(index),
+        colorAttr.getY(index),
+        colorAttr.getZ(index),
+      )
     }
 
     for (let tri = 0; tri < triCount; tri += 1) {
@@ -2034,6 +2146,9 @@ const createScene = async (
       bucket.normals.push(normal.x, normal.y, normal.z)
       readNormal(i2, normal)
       bucket.normals.push(normal.x, normal.y, normal.z)
+      pushColor(bucket, i0)
+      pushColor(bucket, i1)
+      pushColor(bucket, i2)
     }
 
     for (const bucket of buckets) {
@@ -2044,6 +2159,9 @@ const createScene = async (
         geometry.setAttribute('normal', new THREE.Float32BufferAttribute(bucket.normals, 3))
       } else {
         geometry.computeVertexNormals()
+      }
+      if (bucket.colors.length === bucket.positions.length) {
+        geometry.setAttribute('color', new THREE.Float32BufferAttribute(bucket.colors, 3))
       }
       geometry.computeBoundingSphere()
 
@@ -2223,6 +2341,7 @@ const createScene = async (
       }
     }
     visibleTreeCount = treeVisibleIndices.length
+    visibleCactusCount = cactusTrunkSourceMatrices.length
 
     let mountainVisibleTotal = 0
     for (let variant = 0; variant < mountainMeshes.length; variant += 1) {
@@ -2317,10 +2436,11 @@ const createScene = async (
     lakes = data?.lakes?.length ? data.lakes.map(buildLakeFromData) : createLakes(0x91fcae12, LAKE_COUNT)
 
     const planetMaterial = new THREE.MeshStandardMaterial({
-      color: '#7ddf6a',
+      color: '#ffffff',
       roughness: 0.9,
       metalness: 0.05,
       side: THREE.FrontSide,
+      vertexColors: true,
       wireframe: terrainTessellationDebugEnabled,
     })
     if (PLANET_PATCH_ENABLED) {
@@ -2484,8 +2604,22 @@ const createScene = async (
       metalness: 0.05,
       flatShading: true,
     })
+    const cactusBodyMaterial = new THREE.MeshStandardMaterial({
+      color: '#6f8f3f',
+      roughness: 0.88,
+      metalness: 0.04,
+      flatShading: true,
+    })
+    const cactusArmMat = new THREE.MeshStandardMaterial({
+      color: '#7fa14d',
+      roughness: 0.85,
+      metalness: 0.05,
+      flatShading: true,
+    })
     treeLeafMaterial = leafMaterial
     treeTrunkMaterial = trunkMaterial
+    cactusMaterial = cactusBodyMaterial
+    cactusArmMaterial = cactusArmMat
     const treeInstanceCount = Math.max(0, TREE_COUNT - MOUNTAIN_COUNT)
 
     for (let i = 0; i < treeTierHeights.length; i += 1) {
@@ -2515,6 +2649,77 @@ const createScene = async (
     treeTrunkMesh.frustumCulled = false
     treeTrunkMesh.count = treeInstanceCount
     environmentGroup.add(treeTrunkMesh)
+
+    const armReach = Math.sin(CACTUS_ARM_LOWER_TILT) * CACTUS_ARM_LOWER_HEIGHT
+    const armRise = Math.cos(CACTUS_ARM_LOWER_TILT) * CACTUS_ARM_LOWER_HEIGHT
+    const upperArmBaseX = CACTUS_ARM_BASE_OFFSET + armReach * 0.92
+    const upperArmBaseY = CACTUS_ARM_BASE_HEIGHT + armRise * 0.92
+    const cactusPartSpecs = [
+      {
+        x: -CACTUS_ARM_BASE_OFFSET,
+        y: CACTUS_ARM_BASE_HEIGHT,
+        tilt: CACTUS_ARM_LOWER_TILT,
+        height: CACTUS_ARM_LOWER_HEIGHT,
+        radiusTop: CACTUS_ARM_RADIUS * 0.92,
+        radiusBottom: CACTUS_ARM_RADIUS,
+      },
+      {
+        x: -upperArmBaseX,
+        y: upperArmBaseY,
+        tilt: CACTUS_ARM_UPPER_TILT,
+        height: CACTUS_ARM_UPPER_HEIGHT,
+        radiusTop: CACTUS_ARM_RADIUS * 0.82,
+        radiusBottom: CACTUS_ARM_RADIUS * 0.92,
+      },
+      {
+        x: CACTUS_ARM_BASE_OFFSET,
+        y: CACTUS_ARM_BASE_HEIGHT,
+        tilt: -CACTUS_ARM_LOWER_TILT,
+        height: CACTUS_ARM_LOWER_HEIGHT,
+        radiusTop: CACTUS_ARM_RADIUS * 0.92,
+        radiusBottom: CACTUS_ARM_RADIUS,
+      },
+      {
+        x: upperArmBaseX,
+        y: upperArmBaseY,
+        tilt: -CACTUS_ARM_UPPER_TILT,
+        height: CACTUS_ARM_UPPER_HEIGHT,
+        radiusTop: CACTUS_ARM_RADIUS * 0.82,
+        radiusBottom: CACTUS_ARM_RADIUS * 0.92,
+      },
+    ]
+    for (const spec of cactusPartSpecs) {
+      const geometry = new THREE.CylinderGeometry(
+        spec.radiusTop,
+        spec.radiusBottom,
+        spec.height,
+        7,
+        1,
+      )
+      geometry.translate(0, spec.height / 2, 0)
+      geometry.rotateZ(spec.tilt)
+      geometry.translate(spec.x, spec.y, 0)
+      cactusPartGeometries.push(geometry)
+      const mesh = new THREE.InstancedMesh(geometry, cactusArmMat, TREE_COUNT)
+      mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage)
+      mesh.frustumCulled = false
+      mesh.count = 0
+      cactusPartMeshes.push(mesh)
+      environmentGroup.add(mesh)
+    }
+    cactusTrunkGeometry = new THREE.CylinderGeometry(
+      CACTUS_TRUNK_RADIUS * 0.92,
+      CACTUS_TRUNK_RADIUS,
+      CACTUS_TRUNK_HEIGHT,
+      8,
+      1,
+    )
+    cactusTrunkGeometry.translate(0, CACTUS_TRUNK_HEIGHT / 2, 0)
+    cactusTrunkMesh = new THREE.InstancedMesh(cactusTrunkGeometry, cactusBodyMaterial, TREE_COUNT)
+    cactusTrunkMesh.instanceMatrix.setUsage(THREE.StaticDrawUsage)
+    cactusTrunkMesh.frustumCulled = false
+    cactusTrunkMesh.count = 0
+    environmentGroup.add(cactusTrunkMesh)
 
     mountainMaterial = new THREE.MeshStandardMaterial({
       color: '#8f8f8f',
@@ -2564,10 +2769,13 @@ const createScene = async (
       sampleLakes(candidate, lakes, lakeSampleTemp).boundary > LAKE_EXCLUSION_THRESHOLD
     treeTrunkSourceMatrices = []
     treeTierSourceMatrices = treeTierMeshes.map(() => [])
+    cactusTrunkSourceMatrices = []
+    cactusPartSourceMatrices = cactusPartMeshes.map(() => [])
     treeCullEntries = []
     treeVisibilityState = []
     treeVisibleIndices = []
     visibleTreeCount = 0
+    visibleCactusCount = 0
     mountainSourceMatricesByVariant = mountainMeshes.map(() => [])
     mountainCullEntriesByVariant = mountainMeshes.map(() => [])
     mountainVisibilityStateByVariant = mountainMeshes.map(() => [])
@@ -2582,15 +2790,22 @@ const createScene = async (
     if (data?.trees?.length) {
       trees = data.trees.map(buildTreeFromData)
     } else {
-      const treeNormals: THREE.Vector3[] = []
+      const forestNormals: THREE.Vector3[] = []
+      const cactusNormals: THREE.Vector3[] = []
       const treeScales: THREE.Vector3[] = []
-      const pickSparseNormal = (out: THREE.Vector3) => {
+      const cactusScales: THREE.Vector3[] = []
+      const pickSparseNormal = (
+        out: THREE.Vector3,
+        existing: THREE.Vector3[],
+        minDot: number,
+        predicate: (candidate: THREE.Vector3) => boolean,
+      ) => {
         for (let attempt = 0; attempt < 60; attempt += 1) {
           randomOnSphere(rng, out)
-          if (isInLake(out)) continue
+          if (predicate(out)) continue
           let ok = true
-          for (const existing of treeNormals) {
-            if (existing.dot(out) > minDot) {
+          for (const sample of existing) {
+            if (sample.dot(out) > minDot) {
               ok = false
               break
             }
@@ -2599,33 +2814,63 @@ const createScene = async (
         }
         for (let attempt = 0; attempt < 40; attempt += 1) {
           randomOnSphere(rng, out)
-          if (!isInLake(out)) return out
+          if (!predicate(out)) return out
         }
         return out
       }
 
-      for (let i = 0; i < treeInstanceCount; i += 1) {
+      const cactusCount = Math.min(DESERT_CACTUS_COUNT, treeInstanceCount)
+      const forestCount = Math.max(0, treeInstanceCount - cactusCount)
+      const cactusMinDot = Math.cos(0.34)
+      for (let i = 0; i < forestCount; i += 1) {
         const candidate = new THREE.Vector3()
-        pickSparseNormal(candidate)
+        pickSparseNormal(
+          candidate,
+          forestNormals,
+          minDot,
+          (out) => isInLake(out) || isDesertBiome(out),
+        )
         const widthScale = randRange(TREE_MIN_SCALE, TREE_MAX_SCALE)
         const heightScale = randRange(minHeightScale, maxHeightScale)
-        treeNormals.push(candidate)
+        forestNormals.push(candidate)
         treeScales.push(new THREE.Vector3(widthScale, heightScale, widthScale))
       }
+      for (let i = 0; i < cactusCount; i += 1) {
+        const candidate = new THREE.Vector3()
+        pickSparseNormal(
+          candidate,
+          cactusNormals,
+          cactusMinDot,
+          (out) => isInLake(out) || !isDesertBiome(out),
+        )
+        const widthScale = randRange(TREE_MIN_SCALE, TREE_MAX_SCALE)
+        const heightScale = randRange(minHeightScale, maxHeightScale)
+        cactusNormals.push(candidate)
+        cactusScales.push(new THREE.Vector3(widthScale, heightScale, widthScale))
+      }
 
-      trees = treeNormals.map((treeNormal, index) => ({
+      const generatedForest = forestNormals.map((treeNormal, index) => ({
         normal: treeNormal,
         widthScale: treeScales[index]?.x ?? 1,
         heightScale: treeScales[index]?.y ?? 1,
         twist: randRange(0, Math.PI * 2),
       }))
+      const generatedCactus = cactusNormals.map((treeNormal, index) => ({
+        normal: treeNormal,
+        widthScale: -(cactusScales[index]?.x ?? 1),
+        heightScale: cactusScales[index]?.y ?? 1,
+        twist: randRange(0, Math.PI * 2),
+      }))
+      trees = [...generatedForest, ...generatedCactus]
     }
 
-    const appliedTreeCount = Math.min(treeInstanceCount, trees.length)
+    const forestTrees = trees.filter((tree) => tree.widthScale >= 0)
+    const cactusTrees = trees.filter((tree) => tree.widthScale < 0)
+    const appliedTreeCount = Math.min(treeInstanceCount, forestTrees.length)
     const treeBaseRadius = PLANET_RADIUS + TREE_BASE_OFFSET - TREE_TRUNK_HEIGHT * 0.12
     const treeCanopyRadius = treeTierRadii.reduce((max, radius) => Math.max(max, radius), 0)
     for (let i = 0; i < appliedTreeCount; i += 1) {
-      const tree = trees[i]
+      const tree = forestTrees[i]
       normal.copy(tree.normal)
       baseQuat.setFromUnitVectors(up, normal)
       twistQuat.setFromAxisAngle(up, tree.twist)
@@ -2650,6 +2895,25 @@ const createScene = async (
       })
       treeVisibilityState.push(false)
     }
+    cactusTrunkSourceMatrices = []
+    cactusPartSourceMatrices = cactusPartMeshes.map(() => [])
+    const cactusBaseRadius = PLANET_RADIUS + TREE_BASE_OFFSET
+    const appliedCactusCount = Math.min(treeInstanceCount, cactusTrees.length)
+    for (let i = 0; i < appliedCactusCount; i += 1) {
+      const cactus = cactusTrees[i]
+      const widthScale = Math.abs(cactus.widthScale)
+      normal.copy(cactus.normal)
+      baseQuat.setFromUnitVectors(up, normal)
+      twistQuat.setFromAxisAngle(up, cactus.twist)
+      baseQuat.multiply(twistQuat)
+      baseScale.set(widthScale, cactus.heightScale, widthScale)
+      position.copy(normal).multiplyScalar(cactusBaseRadius)
+      baseMatrix.compose(position, baseQuat, baseScale)
+      cactusTrunkSourceMatrices.push(baseMatrix.clone())
+      for (let p = 0; p < cactusPartMeshes.length; p += 1) {
+        cactusPartSourceMatrices[p]?.push(baseMatrix.clone())
+      }
+    }
 
     if (treeTrunkMesh) {
       treeTrunkMesh.count = 0
@@ -2659,6 +2923,27 @@ const createScene = async (
       mesh.count = 0
       mesh.instanceMatrix.needsUpdate = true
     }
+    if (cactusTrunkMesh) {
+      for (let i = 0; i < cactusTrunkSourceMatrices.length; i += 1) {
+        const source = cactusTrunkSourceMatrices[i]
+        if (!source) continue
+        cactusTrunkMesh.setMatrixAt(i, source)
+      }
+      cactusTrunkMesh.count = cactusTrunkSourceMatrices.length
+      cactusTrunkMesh.instanceMatrix.needsUpdate = true
+    }
+    for (let p = 0; p < cactusPartMeshes.length; p += 1) {
+      const mesh = cactusPartMeshes[p]
+      const sourceMatrices = cactusPartSourceMatrices[p] ?? []
+      for (let i = 0; i < sourceMatrices.length; i += 1) {
+        const source = sourceMatrices[i]
+        if (!source) continue
+        mesh.setMatrixAt(i, source)
+      }
+      mesh.count = sourceMatrices.length
+      mesh.instanceMatrix.needsUpdate = true
+    }
+    visibleCactusCount = cactusTrunkSourceMatrices.length
 
     if (data?.mountains?.length) {
       mountains = data.mountains.map(buildMountainFromData)
@@ -2668,7 +2953,7 @@ const createScene = async (
       const pickMountainNormal = (out: THREE.Vector3) => {
         for (let attempt = 0; attempt < 60; attempt += 1) {
           randomOnSphere(rng, out)
-          if (isInLake(out)) continue
+          if (isInLake(out) || isDesertBiome(out)) continue
           let ok = true
           for (const existing of mountainNormals) {
             if (existing.dot(out) > mountainMinDot) {
@@ -2680,7 +2965,7 @@ const createScene = async (
         }
         for (let attempt = 0; attempt < 40; attempt += 1) {
           randomOnSphere(rng, out)
-          if (!isInLake(out)) return out
+          if (!isInLake(out) && !isDesertBiome(out)) return out
         }
         return out
       }
@@ -2750,7 +3035,7 @@ const createScene = async (
       while (placed < PEBBLE_COUNT && attempts < maxAttempts) {
         attempts += 1
         randomOnSphere(rng, normal)
-        if (isInLake(normal)) continue
+        if (isInLake(normal) || isDesertBiome(normal)) continue
         pebbleQuat.setFromUnitVectors(up, normal)
         twistQuat.setFromAxisAngle(up, randRange(0, Math.PI * 2))
         pebbleQuat.multiply(twistQuat)
@@ -2925,12 +3210,11 @@ const createScene = async (
     radiusOffset: number,
     snakeRadius: number,
   ) => {
-    if (lakes.length === 0) {
-      return PLANET_RADIUS + radiusOffset
-    }
     const sample = sampleLakes(normal, lakes, lakeSampleTemp)
     const depth = getVisualLakeTerrainDepth(sample)
-    let centerlineRadius = PLANET_RADIUS - depth + radiusOffset
+    const duneOffset = sampleDuneOffset(normal) * sampleDesertBlend(normal)
+    const terrainRadius = PLANET_RADIUS + duneOffset - depth
+    let centerlineRadius = terrainRadius + radiusOffset
     if (!sample.lake || sample.boundary <= LAKE_WATER_MASK_THRESHOLD) {
       return centerlineRadius
     }
@@ -2944,7 +3228,6 @@ const createScene = async (
     if (submergeBlend <= 0) return centerlineRadius
 
     const waterRadius = PLANET_RADIUS - sample.lake.surfaceInset
-    const terrainRadius = PLANET_RADIUS - depth
     const minCenterlineRadius = terrainRadius + SNAKE_MIN_TERRAIN_CLEARANCE
     const maxUnderwaterRadius = waterRadius - (snakeRadius + SNAKE_UNDERWATER_CLEARANCE)
     const submergedRadius = Math.max(

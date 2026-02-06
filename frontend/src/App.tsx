@@ -852,7 +852,7 @@ export default function App() {
                     checked={treeDebug}
                     onChange={(event) => setTreeDebug(event.target.checked)}
                   />
-                  Tree colliders
+                  Cactus colliders
                 </label>
                 <label className='debug-option'>
                   <input

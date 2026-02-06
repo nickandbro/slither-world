@@ -2,11 +2,14 @@ use super::constants::{
     BASE_PELLET_COUNT, BASE_SPEED, BOOST_MULTIPLIER, BOT_BOOST_DISTANCE, BOT_COUNT,
     BOT_MIN_STAMINA_TO_BOOST, COLOR_POOL, MAX_PELLETS, MAX_SPAWN_ATTEMPTS, MIN_SURVIVAL_LENGTH,
     OXYGEN_DRAIN_PER_SEC, OXYGEN_MAX, PLAYER_TIMEOUT_MS, RESPAWN_COOLDOWN_MS, RESPAWN_RETRY_MS,
-    SPAWN_CONE_ANGLE, STAMINA_DRAIN_PER_SEC, STAMINA_MAX, STAMINA_RECHARGE_PER_SEC, TICK_MS,
-    TURN_RATE,
+    SPAWN_CONE_ANGLE, SPAWN_PLAYER_MIN_DISTANCE, STAMINA_DRAIN_PER_SEC, STAMINA_MAX,
+    STAMINA_RECHARGE_PER_SEC, TICK_MS, TURN_RATE,
 };
 use super::digestion::{add_digestion, advance_digestions, get_digestion_progress};
-use super::environment::{sample_lakes, Environment, LAKE_WATER_MASK_THRESHOLD};
+use super::environment::{
+    sample_lakes, Environment, LAKE_WATER_MASK_THRESHOLD, PLANET_RADIUS, SNAKE_RADIUS,
+    TREE_TRUNK_RADIUS,
+};
 use super::input::parse_axis;
 use super::math::{
     clamp, collision, cross, dot, length, normalize, point_from_spherical, random_axis,
@@ -684,7 +687,7 @@ impl RoomState {
 
     fn create_player(&self, id: Uuid, name: String, is_bot: bool) -> Player {
         let base_axis = random_axis();
-        let spawned = self.spawn_snake(base_axis);
+        let spawned = self.spawn_snake(base_axis, None);
         let (alive, axis, snake, respawn_at) = match spawned {
             Some(spawned) => (true, spawned.axis, spawned.snake, None),
             None => (
@@ -720,7 +723,11 @@ impl RoomState {
         }
     }
 
-    fn spawn_snake(&self, base_axis: Point) -> Option<SpawnedSnake> {
+    fn spawn_snake(
+        &self,
+        base_axis: Point,
+        excluded_player_id: Option<&str>,
+    ) -> Option<SpawnedSnake> {
         let mut rng = rand::thread_rng();
         for attempt in 0..MAX_SPAWN_ATTEMPTS {
             let axis_seed = if attempt == 0 {
@@ -739,7 +746,7 @@ impl RoomState {
             rotate_z(&mut rotated_axis, theta);
             let axis = normalize(rotated_axis);
 
-            if !self.is_snake_too_close(&snake) {
+            if !self.is_snake_too_close(&snake, excluded_player_id) {
                 return Some(SpawnedSnake { snake, axis });
             }
         }
@@ -747,9 +754,31 @@ impl RoomState {
         None
     }
 
-    fn is_snake_too_close(&self, snake: &[SnakeNode]) -> bool {
+    fn is_snake_too_close(&self, snake: &[SnakeNode], excluded_player_id: Option<&str>) -> bool {
         if snake.is_empty() {
             return false;
+        }
+        let candidate_head = Point {
+            x: snake[0].x,
+            y: snake[0].y,
+            z: snake[0].z,
+        };
+
+        for player in self.players.values() {
+            if excluded_player_id == Some(player.id.as_str()) {
+                continue;
+            }
+            let Some(other_head) = player.snake.first() else {
+                continue;
+            };
+            let distance = length(Point {
+                x: candidate_head.x - other_head.x,
+                y: candidate_head.y - other_head.y,
+                z: candidate_head.z - other_head.z,
+            });
+            if distance < SPAWN_PLAYER_MIN_DISTANCE {
+                return true;
+            }
         }
 
         let candidate_points: Vec<Point> = snake
@@ -762,7 +791,7 @@ impl RoomState {
             .collect();
 
         for player in self.players.values() {
-            if !player.alive {
+            if excluded_player_id == Some(player.id.as_str()) {
                 continue;
             }
             for node in &player.snake {
@@ -886,9 +915,35 @@ impl RoomState {
             .collect();
 
         let mut dead: HashSet<String> = HashSet::new();
+        let cactus_contact_margin = SNAKE_RADIUS / PLANET_RADIUS;
 
         for (id, alive, snake) in &player_snapshots {
-            if !*alive || snake.len() < 3 {
+            if !*alive || snake.is_empty() {
+                continue;
+            }
+            let head = snake[0];
+            for cactus in &self.environment.trees {
+                if cactus.width_scale >= 0.0 {
+                    continue;
+                }
+                let cactus_radius = (TREE_TRUNK_RADIUS * cactus.width_scale.abs()) / PLANET_RADIUS;
+                let dot_value = clamp(dot(head, cactus.normal), -1.0, 1.0);
+                let angle = dot_value.acos();
+                if !angle.is_finite() {
+                    continue;
+                }
+                if angle < cactus_radius + cactus_contact_margin {
+                    dead.insert(id.clone());
+                    death_reasons
+                        .entry(id.clone())
+                        .or_insert("cactus_collision");
+                    break;
+                }
+            }
+        }
+
+        for (id, alive, snake) in &player_snapshots {
+            if dead.contains(id) || !*alive || snake.len() < 3 {
                 continue;
             }
             let head = snake[0];
@@ -1007,7 +1062,7 @@ impl RoomState {
 
     fn respawn_player(&mut self, player_id: &str) {
         let base_axis = random_axis();
-        let spawned = self.spawn_snake(base_axis);
+        let spawned = self.spawn_snake(base_axis, Some(player_id));
         let Some(player) = self.players.get_mut(player_id) else {
             return;
         };
@@ -1051,13 +1106,7 @@ impl RoomState {
         for visible in visible_players.iter().take(visible_player_count) {
             let player = visible.player;
             let window = visible.window;
-            capacity += 16
-                + 1
-                + 4
-                + 4
-                + 4
-                + 1
-                + 2;
+            capacity += 16 + 1 + 4 + 4 + 4 + 1 + 2;
             match window.detail {
                 SnakeDetail::Full => {
                     capacity += 2 + window.len * 12;
@@ -1476,6 +1525,44 @@ mod tests {
     }
 
     #[test]
+    fn spawn_rejects_heads_within_min_distance() {
+        let mut state = make_state();
+        state.players.insert(
+            "other".to_string(),
+            make_player("other", snake_from_xs(&[0.0, 0.4, 0.8])),
+        );
+
+        let candidate = snake_from_xs(&[SPAWN_PLAYER_MIN_DISTANCE * 0.75]);
+        assert!(state.is_snake_too_close(&candidate, None));
+    }
+
+    #[test]
+    fn spawn_allows_heads_outside_min_distance() {
+        let mut state = make_state();
+        state.players.insert(
+            "other".to_string(),
+            make_player("other", snake_from_xs(&[0.0, 0.4, 0.8])),
+        );
+
+        let candidate = snake_from_xs(&[SPAWN_PLAYER_MIN_DISTANCE + 0.05]);
+        assert!(!state.is_snake_too_close(&candidate, None));
+    }
+
+    #[test]
+    fn spawn_check_ignores_excluded_player_id() {
+        let mut state = make_state();
+        let player_id = "respawn-player".to_string();
+        state.players.insert(
+            player_id.clone(),
+            make_player(&player_id, snake_from_xs(&[0.0, 0.4, 0.8])),
+        );
+
+        let candidate = snake_from_xs(&[SPAWN_PLAYER_MIN_DISTANCE * 0.75]);
+        assert!(state.is_snake_too_close(&candidate, None));
+        assert!(!state.is_snake_too_close(&candidate, Some(&player_id)));
+    }
+
+    #[test]
     fn death_drops_pellets_for_each_body_node() {
         let mut state = make_state();
         let snake = make_snake(6, 0.0);
@@ -1721,6 +1808,8 @@ mod tests {
     fn make_full_lake_state() -> RoomState {
         use crate::game::environment::Lake;
         let mut state = make_state();
+        state.environment.trees.clear();
+        state.environment.mountains.clear();
         state.environment.lakes = vec![Lake {
             center: Point {
                 x: 1.0,
@@ -1752,6 +1841,122 @@ mod tests {
             },
         }];
         state
+    }
+
+    fn make_cactus_collision_state(cactus_normal: Point, cactus_width_scale: f64) -> RoomState {
+        use crate::game::environment::TreeInstance;
+        let mut state = make_state();
+        state.environment.lakes.clear();
+        state.environment.mountains.clear();
+        state.environment.trees = vec![TreeInstance {
+            normal: cactus_normal,
+            width_scale: -cactus_width_scale.abs(),
+            height_scale: 1.0,
+            twist: 0.0,
+        }];
+        state
+    }
+
+    #[test]
+    fn cactus_collision_kills_on_head_contact() {
+        let mut state = make_cactus_collision_state(
+            Point {
+                x: 0.0,
+                y: 0.0,
+                z: -1.0,
+            },
+            1.0,
+        );
+        let player_id = "player-cactus-hit".to_string();
+        let mut snake = create_snake(Point {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        });
+        snake.truncate(2);
+        let mut player = make_player(&player_id, snake);
+        player.axis = Point {
+            x: 0.0,
+            y: 0.0,
+            z: -1.0,
+        };
+        player.target_axis = player.axis;
+        state.players.insert(player_id.clone(), player);
+
+        state.tick();
+
+        let player = state.players.get(&player_id).expect("player");
+        assert!(!player.alive);
+    }
+
+    #[test]
+    fn cactus_collision_does_not_kill_without_contact() {
+        let mut state = make_cactus_collision_state(
+            Point {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            1.0,
+        );
+        let player_id = "player-cactus-safe".to_string();
+        let mut snake = create_snake(Point {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        });
+        snake.truncate(2);
+        let mut player = make_player(&player_id, snake);
+        player.axis = Point {
+            x: 0.0,
+            y: 0.0,
+            z: -1.0,
+        };
+        player.target_axis = player.axis;
+        state.players.insert(player_id.clone(), player);
+
+        state.tick();
+
+        let player = state.players.get(&player_id).expect("player");
+        assert!(player.alive);
+    }
+
+    #[test]
+    fn forest_tree_collision_is_not_instant_death() {
+        use crate::game::environment::TreeInstance;
+        let mut state = make_state();
+        state.environment.lakes.clear();
+        state.environment.mountains.clear();
+        state.environment.trees = vec![TreeInstance {
+            normal: Point {
+                x: 0.0,
+                y: 0.0,
+                z: -1.0,
+            },
+            width_scale: 1.0,
+            height_scale: 1.0,
+            twist: 0.0,
+        }];
+        let player_id = "player-forest-tree".to_string();
+        let mut snake = create_snake(Point {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        });
+        snake.truncate(2);
+        let mut player = make_player(&player_id, snake);
+        player.axis = Point {
+            x: 0.0,
+            y: 0.0,
+            z: -1.0,
+        };
+        player.target_axis = player.axis;
+        state.players.insert(player_id.clone(), player);
+
+        state.tick();
+
+        let player = state.players.get(&player_id).expect("player");
+        assert!(player.alive);
     }
 
     #[test]
