@@ -909,6 +909,7 @@ impl RoomState {
             color_index: rng.gen_range(0..SMALL_PELLET_COLOR_COUNT),
             base_size: size,
             current_size: size,
+            growth_fraction: SMALL_PELLET_GROWTH_FRACTION,
             state: PelletState::Idle,
         }
     }
@@ -1239,8 +1240,8 @@ impl RoomState {
         best.map(|(id, attractor, _)| (id, attractor))
     }
 
-    fn consume_small_pellets(&mut self, consumed: HashMap<String, usize>) {
-        for (player_id, count) in consumed {
+    fn consume_small_pellets(&mut self, consumed: HashMap<String, (usize, f64)>) {
+        for (player_id, (count, growth_fraction_total)) in consumed {
             let Some(player) = self.players.get_mut(&player_id) else {
                 continue;
             };
@@ -1251,7 +1252,7 @@ impl RoomState {
             for _ in 0..visual_units {
                 add_digestion_with_strength(player, SMALL_PELLET_DIGESTION_STRENGTH, false);
             }
-            player.pellet_growth_fraction += count as f64 * SMALL_PELLET_GROWTH_FRACTION;
+            player.pellet_growth_fraction += growth_fraction_total.max(0.0);
             while player.pellet_growth_fraction >= 1.0 {
                 player.pellet_growth_fraction -= 1.0;
                 player.score += 1;
@@ -1267,7 +1268,7 @@ impl RoomState {
         let attractors = self.build_head_attractors();
         let consume_cos = SMALL_PELLET_CONSUME_ANGLE.cos();
         let step = SMALL_PELLET_ATTRACT_SPEED * dt_seconds;
-        let mut consumed_by: HashMap<String, usize> = HashMap::new();
+        let mut consumed_by: HashMap<String, (usize, f64)> = HashMap::new();
         let mut i = 0usize;
         while i < self.pellets.len() {
             let target = {
@@ -1290,7 +1291,9 @@ impl RoomState {
 
                 let to_mouth_dot = clamp(dot(pellet.normal, attractor.mouth), -1.0, 1.0);
                 if to_mouth_dot >= consume_cos {
-                    *consumed_by.entry(target_id).or_insert(0) += 1;
+                    let entry = consumed_by.entry(target_id).or_insert((0, 0.0));
+                    entry.0 += 1;
+                    entry.1 += pellet.growth_fraction;
                     self.pellets.swap_remove(i);
                     continue;
                 }
@@ -1536,6 +1539,7 @@ impl RoomState {
                 color_index,
                 base_size: size,
                 current_size: size,
+                growth_fraction: 1.0,
                 state: PelletState::Idle,
             });
         }
@@ -1926,6 +1930,7 @@ mod tests {
             color_index: 0,
             base_size: 1.0,
             current_size: 1.0,
+            growth_fraction: SMALL_PELLET_GROWTH_FRACTION,
             state: PelletState::Idle,
         }
     }
@@ -2111,6 +2116,7 @@ mod tests {
                 color_index: 0,
                 base_size: SMALL_PELLET_SIZE_MIN,
                 current_size: SMALL_PELLET_SIZE_MIN,
+                growth_fraction: SMALL_PELLET_GROWTH_FRACTION,
                 state: PelletState::Idle,
             })
             .collect();
@@ -2423,6 +2429,53 @@ mod tests {
             .digestions
             .iter()
             .all(|digestion| digestion.strength <= 1.0));
+    }
+
+    #[test]
+    fn death_pellet_grants_full_growth_node_credit() {
+        let mut state = make_state();
+        let player_id = "death-pellet-growth-player".to_string();
+        let snake = vec![
+            SnakeNode {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+                pos_queue: VecDeque::new(),
+            },
+            SnakeNode {
+                x: 0.9805806756909201,
+                y: -0.19611613513818402,
+                z: 0.0,
+                pos_queue: VecDeque::new(),
+            },
+        ];
+        state
+            .players
+            .insert(player_id.clone(), make_player(&player_id, snake));
+        let mouth = normalize(Point {
+            x: 1.0,
+            y: SMALL_PELLET_MOUTH_FORWARD,
+            z: 0.0,
+        });
+        state.pellets.push(Pellet {
+            id: 700,
+            normal: mouth,
+            color_index: 0,
+            base_size: DEATH_PELLET_SIZE_MIN,
+            current_size: DEATH_PELLET_SIZE_MIN,
+            growth_fraction: 1.0,
+            state: PelletState::Idle,
+        });
+
+        state.update_small_pellets(TICK_MS as f64 / 1000.0);
+
+        let player_after = state.players.get(&player_id).expect("player");
+        assert_eq!(player_after.score, 1);
+        assert!(player_after.pellet_growth_fraction < 0.01);
+        assert!(player_after
+            .digestions
+            .iter()
+            .any(|digestion| digestion.grows));
     }
 
     #[test]

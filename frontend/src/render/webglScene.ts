@@ -356,9 +356,9 @@ const PELLET_COLORS = [
   '#6f8bff',
   '#f9ff6b',
 ]
-const PELLET_SIZE_TIER_MULTIPLIERS = [0.92, 1.18, 1.46]
-const PELLET_SIZE_TIER_MEDIUM_MIN = 1.0
-const PELLET_SIZE_TIER_LARGE_MIN = 1.45
+const PELLET_SIZE_TIER_MULTIPLIERS = [0.9, 1.45, 2.8]
+const PELLET_SIZE_TIER_MEDIUM_MIN = 1.05
+const PELLET_SIZE_TIER_LARGE_MIN = 1.6
 const PELLET_GLOW_PULSE_SPEED = 0.45
 const PELLET_GLOW_OPACITY_BASE = 0.8
 const PELLET_GLOW_OPACITY_RANGE = 0.1
@@ -381,12 +381,12 @@ const TONGUE_PELLET_MATCH = HEAD_RADIUS * 1.6
 const TONGUE_ENABLED = false
 const TAIL_CAP_SEGMENTS = 5
 const TAIL_DIR_MIN_RATIO = 0.35
-const DIGESTION_BULGE_MIN = 0.14
-const DIGESTION_BULGE_MAX = 0.38
-const DIGESTION_WIDTH_MIN = 1.5
-const DIGESTION_WIDTH_MAX = 2.4
-const DIGESTION_MAX_BULGE_MIN = 0.42
-const DIGESTION_MAX_BULGE_MAX = 0.62
+const DIGESTION_BULGE_MIN = 0.22
+const DIGESTION_BULGE_MAX = 0.54
+const DIGESTION_WIDTH_MIN = 1.6
+const DIGESTION_WIDTH_MAX = 2.9
+const DIGESTION_MAX_BULGE_MIN = 0.55
+const DIGESTION_MAX_BULGE_MAX = 0.82
 const DIGESTION_START_RINGS = 0
 const DIGESTION_START_MAX = 0
 const DIGESTION_TRAVEL_EASE = 1
@@ -4049,7 +4049,7 @@ const createScene = async (
       const end = Math.min(ringCount - 1, Math.ceil(center + influenceRadius))
       const sigma = Math.max(0.5, influenceRadius * 0.7)
       const tailFade = smoothstep(0, 0.016, 1 - mapped)
-      const headFade = smoothstep(0.03, 0.16, mapped)
+      const headFade = smoothstep(0.008, 0.11, mapped)
       const travelFade = Math.min(headFade, tailFade)
       if (travelFade <= 0) continue
       for (let ring = start; ring <= end; ring += 1) {

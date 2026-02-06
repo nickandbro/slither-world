@@ -39,6 +39,7 @@ pub struct Pellet {
     pub color_index: u8,
     pub base_size: f32,
     pub current_size: f32,
+    pub growth_fraction: f64,
     pub state: PelletState,
 }
 

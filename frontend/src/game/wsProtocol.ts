@@ -38,7 +38,7 @@ const SNAKE_DETAIL_STUB = 2
 const MAX_STRING_BYTES = 255
 const PELLET_NORMAL_MAX = 32767
 const PELLET_SIZE_MIN = 0.55
-const PELLET_SIZE_MAX = 1.75
+const PELLET_SIZE_MAX = 2.85
 
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
