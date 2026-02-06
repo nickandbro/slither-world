@@ -95,9 +95,6 @@ type LakeMaterialUserData = {
   lakeWaterUniforms?: LakeWaterUniforms
 }
 
-type TerrainLodRebuildReason = 'force' | 'zoom' | 'detail' | 'center' | null
-type TerrainLodCenterMode = 'camera' | 'head'
-
 type TreeInstance = {
   normal: THREE.Vector3
   widthScale: number
@@ -114,6 +111,33 @@ type MountainInstance = {
   outline: number[]
   tangent: THREE.Vector3
   bitangent: THREE.Vector3
+}
+
+type TerrainPatchInstance = {
+  mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
+  center: THREE.Vector3
+  angularExtent: number
+  visible: boolean
+}
+
+type TreeCullEntry = {
+  basePoint: THREE.Vector3
+  topPoint: THREE.Vector3
+  baseRadius: number
+  topRadius: number
+}
+
+type MountainCullEntry = {
+  basePoint: THREE.Vector3
+  peakPoint: THREE.Vector3
+  baseRadius: number
+  peakRadius: number
+  variant: number
+}
+
+type PebbleCullEntry = {
+  point: THREE.Vector3
+  radius: number
 }
 
 export type RendererPreference = 'auto' | 'webgl' | 'webgpu'
@@ -149,18 +173,16 @@ const BASE_PLANET_RADIUS = 1
 const PLANET_RADIUS = 3
 const PLANET_SCALE = PLANET_RADIUS / BASE_PLANET_RADIUS
 const PLANET_BASE_ICOSPHERE_DETAIL = 16
-const PLANET_PATCH_LOD_ENABLED = true
-const PLANET_PATCH_CENTER_REBUILD_ANGLE = 0.08
-const PLANET_PATCH_OUTER_REBUILD_ANGLE = 0.05
-const PLANET_PATCH_EDGE_MARGIN = 0.2
-const PLANET_PATCH_RING_EXPONENT = 1.8
-const PLANET_PATCH_OUTER_MIN = 0.72
-const PLANET_PATCH_OUTER_MAX = 1.5
-const PLANET_PATCH_FIXED_RINGS = 72
-const PLANET_PATCH_FIXED_SEGMENTS = 192
-const PLANET_PATCH_DISTANCE_NEAR = 4.2
+const PLANET_PATCH_ENABLED = true
+const PLANET_PATCH_BANDS = 12
+const PLANET_PATCH_SLICES = 24
+const PLANET_PATCH_VIEW_MARGIN = 0.18
+const PLANET_PATCH_HIDE_EXTRA = 0.06
+const PLANET_OBJECT_VIEW_MARGIN = 0.14
+const PLANET_OBJECT_HIDE_EXTRA = 0.06
+const PLANET_PATCH_OUTER_MIN = 0.22
+const PLANET_PATCH_OUTER_MAX = 1.4
 const LAKE_SURFACE_ICOSPHERE_DETAIL = 18
-const PLANET_PATCH_CENTER_MODE = 'camera' as TerrainLodCenterMode
 const LAKE_SURFACE_SEGMENTS = 96
 const LAKE_SURFACE_RINGS = 64
 const LAKE_COUNT = 2
@@ -191,7 +213,6 @@ const DEATH_VISIBILITY_CUTOFF = 0.02
 
 const WORLD_UP = new THREE.Vector3(0, 1, 0)
 const WORLD_RIGHT = new THREE.Vector3(1, 0, 0)
-const PLANET_PATCH_CAMERA_FORWARD = new THREE.Vector3(0, 0, 1)
 const OXYGEN_DAMAGE_COLOR = new THREE.Color('#ff2d2d')
 const OXYGEN_DAMAGE_EMISSIVE = new THREE.Color('#ff0000')
 const LAKE_WATER_OVERDRAW = BASE_PLANET_RADIUS * 0.01
@@ -323,20 +344,13 @@ const surfaceAngleFromRay = (cameraDistance: number, halfFov: number) => {
   return Math.acos(clamp(hitZ / PLANET_RADIUS, -1, 1))
 }
 
-const computePatchOuterAngle = (cameraDistance: number, aspect: number) => {
+const computeVisibleSurfaceAngle = (cameraDistance: number, aspect: number) => {
   const halfY = (40 * Math.PI) / 360
   const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 1
   const halfX = Math.atan(Math.tan(halfY) * safeAspect)
   const halfDiag = Math.min(Math.PI * 0.499, Math.hypot(halfX, halfY))
   const base = surfaceAngleFromRay(cameraDistance, halfDiag)
-  return clamp(base + PLANET_PATCH_EDGE_MARGIN, PLANET_PATCH_OUTER_MIN, PLANET_PATCH_OUTER_MAX)
-}
-
-const computePatchDetail = () => {
-  return {
-    rings: PLANET_PATCH_FIXED_RINGS,
-    segments: PLANET_PATCH_FIXED_SEGMENTS,
-  }
+  return clamp(base, PLANET_PATCH_OUTER_MIN, PLANET_PATCH_OUTER_MAX)
 }
 const createMountainGeometry = (seed: number) => {
   const rand = createSeededRandom(seed)
@@ -1202,6 +1216,9 @@ const createScene = async (
   let trees: TreeInstance[] = []
   let mountains: MountainInstance[] = []
   let planetMesh: THREE.Mesh | null = null
+  let planetPatches: TerrainPatchInstance[] = []
+  let planetPatchMaterial: THREE.MeshStandardMaterial | null = null
+  let visiblePlanetPatchCount = 0
   let gridMesh: THREE.LineSegments | null = null
   let shorelineLineMesh: THREE.LineSegments | null = null
   let shorelineFillMesh: THREE.Mesh | null = null
@@ -1279,17 +1296,28 @@ const createScene = async (
   let pebbleGeometry: THREE.BufferGeometry | null = null
   let pebbleMaterial: THREE.MeshStandardMaterial | null = null
   let pebbleMesh: THREE.InstancedMesh | null = null
+  let treeTrunkSourceMatrices: THREE.Matrix4[] = []
+  let treeTierSourceMatrices: THREE.Matrix4[][] = []
+  let treeCullEntries: TreeCullEntry[] = []
+  let treeVisibilityState: boolean[] = []
+  let treeVisibleIndices: number[] = []
+  let visibleTreeCount = 0
+  let mountainSourceMatricesByVariant: THREE.Matrix4[][] = []
+  let mountainCullEntriesByVariant: MountainCullEntry[][] = []
+  let mountainVisibilityStateByVariant: boolean[][] = []
+  let mountainVisibleIndicesByVariant: number[][] = []
+  let visibleMountainCount = 0
+  let pebbleSourceMatrices: THREE.Matrix4[] = []
+  let pebbleCullEntries: PebbleCullEntry[] = []
+  let pebbleVisibilityState: boolean[] = []
+  let pebbleVisibleIndices: number[] = []
+  let visiblePebbleCount = 0
+  let visibleLakeCount = 0
   let pelletMesh: THREE.InstancedMesh | null = null
   let pelletCapacity = 0
   let viewportWidth = 1
   let viewportHeight = 1
   let lastFrameTime = performance.now()
-  const planetPatchCenter = new THREE.Vector3(0, 0, 1)
-  let planetPatchOuterAngle = 0
-  let planetPatchRings = 0
-  let planetPatchSegments = 0
-  let planetPatchRebuildCount = 0
-  let planetPatchLastRebuildReason: TerrainLodRebuildReason = null
 
   const snakes = new Map<string, SnakeVisual>()
   const deathStates = new Map<string, DeathState>()
@@ -1316,10 +1344,13 @@ const createScene = async (
   const tempVectorF = new THREE.Vector3()
   const tempVectorG = new THREE.Vector3()
   const tempVectorH = new THREE.Vector3()
-  const patchCenterTemp = new THREE.Vector3()
   const patchCenterQuat = new THREE.Quaternion()
   const lakeSampleTemp = new THREE.Vector3()
   const tempQuat = new THREE.Quaternion()
+  const cameraLocalPosTemp = new THREE.Vector3()
+  const cameraLocalDirTemp = new THREE.Vector3()
+  const directionTemp = new THREE.Vector3()
+  const rayDirTemp = new THREE.Vector3()
   const tongueUp = new THREE.Vector3(0, 1, 0)
   const debugEnabled = import.meta.env.DEV || import.meta.env.VITE_E2E_DEBUG === '1'
   let debugApi:
@@ -1333,14 +1364,23 @@ const createScene = async (
           fallbackReason: string | null
           webglShaderHooksEnabled: boolean
         }
-        getTerrainLodInfo: () => {
-          rings: number
-          segments: number
-          outerAngle: number
-          rebuildCount: number
-          lastRebuildReason: TerrainLodRebuildReason
-          centerMode: TerrainLodCenterMode
+        getTerrainPatchInfo: () => {
+          totalPatches: number
+          visiblePatches: number
+          patchBands: number
+          patchSlices: number
+          dynamicRebuilds: boolean
           wireframeEnabled: boolean
+        }
+        getEnvironmentCullInfo: () => {
+          totalTrees: number
+          visibleTrees: number
+          totalMountains: number
+          visibleMountains: number
+          totalPebbles: number
+          visiblePebbles: number
+          totalLakes: number
+          visibleLakes: number
         }
       }
     | null = null
@@ -1358,14 +1398,23 @@ const createScene = async (
           fallbackReason: string | null
           webglShaderHooksEnabled: boolean
         }
-        getTerrainLodInfo: () => {
-          rings: number
-          segments: number
-          outerAngle: number
-          rebuildCount: number
-          lastRebuildReason: TerrainLodRebuildReason
-          centerMode: TerrainLodCenterMode
+        getTerrainPatchInfo: () => {
+          totalPatches: number
+          visiblePatches: number
+          patchBands: number
+          patchSlices: number
+          dynamicRebuilds: boolean
           wireframeEnabled: boolean
+        }
+        getEnvironmentCullInfo: () => {
+          totalTrees: number
+          visibleTrees: number
+          totalMountains: number
+          visibleMountains: number
+          totalPebbles: number
+          visiblePebbles: number
+          totalLakes: number
+          visibleLakes: number
         }
       }
     }
@@ -1390,14 +1439,23 @@ const createScene = async (
         fallbackReason,
         webglShaderHooksEnabled,
       }),
-      getTerrainLodInfo: () => ({
-        rings: planetPatchRings,
-        segments: planetPatchSegments,
-        outerAngle: planetPatchOuterAngle,
-        rebuildCount: planetPatchRebuildCount,
-        lastRebuildReason: planetPatchLastRebuildReason,
-        centerMode: PLANET_PATCH_CENTER_MODE,
+      getTerrainPatchInfo: () => ({
+        totalPatches: planetPatches.length,
+        visiblePatches: visiblePlanetPatchCount,
+        patchBands: PLANET_PATCH_BANDS,
+        patchSlices: PLANET_PATCH_SLICES,
+        dynamicRebuilds: false,
         wireframeEnabled: terrainTessellationDebugEnabled,
+      }),
+      getEnvironmentCullInfo: () => ({
+        totalTrees: treeCullEntries.length,
+        visibleTrees: visibleTreeCount,
+        totalMountains: mountains.length,
+        visibleMountains: visibleMountainCount,
+        totalPebbles: pebbleCullEntries.length,
+        visiblePebbles: visiblePebbleCount,
+        totalLakes: lakes.length,
+        visibleLakes: visibleLakeCount,
       }),
     }
     debugWindow.__SNAKE_DEBUG__ = debugApi
@@ -1432,17 +1490,21 @@ const createScene = async (
   }
 
   const disposeEnvironment = () => {
-    planetPatchCenter.set(0, 0, 1)
-    planetPatchOuterAngle = 0
-    planetPatchRings = 0
-    planetPatchSegments = 0
-    planetPatchRebuildCount = 0
-    planetPatchLastRebuildReason = null
+    visiblePlanetPatchCount = 0
     if (planetMesh) {
       world.remove(planetMesh)
       planetMesh.geometry.dispose()
       disposeMaterial(planetMesh.material)
       planetMesh = null
+    }
+    for (const patch of planetPatches) {
+      world.remove(patch.mesh)
+      patch.mesh.geometry.dispose()
+    }
+    planetPatches = []
+    if (planetPatchMaterial) {
+      planetPatchMaterial.dispose()
+      planetPatchMaterial = null
     }
     if (gridMesh) {
       world.remove(gridMesh)
@@ -1564,6 +1626,23 @@ const createScene = async (
       pebbleMaterial = null
     }
     pebbleMesh = null
+    treeTrunkSourceMatrices = []
+    treeTierSourceMatrices = []
+    treeCullEntries = []
+    treeVisibilityState = []
+    treeVisibleIndices = []
+    visibleTreeCount = 0
+    mountainSourceMatricesByVariant = []
+    mountainCullEntriesByVariant = []
+    mountainVisibilityStateByVariant = []
+    mountainVisibleIndicesByVariant = []
+    visibleMountainCount = 0
+    pebbleSourceMatrices = []
+    pebbleCullEntries = []
+    pebbleVisibilityState = []
+    pebbleVisibleIndices = []
+    visiblePebbleCount = 0
+    visibleLakeCount = 0
 
     lakes = []
     trees = []
@@ -1780,151 +1859,410 @@ const createScene = async (
     treeDebugGroup = group
   }
 
-  const getPlanetSurfaceRadius = (normal: THREE.Vector3) => {
-    if (lakes.length === 0) return PLANET_RADIUS
-    const sample = sampleLakes(normal, lakes, lakeSampleTemp)
-    const depth = getVisualLakeTerrainDepth(sample)
-    return PLANET_RADIUS - depth
+  const arraysEqual = (a: number[], b: number[]) => {
+    if (a.length !== b.length) return false
+    for (let i = 0; i < a.length; i += 1) {
+      if (a[i] !== b[i]) return false
+    }
+    return true
   }
 
-  const buildPlanetPatchGeometry = (
-    center: THREE.Vector3,
-    outerAngle: number,
-    rings: number,
-    segments: number,
+  const isAngularVisible = (
+    directionDot: number,
+    viewAngle: number,
+    angularRadius: number,
+    wasVisible: boolean,
+    margin: number,
+    hideExtra: number,
   ) => {
-    const geometry = new THREE.BufferGeometry()
-    const clampedRings = Math.max(1, rings)
-    const clampedSegments = Math.max(12, segments)
-    const positions: number[] = []
-    const indices: number[] = []
+    const limit = Math.min(
+      Math.PI - 1e-4,
+      viewAngle + angularRadius + margin + (wasVisible ? hideExtra : 0),
+    )
+    return directionDot >= Math.cos(limit)
+  }
 
-    const tangent = new THREE.Vector3()
-    const bitangent = new THREE.Vector3()
-    const dir = new THREE.Vector3()
-    buildTangentBasis(center, tangent, bitangent)
+  const isOccludedByPlanet = (point: THREE.Vector3, cameraLocalPos: THREE.Vector3) => {
+    rayDirTemp.copy(point).sub(cameraLocalPos)
+    const segmentLength = rayDirTemp.length()
+    if (!Number.isFinite(segmentLength) || segmentLength <= 1e-6) return false
+    rayDirTemp.multiplyScalar(1 / segmentLength)
 
-    const addVertex = (normal: THREE.Vector3) => {
-      const radius = getPlanetSurfaceRadius(normal)
-      positions.push(normal.x * radius, normal.y * radius, normal.z * radius)
+    const tca = -cameraLocalPos.dot(rayDirTemp)
+    const occluderRadius = PLANET_RADIUS - 1e-4
+    const d2 = cameraLocalPos.lengthSq() - tca * tca
+    const radiusSq = occluderRadius * occluderRadius
+    if (d2 >= radiusSq) return false
+
+    const thc = Math.sqrt(radiusSq - d2)
+    const t0 = tca - thc
+    const t1 = tca + thc
+    const maxT = segmentLength - 1e-4
+    return (t0 > 1e-4 && t0 < maxT) || (t1 > 1e-4 && t1 < maxT)
+  }
+
+  const isPointVisible = (
+    point: THREE.Vector3,
+    pointRadius: number,
+    cameraLocalPos: THREE.Vector3,
+    cameraLocalDir: THREE.Vector3,
+    viewAngle: number,
+    wasVisible: boolean,
+    margin = PLANET_OBJECT_VIEW_MARGIN,
+  ) => {
+    const radiusFromCenter = point.length()
+    if (!Number.isFinite(radiusFromCenter) || radiusFromCenter <= 1e-6) return false
+    directionTemp.copy(point).multiplyScalar(1 / radiusFromCenter)
+    const directionDot = directionTemp.dot(cameraLocalDir)
+    const angularRadius =
+      pointRadius > 0 ? Math.asin(clamp(pointRadius / radiusFromCenter, 0, 1)) : 0
+    if (
+      !isAngularVisible(
+        directionDot,
+        viewAngle,
+        angularRadius,
+        wasVisible,
+        margin,
+        PLANET_OBJECT_HIDE_EXTRA,
+      )
+    ) {
+      return false
+    }
+    return !isOccludedByPlanet(point, cameraLocalPos)
+  }
+
+  const buildPlanetPatchAtlas = (
+    planetGeometry: THREE.BufferGeometry,
+    material: THREE.MeshStandardMaterial,
+  ) => {
+    const positionAttr = planetGeometry.getAttribute('position')
+    if (!(positionAttr instanceof THREE.BufferAttribute)) return
+    const normalRaw = planetGeometry.getAttribute('normal')
+    const normalAttr = normalRaw instanceof THREE.BufferAttribute ? normalRaw : null
+    const indexAttr = planetGeometry.getIndex()
+    const patchCount = PLANET_PATCH_BANDS * PLANET_PATCH_SLICES
+    const buckets = Array.from({ length: patchCount }, () => ({
+      positions: [] as number[],
+      normals: [] as number[],
+    }))
+    const triCount = indexAttr
+      ? Math.floor(indexAttr.count / 3)
+      : Math.floor(positionAttr.count / 3)
+    const vertexA = new THREE.Vector3()
+    const vertexB = new THREE.Vector3()
+    const vertexC = new THREE.Vector3()
+    const centroid = new THREE.Vector3()
+    const normal = new THREE.Vector3()
+
+    const readVertex = (index: number, out: THREE.Vector3) => {
+      out.set(positionAttr.getX(index), positionAttr.getY(index), positionAttr.getZ(index))
+    }
+    const readNormal = (index: number, out: THREE.Vector3) => {
+      if (normalAttr) {
+        out.set(normalAttr.getX(index), normalAttr.getY(index), normalAttr.getZ(index))
+      } else {
+        out.set(positionAttr.getX(index), positionAttr.getY(index), positionAttr.getZ(index))
+      }
+      if (out.lengthSq() > 1e-8) {
+        out.normalize()
+      } else {
+        out.set(0, 1, 0)
+      }
     }
 
-    addVertex(center)
+    for (let tri = 0; tri < triCount; tri += 1) {
+      const i0 = indexAttr ? indexAttr.getX(tri * 3) : tri * 3
+      const i1 = indexAttr ? indexAttr.getX(tri * 3 + 1) : tri * 3 + 1
+      const i2 = indexAttr ? indexAttr.getX(tri * 3 + 2) : tri * 3 + 2
+      readVertex(i0, vertexA)
+      readVertex(i1, vertexB)
+      readVertex(i2, vertexC)
+      centroid.copy(vertexA).add(vertexB).add(vertexC).multiplyScalar(1 / 3)
+      if (centroid.lengthSq() <= 1e-10) continue
+      centroid.normalize()
+      const latitude = Math.asin(clamp(centroid.y, -1, 1))
+      const longitude = Math.atan2(centroid.z, centroid.x)
+      const band = clamp(
+        Math.floor(((latitude + Math.PI * 0.5) / Math.PI) * PLANET_PATCH_BANDS),
+        0,
+        PLANET_PATCH_BANDS - 1,
+      )
+      const slice = clamp(
+        Math.floor(((longitude + Math.PI) / (Math.PI * 2)) * PLANET_PATCH_SLICES),
+        0,
+        PLANET_PATCH_SLICES - 1,
+      )
+      const bucket = buckets[band * PLANET_PATCH_SLICES + slice]
+      bucket.positions.push(
+        vertexA.x,
+        vertexA.y,
+        vertexA.z,
+        vertexB.x,
+        vertexB.y,
+        vertexB.z,
+        vertexC.x,
+        vertexC.y,
+        vertexC.z,
+      )
+      readNormal(i0, normal)
+      bucket.normals.push(normal.x, normal.y, normal.z)
+      readNormal(i1, normal)
+      bucket.normals.push(normal.x, normal.y, normal.z)
+      readNormal(i2, normal)
+      bucket.normals.push(normal.x, normal.y, normal.z)
+    }
 
-    for (let ring = 1; ring <= clampedRings; ring += 1) {
-      const t = ring / clampedRings
-      const theta = outerAngle * Math.pow(t, PLANET_PATCH_RING_EXPONENT)
-      const sinTheta = Math.sin(theta)
-      const cosTheta = Math.cos(theta)
-      for (let s = 0; s < clampedSegments; s += 1) {
-        const phi = (s / clampedSegments) * Math.PI * 2
-        dir
-          .copy(center)
-          .multiplyScalar(cosTheta)
-          .addScaledVector(tangent, Math.cos(phi) * sinTheta)
-          .addScaledVector(bitangent, Math.sin(phi) * sinTheta)
+    for (const bucket of buckets) {
+      if (bucket.positions.length < 9) continue
+      const geometry = new THREE.BufferGeometry()
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(bucket.positions, 3))
+      if (bucket.normals.length === bucket.positions.length) {
+        geometry.setAttribute('normal', new THREE.Float32BufferAttribute(bucket.normals, 3))
+      } else {
+        geometry.computeVertexNormals()
+      }
+      geometry.computeBoundingSphere()
+
+      const center = new THREE.Vector3()
+      for (let i = 0; i < bucket.positions.length; i += 3) {
+        directionTemp
+          .set(bucket.positions[i], bucket.positions[i + 1], bucket.positions[i + 2])
           .normalize()
-        addVertex(dir)
+        center.add(directionTemp)
       }
-    }
-
-    const firstRingStart = 1
-    for (let s = 0; s < clampedSegments; s += 1) {
-      const current = firstRingStart + s
-      const next = firstRingStart + ((s + 1) % clampedSegments)
-      indices.push(0, current, next)
-    }
-
-    for (let ring = 2; ring <= clampedRings; ring += 1) {
-      const prevStart = 1 + (ring - 2) * clampedSegments
-      const currStart = 1 + (ring - 1) * clampedSegments
-      for (let s = 0; s < clampedSegments; s += 1) {
-        const a = prevStart + s
-        const b = prevStart + ((s + 1) % clampedSegments)
-        const c = currStart + s
-        const d = currStart + ((s + 1) % clampedSegments)
-        indices.push(a, c, b)
-        indices.push(b, c, d)
+      if (center.lengthSq() <= 1e-10) {
+        geometry.dispose()
+        continue
       }
-    }
+      center.normalize()
+      let angularExtent = 0
+      for (let i = 0; i < bucket.positions.length; i += 3) {
+        directionTemp
+          .set(bucket.positions[i], bucket.positions[i + 1], bucket.positions[i + 2])
+          .normalize()
+        const angle = Math.acos(clamp(directionTemp.dot(center), -1, 1))
+        if (angle > angularExtent) angularExtent = angle
+      }
 
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
-    geometry.setIndex(indices)
-    geometry.computeVertexNormals()
-    geometry.computeBoundingSphere()
-    return geometry
+      const mesh = new THREE.Mesh(geometry, material)
+      mesh.visible = false
+      world.add(mesh)
+      planetPatches.push({ mesh, center, angularExtent, visible: false })
+    }
+    visiblePlanetPatchCount = 0
   }
 
-  const updateLakePatchVisibility = (center: THREE.Vector3, outerAngle: number) => {
-    if (!PLANET_PATCH_LOD_ENABLED) return
-    const visibilityCos = Math.cos(outerAngle + PLANET_PATCH_EDGE_MARGIN)
-    for (let i = 0; i < lakeMeshes.length; i += 1) {
-      const lake = lakes[i]
-      const mesh = lakeMeshes[i]
-      if (!lake || !mesh) continue
-      mesh.visible = lake.center.dot(center) >= visibilityCos
+  const updatePlanetPatchVisibility = (cameraLocalDir: THREE.Vector3, viewAngle: number) => {
+    let visibleCount = 0
+    for (const patch of planetPatches) {
+      const directionDot = patch.center.dot(cameraLocalDir)
+      const visible = isAngularVisible(
+        directionDot,
+        viewAngle,
+        patch.angularExtent,
+        patch.visible,
+        PLANET_PATCH_VIEW_MARGIN,
+        PLANET_PATCH_HIDE_EXTRA,
+      )
+      patch.visible = visible
+      patch.mesh.visible = visible
+      if (visible) visibleCount += 1
     }
+    visiblePlanetPatchCount = visibleCount
   }
 
-  const getPatchCenterForRebuild = (headNormal: THREE.Vector3 | null) => {
-    if (PLANET_PATCH_CENTER_MODE === 'head' && headNormal) {
-      return headNormal
-    }
-    patchCenterQuat.copy(world.quaternion).invert()
-    return patchCenterTemp
-      .copy(PLANET_PATCH_CAMERA_FORWARD)
-      .applyQuaternion(patchCenterQuat)
-      .normalize()
-  }
-
-  const maybeRebuildPlanetPatch = (
-    center: THREE.Vector3,
-    cameraDistance: number,
-    force = false,
+  const updateLakeVisibility = (
+    cameraLocalPos: THREE.Vector3,
+    cameraLocalDir: THREE.Vector3,
+    viewAngle: number,
   ) => {
-    if (!PLANET_PATCH_LOD_ENABLED || !planetMesh) return
-    const normalizedCenter = center.clone().normalize()
-    const aspect = viewportHeight > 0 ? viewportWidth / viewportHeight : 1
-    const outerAngle = computePatchOuterAngle(cameraDistance, aspect)
-    const detail = computePatchDetail()
-
-    const centerDelta = Math.acos(clamp(planetPatchCenter.dot(normalizedCenter), -1, 1))
-    const angleDelta = Math.abs(outerAngle - planetPatchOuterAngle)
-    const detailChanged =
-      detail.rings !== planetPatchRings || detail.segments !== planetPatchSegments
-    const centerChanged = centerDelta >= PLANET_PATCH_CENTER_REBUILD_ANGLE
-    const zoomChanged = angleDelta >= PLANET_PATCH_OUTER_REBUILD_ANGLE
-
-    let rebuildReason: TerrainLodRebuildReason = null
-    if (force) {
-      rebuildReason = 'force'
-    } else if (detailChanged) {
-      rebuildReason = 'detail'
-    } else if (centerChanged) {
-      rebuildReason = 'center'
-    } else if (zoomChanged) {
-      rebuildReason = 'zoom'
-    }
-
-    if (!rebuildReason) {
+    if (lakeMeshes.length === 0 || lakes.length === 0) {
+      visibleLakeCount = 0
       return
     }
 
-    const nextGeometry = buildPlanetPatchGeometry(
-      normalizedCenter,
-      outerAngle,
-      detail.rings,
-      detail.segments,
-    )
-    planetMesh.geometry.dispose()
-    planetMesh.geometry = nextGeometry
-    planetPatchCenter.copy(normalizedCenter)
-    planetPatchOuterAngle = outerAngle
-    planetPatchRings = detail.rings
-    planetPatchSegments = detail.segments
-    planetPatchRebuildCount += 1
-    planetPatchLastRebuildReason = rebuildReason
-    updateLakePatchVisibility(normalizedCenter, outerAngle)
+    if (webglShaderHooksEnabled) {
+      let visible = 0
+      for (let i = 0; i < lakeMeshes.length; i += 1) {
+        const lake = lakes[i]
+        const mesh = lakeMeshes[i]
+        if (!lake || !mesh) continue
+        const centerPoint = tempVectorH
+          .copy(lake.center)
+          .multiplyScalar(PLANET_RADIUS - lake.surfaceInset)
+        const inView = isAngularVisible(
+          lake.center.dot(cameraLocalDir),
+          viewAngle,
+          lake.radius,
+          mesh.visible,
+          PLANET_OBJECT_VIEW_MARGIN,
+          PLANET_OBJECT_HIDE_EXTRA,
+        )
+        const visibleNow = inView && !isOccludedByPlanet(centerPoint, cameraLocalPos)
+        mesh.visible = visibleNow
+        if (visibleNow) visible += 1
+      }
+      visibleLakeCount = visible
+      return
+    }
+
+    let anyVisible = false
+    let visible = 0
+    for (const lake of lakes) {
+      const centerPoint = tempVectorH
+        .copy(lake.center)
+        .multiplyScalar(PLANET_RADIUS - lake.surfaceInset)
+      const visibleNow =
+        isAngularVisible(
+          lake.center.dot(cameraLocalDir),
+          viewAngle,
+          lake.radius,
+          anyVisible,
+          PLANET_OBJECT_VIEW_MARGIN,
+          PLANET_OBJECT_HIDE_EXTRA,
+        ) && !isOccludedByPlanet(centerPoint, cameraLocalPos)
+      if (visibleNow) {
+        anyVisible = true
+        visible += 1
+      }
+    }
+    for (const mesh of lakeMeshes) {
+      mesh.visible = anyVisible
+    }
+    visibleLakeCount = visible
+  }
+
+  const updateEnvironmentVisibility = (
+    cameraLocalPos: THREE.Vector3,
+    cameraLocalDir: THREE.Vector3,
+    viewAngle: number,
+  ) => {
+    const nextTreeVisible: number[] = []
+    for (let i = 0; i < treeCullEntries.length; i += 1) {
+      const entry = treeCullEntries[i]
+      const wasVisible = treeVisibilityState[i] ?? false
+      const visible =
+        isPointVisible(
+          entry.basePoint,
+          entry.baseRadius,
+          cameraLocalPos,
+          cameraLocalDir,
+          viewAngle,
+          wasVisible,
+        ) ||
+        isPointVisible(
+          entry.topPoint,
+          entry.topRadius,
+          cameraLocalPos,
+          cameraLocalDir,
+          viewAngle,
+          wasVisible,
+        )
+      treeVisibilityState[i] = visible
+      if (visible) nextTreeVisible.push(i)
+    }
+    if (!arraysEqual(nextTreeVisible, treeVisibleIndices)) {
+      treeVisibleIndices = nextTreeVisible
+      if (treeTrunkMesh) {
+        for (let write = 0; write < treeVisibleIndices.length; write += 1) {
+          const source = treeTrunkSourceMatrices[treeVisibleIndices[write]]
+          if (!source) continue
+          treeTrunkMesh.setMatrixAt(write, source)
+        }
+        treeTrunkMesh.count = treeVisibleIndices.length
+        treeTrunkMesh.instanceMatrix.needsUpdate = true
+      }
+      for (let tier = 0; tier < treeTierMeshes.length; tier += 1) {
+        const mesh = treeTierMeshes[tier]
+        const sourceMatrices = treeTierSourceMatrices[tier]
+        if (!mesh || !sourceMatrices) continue
+        for (let write = 0; write < treeVisibleIndices.length; write += 1) {
+          const source = sourceMatrices[treeVisibleIndices[write]]
+          if (!source) continue
+          mesh.setMatrixAt(write, source)
+        }
+        mesh.count = treeVisibleIndices.length
+        mesh.instanceMatrix.needsUpdate = true
+      }
+    }
+    visibleTreeCount = treeVisibleIndices.length
+
+    let mountainVisibleTotal = 0
+    for (let variant = 0; variant < mountainMeshes.length; variant += 1) {
+      const entries = mountainCullEntriesByVariant[variant] ?? []
+      const state = mountainVisibilityStateByVariant[variant] ?? []
+      const nextVariantVisible: number[] = []
+      for (let i = 0; i < entries.length; i += 1) {
+        const entry = entries[i]
+        const wasVisible = state[i] ?? false
+        const visible =
+          isPointVisible(
+            entry.basePoint,
+            entry.baseRadius,
+            cameraLocalPos,
+            cameraLocalDir,
+            viewAngle,
+            wasVisible,
+          ) ||
+          isPointVisible(
+            entry.peakPoint,
+            entry.peakRadius,
+            cameraLocalPos,
+            cameraLocalDir,
+            viewAngle,
+            wasVisible,
+          )
+        state[i] = visible
+        if (visible) nextVariantVisible.push(i)
+      }
+      mountainVisibilityStateByVariant[variant] = state
+      const currentVisible = mountainVisibleIndicesByVariant[variant] ?? []
+      if (!arraysEqual(nextVariantVisible, currentVisible)) {
+        mountainVisibleIndicesByVariant[variant] = nextVariantVisible
+        const mesh = mountainMeshes[variant]
+        const sourceMatrices = mountainSourceMatricesByVariant[variant] ?? []
+        if (mesh) {
+          for (let write = 0; write < nextVariantVisible.length; write += 1) {
+            const source = sourceMatrices[nextVariantVisible[write]]
+            if (!source) continue
+            mesh.setMatrixAt(write, source)
+          }
+          mesh.count = nextVariantVisible.length
+          mesh.instanceMatrix.needsUpdate = true
+        }
+      }
+      mountainVisibleTotal += (mountainVisibleIndicesByVariant[variant] ?? []).length
+    }
+    visibleMountainCount = mountainVisibleTotal
+
+    const nextPebbleVisible: number[] = []
+    for (let i = 0; i < pebbleCullEntries.length; i += 1) {
+      const entry = pebbleCullEntries[i]
+      const wasVisible = pebbleVisibilityState[i] ?? false
+      const visible = isPointVisible(
+        entry.point,
+        entry.radius,
+        cameraLocalPos,
+        cameraLocalDir,
+        viewAngle,
+        wasVisible,
+      )
+      pebbleVisibilityState[i] = visible
+      if (visible) nextPebbleVisible.push(i)
+    }
+    if (!arraysEqual(nextPebbleVisible, pebbleVisibleIndices)) {
+      pebbleVisibleIndices = nextPebbleVisible
+      if (pebbleMesh) {
+        for (let write = 0; write < pebbleVisibleIndices.length; write += 1) {
+          const source = pebbleSourceMatrices[pebbleVisibleIndices[write]]
+          if (!source) continue
+          pebbleMesh.setMatrixAt(write, source)
+        }
+        pebbleMesh.count = pebbleVisibleIndices.length
+        pebbleMesh.instanceMatrix.needsUpdate = true
+      }
+    }
+    visiblePebbleCount = pebbleVisibleIndices.length
   }
 
   const buildEnvironment = (data: Environment | null) => {
@@ -1936,13 +2274,17 @@ const createScene = async (
       color: '#7ddf6a',
       roughness: 0.9,
       metalness: 0.05,
-      side: PLANET_PATCH_LOD_ENABLED ? THREE.DoubleSide : THREE.FrontSide,
+      side: THREE.FrontSide,
       wireframe: terrainTessellationDebugEnabled,
     })
-    if (PLANET_PATCH_LOD_ENABLED) {
-      planetMesh = new THREE.Mesh(new THREE.BufferGeometry(), planetMaterial)
-      world.add(planetMesh)
-      maybeRebuildPlanetPatch(getPatchCenterForRebuild(null), PLANET_PATCH_DISTANCE_NEAR, true)
+    if (PLANET_PATCH_ENABLED) {
+      const basePlanetGeometry = createIcosphereGeometry(PLANET_RADIUS, PLANET_BASE_ICOSPHERE_DETAIL)
+      const planetGeometry = basePlanetGeometry.clone()
+      applyLakeDepressions(planetGeometry, lakes)
+      planetPatchMaterial = planetMaterial
+      buildPlanetPatchAtlas(planetGeometry, planetMaterial)
+      planetGeometry.dispose()
+      basePlanetGeometry.dispose()
     } else {
       const basePlanetGeometry = createIcosphereGeometry(PLANET_RADIUS, PLANET_BASE_ICOSPHERE_DETAIL)
       const planetGeometry = basePlanetGeometry.clone()
@@ -2023,9 +2365,6 @@ const createScene = async (
       lakeGeometry.dispose()
       lakeBaseGeometry.dispose()
     }
-    if (PLANET_PATCH_LOD_ENABLED) {
-      updateLakePatchVisibility(planetPatchCenter, planetPatchOuterAngle)
-    }
     const rng = createSeededRandom(0x6f35d2a1)
     const randRange = (min: number, max: number) => min + (max - min) * rng()
     const tierHeightSum = TREE_TIER_HEIGHT_FACTORS.reduce((sum, value) => sum + value, 0)
@@ -2072,6 +2411,7 @@ const createScene = async (
       treeTierGeometries.push(geometry)
       const mesh = new THREE.InstancedMesh(geometry, leafMaterial, TREE_COUNT)
       mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage)
+      mesh.frustumCulled = false
       mesh.count = treeInstanceCount
       treeTierMeshes.push(mesh)
       environmentGroup.add(mesh)
@@ -2087,6 +2427,7 @@ const createScene = async (
     treeTrunkGeometry.translate(0, TREE_TRUNK_HEIGHT / 2, 0)
     treeTrunkMesh = new THREE.InstancedMesh(treeTrunkGeometry, trunkMaterial, TREE_COUNT)
     treeTrunkMesh.instanceMatrix.setUsage(THREE.StaticDrawUsage)
+    treeTrunkMesh.frustumCulled = false
     treeTrunkMesh.count = treeInstanceCount
     environmentGroup.add(treeTrunkMesh)
 
@@ -2101,6 +2442,7 @@ const createScene = async (
       mountainGeometries.push(geometry)
       const mesh = new THREE.InstancedMesh(geometry, mountainMaterial, MOUNTAIN_COUNT)
       mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage)
+      mesh.frustumCulled = false
       mesh.count = 0
       mountainMeshes.push(mesh)
       environmentGroup.add(mesh)
@@ -2116,6 +2458,7 @@ const createScene = async (
     pebbleMaterial = rockMaterial
     pebbleMesh = new THREE.InstancedMesh(pebbleGeometry, rockMaterial, PEBBLE_COUNT)
     pebbleMesh.instanceMatrix.setUsage(THREE.StaticDrawUsage)
+    pebbleMesh.frustumCulled = false
     environmentGroup.add(pebbleMesh)
 
     const up = new THREE.Vector3(0, 1, 0)
@@ -2134,6 +2477,22 @@ const createScene = async (
     const lakeSampleTemp = new THREE.Vector3()
     const isInLake = (candidate: THREE.Vector3) =>
       sampleLakes(candidate, lakes, lakeSampleTemp).boundary > LAKE_EXCLUSION_THRESHOLD
+    treeTrunkSourceMatrices = []
+    treeTierSourceMatrices = treeTierMeshes.map(() => [])
+    treeCullEntries = []
+    treeVisibilityState = []
+    treeVisibleIndices = []
+    visibleTreeCount = 0
+    mountainSourceMatricesByVariant = mountainMeshes.map(() => [])
+    mountainCullEntriesByVariant = mountainMeshes.map(() => [])
+    mountainVisibilityStateByVariant = mountainMeshes.map(() => [])
+    mountainVisibleIndicesByVariant = mountainMeshes.map(() => [])
+    visibleMountainCount = 0
+    pebbleSourceMatrices = []
+    pebbleCullEntries = []
+    pebbleVisibilityState = []
+    pebbleVisibleIndices = []
+    visiblePebbleCount = 0
 
     if (data?.trees?.length) {
       trees = data.trees.map(buildTreeFromData)
@@ -2178,6 +2537,8 @@ const createScene = async (
     }
 
     const appliedTreeCount = Math.min(treeInstanceCount, trees.length)
+    const treeBaseRadius = PLANET_RADIUS + TREE_BASE_OFFSET - TREE_TRUNK_HEIGHT * 0.12
+    const treeCanopyRadius = treeTierRadii.reduce((max, radius) => Math.max(max, radius), 0)
     for (let i = 0; i < appliedTreeCount; i += 1) {
       const tree = trees[i]
       normal.copy(tree.normal)
@@ -2185,27 +2546,32 @@ const createScene = async (
       twistQuat.setFromAxisAngle(up, tree.twist)
       baseQuat.multiply(twistQuat)
       baseScale.set(tree.widthScale, tree.heightScale, tree.widthScale)
-      position.copy(normal).multiplyScalar(PLANET_RADIUS + TREE_BASE_OFFSET - TREE_TRUNK_HEIGHT * 0.12)
+      position.copy(normal).multiplyScalar(treeBaseRadius)
       baseMatrix.compose(position, baseQuat, baseScale)
-
-      if (treeTrunkMesh) {
-        worldMatrix.copy(baseMatrix)
-        treeTrunkMesh.setMatrixAt(i, worldMatrix)
-      }
+      treeTrunkSourceMatrices.push(baseMatrix.clone())
 
       for (let t = 0; t < treeTierMeshes.length; t += 1) {
         localMatrix.makeTranslation(0, treeTierOffsets[t], 0)
         worldMatrix.copy(baseMatrix).multiply(localMatrix)
-        treeTierMeshes[t].setMatrixAt(i, worldMatrix)
+        treeTierSourceMatrices[t]?.push(worldMatrix.clone())
       }
+      treeCullEntries.push({
+        basePoint: normal.clone().multiplyScalar(treeBaseRadius),
+        topPoint: normal
+          .clone()
+          .multiplyScalar(treeBaseRadius + baseTreeHeight * tree.heightScale),
+        baseRadius: TREE_TRUNK_RADIUS * tree.widthScale,
+        topRadius: Math.max(TREE_TRUNK_RADIUS, treeCanopyRadius) * tree.widthScale,
+      })
+      treeVisibilityState.push(false)
     }
 
     if (treeTrunkMesh) {
-      treeTrunkMesh.count = appliedTreeCount
+      treeTrunkMesh.count = 0
       treeTrunkMesh.instanceMatrix.needsUpdate = true
     }
     for (const mesh of treeTierMeshes) {
-      mesh.count = appliedTreeCount
+      mesh.count = 0
       mesh.instanceMatrix.needsUpdate = true
     }
 
@@ -2259,12 +2625,9 @@ const createScene = async (
     }
 
     if (mountainMeshes.length > 0) {
-      const mountainCounts = new Array(mountainMeshes.length).fill(0)
       for (const mountain of mountains) {
         const variantIndex = Math.min(mountainMeshes.length - 1, Math.max(0, Math.floor(mountain.variant)))
-        const mesh = mountainMeshes[variantIndex]
-        if (!mesh) continue
-        const instanceIndex = mountainCounts[variantIndex]
+        if (variantIndex < 0) continue
         normal.copy(mountain.normal)
         baseQuat.setFromUnitVectors(up, normal)
         twistQuat.setFromAxisAngle(up, mountain.twist)
@@ -2272,12 +2635,21 @@ const createScene = async (
         baseScale.set(mountain.radius, mountain.height, mountain.radius)
         position.copy(normal).multiplyScalar(PLANET_RADIUS - MOUNTAIN_BASE_SINK)
         baseMatrix.compose(position, baseQuat, baseScale)
-        mesh.setMatrixAt(instanceIndex, baseMatrix)
-        mountainCounts[variantIndex] += 1
+        mountainSourceMatricesByVariant[variantIndex]?.push(baseMatrix.clone())
+        mountainCullEntriesByVariant[variantIndex]?.push({
+          basePoint: normal.clone().multiplyScalar(PLANET_RADIUS - MOUNTAIN_BASE_SINK),
+          peakPoint: normal
+            .clone()
+            .multiplyScalar(PLANET_RADIUS - MOUNTAIN_BASE_SINK + mountain.height * 0.92),
+          baseRadius: mountain.radius,
+          peakRadius: mountain.radius * 0.58,
+          variant: variantIndex,
+        })
+        mountainVisibilityStateByVariant[variantIndex]?.push(false)
       }
       for (let i = 0; i < mountainMeshes.length; i += 1) {
         const mesh = mountainMeshes[i]
-        mesh.count = mountainCounts[i]
+        mesh.count = 0
         mesh.instanceMatrix.needsUpdate = true
       }
     }
@@ -2310,12 +2682,26 @@ const createScene = async (
           .copy(normal)
           .multiplyScalar(PLANET_RADIUS + PEBBLE_OFFSET - radius * 0.25)
         worldMatrix.compose(position, pebbleQuat, pebbleScale)
-        pebbleMesh.setMatrixAt(placed, worldMatrix)
+        pebbleSourceMatrices.push(worldMatrix.clone())
+        pebbleCullEntries.push({
+          point: position.clone(),
+          radius: radius * 1.2,
+        })
+        pebbleVisibilityState.push(false)
         placed += 1
       }
-      pebbleMesh.count = placed
+      pebbleMesh.count = 0
       pebbleMesh.instanceMatrix.needsUpdate = true
     }
+
+    patchCenterQuat.copy(world.quaternion).invert()
+    cameraLocalPosTemp.copy(camera.position).applyQuaternion(patchCenterQuat)
+    cameraLocalDirTemp.copy(cameraLocalPosTemp).normalize()
+    const aspect = viewportHeight > 0 ? viewportWidth / viewportHeight : 1
+    const viewAngle = computeVisibleSurfaceAngle(camera.position.z, aspect)
+    updatePlanetPatchVisibility(cameraLocalDirTemp, viewAngle)
+    updateLakeVisibility(cameraLocalPosTemp, cameraLocalDirTemp, viewAngle)
+    updateEnvironmentVisibility(cameraLocalPosTemp, cameraLocalDirTemp, viewAngle)
 
     rebuildMountainDebug()
     rebuildLakeDebug()
@@ -3889,7 +4275,6 @@ const createScene = async (
     camera.updateMatrixWorld()
 
     let localHeadScreen: { x: number; y: number } | null = null
-    let localHeadNormalForPatch: THREE.Vector3 | null = null
 
     if (snapshot && localPlayerId) {
       const localPlayer = snapshot.players.find((player) => player.id === localPlayerId)
@@ -3898,7 +4283,6 @@ const createScene = async (
         const radius = SNAKE_RADIUS * 1.1
         const radiusOffset = radius * SNAKE_LIFT_FACTOR
         const headNormal = tempVectorC.set(head.x, head.y, head.z).normalize()
-        localHeadNormalForPatch = headNormal.clone()
         const headPosition = headNormal
           .clone()
           .multiplyScalar(getSnakeCenterlineRadius(headNormal, radiusOffset, radius))
@@ -3925,9 +4309,17 @@ const createScene = async (
       updateSnakes([], localPlayerId, deltaSeconds, null)
       updatePellets([], null)
     }
-    if (PLANET_PATCH_LOD_ENABLED && Number.isFinite(cameraDistance)) {
-      maybeRebuildPlanetPatch(getPatchCenterForRebuild(localHeadNormalForPatch), cameraDistance)
+
+    patchCenterQuat.copy(world.quaternion).invert()
+    cameraLocalPosTemp.copy(camera.position).applyQuaternion(patchCenterQuat)
+    cameraLocalDirTemp.copy(cameraLocalPosTemp).normalize()
+    const aspect = viewportHeight > 0 ? viewportWidth / viewportHeight : 1
+    const viewAngle = computeVisibleSurfaceAngle(camera.position.z, aspect)
+    if (PLANET_PATCH_ENABLED) {
+      updatePlanetPatchVisibility(cameraLocalDirTemp, viewAngle)
     }
+    updateLakeVisibility(cameraLocalPosTemp, cameraLocalDirTemp, viewAngle)
+    updateEnvironmentVisibility(cameraLocalPosTemp, cameraLocalDirTemp, viewAngle)
 
     const lakeTimeSeconds = now * 0.001
     for (let i = 0; i < lakeMaterials.length; i += 1) {
@@ -3976,6 +4368,10 @@ const createScene = async (
     }
     if (typeof flags.terrainTessellation === 'boolean') {
       terrainTessellationDebugEnabled = flags.terrainTessellation
+      if (planetPatchMaterial) {
+        planetPatchMaterial.wireframe = terrainTessellationDebugEnabled
+        planetPatchMaterial.needsUpdate = true
+      }
       if (planetMesh?.material instanceof THREE.MeshStandardMaterial) {
         planetMesh.material.wireframe = terrainTessellationDebugEnabled
         planetMesh.material.needsUpdate = true
@@ -3990,9 +4386,6 @@ const createScene = async (
     renderer.setSize(width, height, false)
     camera.aspect = width / height
     camera.updateProjectionMatrix()
-    if (PLANET_PATCH_LOD_ENABLED && planetMesh) {
-      maybeRebuildPlanetPatch(getPatchCenterForRebuild(null), camera.position.z, true)
-    }
   }
 
   const dispose = () => {

@@ -39,7 +39,8 @@ const MAX_EXTRAPOLATION_MS = 70
 const MOUNTAIN_DEBUG_KEY = 'spherical_snake_mountain_debug'
 const LAKE_DEBUG_KEY = 'spherical_snake_lake_debug'
 const TREE_DEBUG_KEY = 'spherical_snake_tree_debug'
-const TERRAIN_TESSELLATION_DEBUG_KEY = 'spherical_snake_terrain_tessellation_debug'
+const TERRAIN_WIREFRAME_DEBUG_KEY = 'spherical_snake_terrain_wireframe_debug'
+const TERRAIN_TESSELLATION_DEBUG_KEY_LEGACY = 'spherical_snake_terrain_tessellation_debug'
 const DEBUG_UI_ENABLED = import.meta.env.DEV || import.meta.env.VITE_E2E_DEBUG === '1'
 const getMountainDebug = () => {
   if (typeof window === 'undefined') return false
@@ -68,7 +69,9 @@ const getTreeDebug = () => {
 const getTerrainTessellationDebug = () => {
   if (typeof window === 'undefined') return false
   try {
-    return window.localStorage.getItem(TERRAIN_TESSELLATION_DEBUG_KEY) === '1'
+    const wireframe = window.localStorage.getItem(TERRAIN_WIREFRAME_DEBUG_KEY)
+    if (wireframe !== null) return wireframe === '1'
+    return window.localStorage.getItem(TERRAIN_TESSELLATION_DEBUG_KEY_LEGACY) === '1'
   } catch {
     return false
   }
@@ -250,7 +253,7 @@ export default function App() {
       window.localStorage.setItem(LAKE_DEBUG_KEY, lakeDebug ? '1' : '0')
       window.localStorage.setItem(TREE_DEBUG_KEY, treeDebug ? '1' : '0')
       window.localStorage.setItem(
-        TERRAIN_TESSELLATION_DEBUG_KEY,
+        TERRAIN_WIREFRAME_DEBUG_KEY,
         terrainTessellationDebug ? '1' : '0',
       )
     } catch {
@@ -813,7 +816,7 @@ export default function App() {
                     checked={terrainTessellationDebug}
                     onChange={(event) => setTerrainTessellationDebug(event.target.checked)}
                   />
-                  Terrain tessellation
+                  Terrain wireframe
                 </label>
               </div>
             </div>
