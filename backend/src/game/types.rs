@@ -21,9 +21,10 @@ pub struct Digestion {
     pub id: u32,
     pub remaining: i64,
     pub total: i64,
-    pub growth_steps: i64,
+    pub settle_steps: i64,
+    pub growth_amount: f64,
+    pub applied: bool,
     pub strength: f32,
-    pub grows: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +64,7 @@ pub struct Player {
     pub respawn_at: Option<i64>,
     pub snake: Vec<SnakeNode>,
     pub pellet_growth_fraction: f64,
+    pub tail_extension: f64,
     pub next_digestion_id: u32,
     pub digestions: Vec<Digestion>,
 }

@@ -135,6 +135,7 @@ function blendPlayers(a: PlayerSnapshot, b: PlayerSnapshot, t: number): PlayerSn
     stamina: lerp(a.stamina, b.stamina, t),
     oxygen: lerp(a.oxygen, b.oxygen, t),
     girthScale: lerp(a.girthScale, b.girthScale, t),
+    tailExtension: lerp(a.tailExtension, b.tailExtension, t),
     alive: b.alive,
     snakeDetail: b.snakeDetail,
     snakeStart: b.snakeStart,

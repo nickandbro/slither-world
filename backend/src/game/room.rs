@@ -1,19 +1,18 @@
 use super::constants::{
     BASE_PELLET_COUNT, BASE_SPEED, BOOST_MULTIPLIER, BOT_BOOST_DISTANCE, BOT_COUNT,
     BOT_MIN_STAMINA_TO_BOOST, COLOR_POOL, DEATH_PELLET_SIZE_MAX, DEATH_PELLET_SIZE_MIN,
-    MAX_PELLETS, MAX_SPAWN_ATTEMPTS, MIN_SURVIVAL_LENGTH, OXYGEN_DRAIN_PER_SEC, OXYGEN_MAX,
-    PELLET_SIZE_ENCODE_MAX, PELLET_SIZE_ENCODE_MIN, PLAYER_TIMEOUT_MS, RESPAWN_COOLDOWN_MS,
-    RESPAWN_RETRY_MS, SMALL_PELLET_ATTRACT_RADIUS, SMALL_PELLET_ATTRACT_SPEED,
+    MAX_PELLETS, MAX_SPAWN_ATTEMPTS, MIN_SURVIVAL_LENGTH, NODE_QUEUE_SIZE, OXYGEN_DRAIN_PER_SEC,
+    OXYGEN_MAX, PELLET_SIZE_ENCODE_MAX, PELLET_SIZE_ENCODE_MIN, PLAYER_TIMEOUT_MS,
+    RESPAWN_COOLDOWN_MS, RESPAWN_RETRY_MS, SMALL_PELLET_ATTRACT_RADIUS, SMALL_PELLET_ATTRACT_SPEED,
     SMALL_PELLET_CONSUME_ANGLE, SMALL_PELLET_DIGESTION_STRENGTH,
     SMALL_PELLET_DIGESTION_STRENGTH_MAX, SMALL_PELLET_GROWTH_FRACTION,
-    SMALL_PELLET_LOCK_CONE_ANGLE, SMALL_PELLET_MOUTH_FORWARD, SMALL_PELLET_RING_BATCH_SIZE_CAP,
-    SMALL_PELLET_SHRINK_MIN_RATIO, SMALL_PELLET_SIZE_MAX, SMALL_PELLET_SIZE_MIN,
-    SMALL_PELLET_SPAWN_HEAD_EXCLUSION_ANGLE, SMALL_PELLET_VIEW_MARGIN_MAX,
-    SMALL_PELLET_VIEW_MARGIN_MIN, SMALL_PELLET_VISIBLE_MAX, SMALL_PELLET_VISIBLE_MIN,
-    SMALL_PELLET_ZOOM_MAX_CAMERA_DISTANCE, SMALL_PELLET_ZOOM_MIN_CAMERA_DISTANCE, NODE_QUEUE_SIZE,
-    SNAKE_GIRTH_MAX_SCALE, SNAKE_GIRTH_NODES_PER_STEP, SNAKE_GIRTH_STEP_PERCENT, SPAWN_CONE_ANGLE,
-    SPAWN_PLAYER_MIN_DISTANCE, STAMINA_DRAIN_PER_SEC, STAMINA_MAX, STAMINA_RECHARGE_PER_SEC,
-    STARTING_LENGTH, TICK_MS, TURN_RATE,
+    SMALL_PELLET_LOCK_CONE_ANGLE, SMALL_PELLET_MOUTH_FORWARD, SMALL_PELLET_SHRINK_MIN_RATIO,
+    SMALL_PELLET_SIZE_MAX, SMALL_PELLET_SIZE_MIN, SMALL_PELLET_SPAWN_HEAD_EXCLUSION_ANGLE,
+    SMALL_PELLET_VIEW_MARGIN_MAX, SMALL_PELLET_VIEW_MARGIN_MIN, SMALL_PELLET_VISIBLE_MAX,
+    SMALL_PELLET_VISIBLE_MIN, SMALL_PELLET_ZOOM_MAX_CAMERA_DISTANCE,
+    SMALL_PELLET_ZOOM_MIN_CAMERA_DISTANCE, SNAKE_GIRTH_MAX_SCALE, SNAKE_GIRTH_NODES_PER_STEP,
+    SNAKE_GIRTH_STEP_PERCENT, SPAWN_CONE_ANGLE, SPAWN_PLAYER_MIN_DISTANCE, STAMINA_DRAIN_PER_SEC,
+    STAMINA_MAX, STAMINA_RECHARGE_PER_SEC, STARTING_LENGTH, TICK_MS, TURN_RATE,
 };
 use super::digestion::{add_digestion_with_strength, advance_digestions, get_digestion_progress};
 use super::environment::{
@@ -24,7 +23,7 @@ use super::input::parse_axis;
 use super::math::{
     base_collision_angular_radius, clamp, collision_distance_for_angular_radii,
     collision_with_angular_radii, cross, dot, length, normalize, point_from_spherical, random_axis,
-    rotate_toward, rotate_y, rotate_z,
+    rotate_around_axis, rotate_toward, rotate_y, rotate_z,
 };
 use super::physics::apply_snake_with_collisions;
 use super::snake::{create_snake, rotate_snake};
@@ -807,6 +806,7 @@ impl RoomState {
             respawn_at,
             snake,
             pellet_growth_fraction: 0.0,
+            tail_extension: 0.0,
             next_digestion_id: 0,
             digestions: Vec::new(),
         }
@@ -1276,15 +1276,20 @@ impl RoomState {
             if !player.alive || count == 0 {
                 continue;
             }
-            let visual_units = count.min(SMALL_PELLET_RING_BATCH_SIZE_CAP);
-            for _ in 0..visual_units {
-                add_digestion_with_strength(player, SMALL_PELLET_DIGESTION_STRENGTH, false);
+            let growth = growth_fraction_total.max(0.0);
+            if growth <= 0.0 {
+                continue;
             }
-            player.pellet_growth_fraction += growth_fraction_total.max(0.0);
-            while player.pellet_growth_fraction >= 1.0 {
-                player.pellet_growth_fraction -= 1.0;
-                player.score += 1;
-                add_digestion_with_strength(player, SMALL_PELLET_DIGESTION_STRENGTH_MAX, true);
+            let burst_t = clamp(growth, 0.0, 1.0) as f32;
+            let strength = SMALL_PELLET_DIGESTION_STRENGTH
+                + (SMALL_PELLET_DIGESTION_STRENGTH_MAX - SMALL_PELLET_DIGESTION_STRENGTH) * burst_t;
+            add_digestion_with_strength(player, strength, growth);
+
+            player.pellet_growth_fraction += growth;
+            let whole_score = player.pellet_growth_fraction.floor() as i64;
+            if whole_score > 0 {
+                player.score += whole_score;
+                player.pellet_growth_fraction -= whole_score as f64;
             }
         }
     }
@@ -1375,6 +1380,96 @@ impl RoomState {
     fn snake_body_angular_radius_for_len(snake_len: usize) -> f64 {
         let scale = Self::player_girth_scale_from_len(snake_len);
         Self::snake_body_angular_radius_for_scale(scale)
+    }
+
+    fn project_to_tangent(direction: Point, normal: Point) -> Point {
+        Point {
+            x: direction.x - normal.x * dot(direction, normal),
+            y: direction.y - normal.y * dot(direction, normal),
+            z: direction.z - normal.z * dot(direction, normal),
+        }
+    }
+
+    fn extended_tail_point(player: &Player) -> Option<Point> {
+        if player.tail_extension <= 1e-6 || player.snake.len() < 2 {
+            return None;
+        }
+        let tail_node = player.snake.last()?;
+        let prev_node = player.snake.get(player.snake.len().saturating_sub(2))?;
+        let tail = normalize(Point {
+            x: tail_node.x,
+            y: tail_node.y,
+            z: tail_node.z,
+        });
+        let prev = normalize(Point {
+            x: prev_node.x,
+            y: prev_node.y,
+            z: prev_node.z,
+        });
+
+        let mut base_segment = Point {
+            x: tail.x - prev.x,
+            y: tail.y - prev.y,
+            z: tail.z - prev.z,
+        };
+        let mut base_length = length(base_segment);
+        let mut tail_dir = Self::project_to_tangent(base_segment, tail);
+
+        if length(tail_dir) <= 1e-8 && player.snake.len() >= 3 {
+            let prev_prev_node = player.snake.get(player.snake.len().saturating_sub(3))?;
+            let prev_prev = normalize(Point {
+                x: prev_prev_node.x,
+                y: prev_prev_node.y,
+                z: prev_prev_node.z,
+            });
+            base_segment = Point {
+                x: prev.x - prev_prev.x,
+                y: prev.y - prev_prev.y,
+                z: prev.z - prev_prev.z,
+            };
+            base_length = length(base_segment);
+            tail_dir = Self::project_to_tangent(base_segment, tail);
+        }
+        if base_length <= 1e-8 || !base_length.is_finite() {
+            return None;
+        }
+        let tail_dir_len = length(tail_dir);
+        if tail_dir_len <= 1e-8 || !tail_dir_len.is_finite() {
+            return None;
+        }
+        let tail_dir = Point {
+            x: tail_dir.x / tail_dir_len,
+            y: tail_dir.y / tail_dir_len,
+            z: tail_dir.z / tail_dir_len,
+        };
+
+        let extension_ratio = clamp(player.tail_extension, 0.0, 0.999_999);
+        let extend_distance = base_length * extension_ratio;
+        if extend_distance <= 1e-8 || !extend_distance.is_finite() {
+            return None;
+        }
+
+        let axis = cross(tail, tail_dir);
+        let axis_len = length(axis);
+        let tail_radius = length(tail).max(1e-6);
+        let angle = extend_distance / tail_radius;
+        let mut extended = tail;
+        if axis_len > 1e-8 && angle.is_finite() {
+            let axis_unit = Point {
+                x: axis.x / axis_len,
+                y: axis.y / axis_len,
+                z: axis.z / axis_len,
+            };
+            rotate_around_axis(&mut extended, axis_unit, angle);
+            return Some(normalize(extended));
+        }
+
+        let fallback = normalize(Point {
+            x: tail.x + tail_dir.x * extend_distance,
+            y: tail.y + tail_dir.y * extend_distance,
+            z: tail.z + tail_dir.z * extend_distance,
+        });
+        Some(fallback)
     }
 
     fn self_collision_start_index(body_angular_radius: f64) -> usize {
@@ -1474,7 +1569,7 @@ impl RoomState {
             .values()
             .map(|player| {
                 let girth_scale = Self::player_girth_scale_from_len(player.snake.len());
-                let snake_points = player
+                let mut snake_points = player
                     .snake
                     .iter()
                     .map(|node| Point {
@@ -1483,6 +1578,9 @@ impl RoomState {
                         z: node.z,
                     })
                     .collect::<Vec<_>>();
+                if let Some(extended_tail) = Self::extended_tail_point(player) {
+                    snake_points.push(extended_tail);
+                }
                 PlayerCollisionSnapshot {
                     id: player.id.clone(),
                     alive: player.alive,
@@ -1526,7 +1624,8 @@ impl RoomState {
                 continue;
             }
             let head = snapshot.snake[0];
-            let self_collision_start = Self::self_collision_start_index(snapshot.body_angular_radius);
+            let self_collision_start =
+                Self::self_collision_start_index(snapshot.body_angular_radius);
             for node in snapshot.snake.iter().skip(self_collision_start) {
                 if collision_with_angular_radii(
                     head,
@@ -1608,6 +1707,7 @@ impl RoomState {
             player.digestions.clear();
             player.next_digestion_id = 0;
             player.pellet_growth_fraction = 0.0;
+            player.tail_extension = 0.0;
             player.oxygen_damage_accumulator = 0.0;
             player.score = 0;
             let dropped_points = player
@@ -1670,6 +1770,7 @@ impl RoomState {
         player.respawn_at = None;
         player.snake = spawned.snake;
         player.pellet_growth_fraction = 0.0;
+        player.tail_extension = 0.0;
         player.digestions.clear();
         player.next_digestion_id = 0;
         tracing::debug!(player_id, is_bot = player.is_bot, "player respawned");
@@ -1697,7 +1798,7 @@ impl RoomState {
         for visible in visible_players.iter().take(visible_player_count) {
             let player = visible.player;
             let window = visible.window;
-            capacity += 16 + 1 + 4 + 4 + 4 + 4 + 1 + 2;
+            capacity += 16 + 1 + 4 + 4 + 4 + 4 + 4 + 1 + 2;
             match window.detail {
                 SnakeDetail::Full => {
                     capacity += 2 + window.len * 12;
@@ -1752,7 +1853,7 @@ impl RoomState {
         for visible in visible_players.iter().take(visible_player_count) {
             let player = visible.player;
             let window = visible.window;
-            capacity += 16 + 1 + 4 + 4 + 4 + 4 + 1 + 2;
+            capacity += 16 + 1 + 4 + 4 + 4 + 4 + 4 + 1 + 2;
             match window.detail {
                 SnakeDetail::Full => {
                     capacity += 2 + window.len * 12;
@@ -1870,6 +1971,7 @@ impl RoomState {
         encoder.write_f32(player.oxygen as f32);
         let girth_scale = Self::player_girth_scale_from_len(player.snake.len());
         encoder.write_f32(girth_scale as f32);
+        encoder.write_f32(clamp(player.tail_extension, 0.0, 1.0) as f32);
         let detail = match window.detail {
             SnakeDetail::Full => protocol::SNAKE_DETAIL_FULL,
             SnakeDetail::Window => protocol::SNAKE_DETAIL_WINDOW,
@@ -2005,6 +2107,7 @@ mod tests {
             respawn_at: None,
             snake,
             pellet_growth_fraction: 0.0,
+            tail_extension: 0.0,
             next_digestion_id: 0,
             digestions: Vec::new(),
         }
@@ -2062,6 +2165,7 @@ mod tests {
         *offset += 4; // stamina
         *offset += 4; // oxygen
         *offset += 4; // girth scale
+        *offset += 4; // tail extension
         let detail = read_u8(bytes, offset);
         let total_len = read_u16(bytes, offset);
         let snake_len = match detail {
@@ -2413,9 +2517,10 @@ mod tests {
             id: 42,
             remaining: 2,
             total: 4,
-            growth_steps: 1,
+            settle_steps: 1,
+            growth_amount: 0.75,
+            applied: true,
             strength: 0.35,
-            grows: true,
         });
 
         let mut encoder = protocol::Encoder::with_capacity(256);
@@ -2426,6 +2531,10 @@ mod tests {
         let encoded_girth_scale =
             f32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
         assert!((encoded_girth_scale - 1.0).abs() < 1e-6);
+        offset += 4;
+        let encoded_tail_extension =
+            f32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
+        assert!((encoded_tail_extension - 0.0).abs() < 1e-6);
         offset += 4;
         let detail = payload[offset];
         assert_eq!(detail, protocol::SNAKE_DETAIL_FULL);
@@ -2466,9 +2575,10 @@ mod tests {
                 id,
                 remaining: 2,
                 total: 4,
-                growth_steps: 1,
+                settle_steps: 1,
+                growth_amount: 0.4,
+                applied: true,
                 strength: 0.4,
-                grows: true,
             });
         }
 
@@ -2476,14 +2586,16 @@ mod tests {
         state.write_player_state(&mut encoder, &player);
         let payload = encoder.into_vec();
 
-        let mut offset = 16 + 1 + 4 + 4 + 4 + 4; // id, alive, score, stamina, oxygen, girth
+        let mut offset = 16 + 1 + 4 + 4 + 4 + 4 + 4; // id, alive, score, stamina, oxygen, girth, tail_extension
         let detail = payload[offset];
         assert_eq!(detail, protocol::SNAKE_DETAIL_FULL);
         offset += 1;
 
-        let _encoded_total_len = u16::from_le_bytes(payload[offset..offset + 2].try_into().unwrap());
+        let _encoded_total_len =
+            u16::from_le_bytes(payload[offset..offset + 2].try_into().unwrap());
         offset += 2;
-        let encoded_window_len = u16::from_le_bytes(payload[offset..offset + 2].try_into().unwrap());
+        let encoded_window_len =
+            u16::from_le_bytes(payload[offset..offset + 2].try_into().unwrap());
         offset += 2;
         offset += encoded_window_len as usize * 12;
 
@@ -2574,14 +2686,9 @@ mod tests {
         state.update_small_pellets(TICK_MS as f64 / 1000.0);
         let player_after_partial = state.players.get(&player_id).expect("player");
         assert_eq!(player_after_partial.score, 0);
-        assert_eq!(
-            player_after_partial.digestions.len(),
-            SMALL_PELLET_RING_BATCH_SIZE_CAP
-        );
-        assert!(player_after_partial
-            .digestions
-            .iter()
-            .all(|digestion| !digestion.grows));
+        assert_eq!(player_after_partial.digestions.len(), 1);
+        assert!(player_after_partial.digestions[0].growth_amount > 0.87);
+        assert!(player_after_partial.digestions[0].growth_amount < 0.88);
         assert!(player_after_partial.pellet_growth_fraction > 0.8);
         assert!(player_after_partial.pellet_growth_fraction < 0.9);
 
@@ -2589,15 +2696,12 @@ mod tests {
         state.update_small_pellets(TICK_MS as f64 / 1000.0);
         let player_after_full = state.players.get(&player_id).expect("player");
         assert_eq!(player_after_full.score, 1);
-        assert_eq!(
-            player_after_full.digestions.len(),
-            SMALL_PELLET_RING_BATCH_SIZE_CAP + 2
-        );
+        assert_eq!(player_after_full.digestions.len(), 2);
         assert!(player_after_full.pellet_growth_fraction < 0.01);
         assert!(player_after_full
             .digestions
             .iter()
-            .any(|digestion| digestion.grows));
+            .all(|digestion| digestion.growth_amount > 0.0));
         assert!(player_after_full
             .digestions
             .iter()
@@ -2648,7 +2752,7 @@ mod tests {
         assert!(player_after
             .digestions
             .iter()
-            .any(|digestion| digestion.grows));
+            .any(|digestion| digestion.growth_amount >= 1.0));
     }
 
     #[test]

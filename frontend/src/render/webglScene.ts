@@ -79,24 +79,6 @@ const createPelletSpriteTexture = () => {
   return texture
 }
 
-type TailAddState = {
-  progress: number
-  duration: number
-  carryDistance: number
-  carryExtra: number | null
-  startPos: THREE.Vector3 | null
-}
-
-type TailExtraState = {
-  value: number
-}
-
-type TailDebugState = {
-  lastExtendActive: boolean
-  lastExtBucket: number
-  lastDirAngleBucket: number
-}
-
 type DeathState = {
   start: number
 }
@@ -394,21 +376,7 @@ const DIGESTION_MAX_BULGE_MIN = 0.55
 const DIGESTION_MAX_BULGE_MAX = 0.82
 const DIGESTION_START_NODE_INDEX = 1
 const DIGESTION_TRAVEL_EASE = 1
-const DIGESTION_GROWTH_TAIL_OFFSET = 0.06
-const TAIL_ADD_SMOOTH_MS = 180
-const TAIL_EXTEND_RATE_UP = 0.14
-const TAIL_EXTEND_RATE_DOWN = 2.6
-const TAIL_EXTEND_RATE_UP_ADD = 0.12
-const TAIL_EXTEND_RATE_DOWN_ADD = 1.6
-const TAIL_EXTEND_MAX_GROW_SPEED = 0.12
-const TAIL_EXTEND_MAX_GROW_SPEED_ADD = 0.08
-const TAIL_EXTEND_MAX_SHRINK_SPEED = 0.35
-const TAIL_EXTEND_MAX_SHRINK_SPEED_ADD = 0.25
-const TAIL_GROWTH_RATE_UP = 0.35
-const TAIL_GROWTH_RATE_DOWN = 1.2
-const TAIL_GROWTH_EASE = 2.5
 const TAIL_EXTEND_CURVE_BLEND = 0.65
-const DEBUG_TAIL = false
 const TREE_COUNT = 36
 const TREE_BASE_OFFSET = 0.004
 const TREE_HEIGHT = BASE_PLANET_RADIUS * 0.3
@@ -470,8 +438,6 @@ const smoothstep = (edge0: number, edge1: number, x: number) => {
   const t = clamp((x - edge0) / (edge1 - edge0), 0, 1)
   return t * t * (3 - 2 * t)
 }
-const formatNum = (value: number, digits = 4) =>
-  Number.isFinite(value) ? value.toFixed(digits) : 'NaN'
 const smoothValue = (current: number, target: number, deltaSeconds: number, rateUp: number, rateDown: number) => {
   const rate = target >= current ? rateUp : rateDown
   const alpha = 1 - Math.exp(-rate * Math.max(0, deltaSeconds))
@@ -530,22 +496,6 @@ const createMountainGeometry = (seed: number) => {
   geometry.computeVertexNormals()
   geometry.computeBoundingSphere()
   return geometry
-}
-const slerpOnSphere = (from: THREE.Vector3, to: THREE.Vector3, alpha: number, radius: number) => {
-  const fromDir = from.clone().normalize()
-  const toDir = to.clone().normalize()
-  const dotValue = clamp(fromDir.dot(toDir), -1, 1)
-  const angle = Math.acos(dotValue)
-  if (!Number.isFinite(angle) || angle < 1e-6) {
-    return toDir.multiplyScalar(radius)
-  }
-  const axis = new THREE.Vector3().crossVectors(fromDir, toDir)
-  if (axis.lengthSq() < 1e-8) {
-    return toDir.multiplyScalar(radius)
-  }
-  axis.normalize()
-  fromDir.applyAxisAngle(axis, angle * alpha)
-  return fromDir.multiplyScalar(radius)
 }
 const createSeededRandom = (seed: number) => {
   let state = seed >>> 0
@@ -1397,35 +1347,6 @@ const randomOnSphere = (rand: () => number, target = new THREE.Vector3()) => {
   target.set(r * Math.cos(theta), z, r * Math.sin(theta))
   return target
 }
-const advanceOnSphere = (
-  origin: THREE.Vector3,
-  direction: THREE.Vector3,
-  distance: number,
-  radius: number,
-) => {
-  if (distance <= 0) return origin.clone()
-  const normal = origin.clone().normalize()
-  const dir = direction.clone().addScaledVector(normal, -direction.dot(normal))
-  if (dir.lengthSq() < 1e-8) return origin.clone()
-  dir.normalize()
-  const axis = normal.clone().cross(dir)
-  const angle = distance / radius
-  if (axis.lengthSq() < 1e-8 || !Number.isFinite(angle)) {
-    return origin.clone().addScaledVector(dir, distance).normalize().multiplyScalar(radius)
-  }
-  axis.normalize()
-  return origin.clone().applyAxisAngle(axis, angle).normalize().multiplyScalar(radius)
-}
-const isTailDebugEnabled = () => {
-  if (DEBUG_TAIL) return true
-  if (typeof window === 'undefined') return false
-  try {
-    if ((window as { __TAIL_DEBUG__?: boolean }).__TAIL_DEBUG__ === true) return true
-    return window.localStorage.getItem('spherical_snake_tail_debug') === '1'
-  } catch {
-    return false
-  }
-}
 const isLakeDebugEnabled = () => {
   if (typeof window === 'undefined') return false
   try {
@@ -1449,13 +1370,6 @@ const dumpLakeGeometry = (geometry: THREE.BufferGeometry) => {
   }
   ;(window as { __LAKE_GEOMETRY__?: typeof payload }).__LAKE_GEOMETRY__ = payload
   console.info('[LakeGeometry]', payload)
-}
-
-const slerpProjectedPoint = (from: THREE.Vector3, to: THREE.Vector3, alpha: number) => {
-  const fromRadius = from.length()
-  const toRadius = to.length()
-  const blendedRadius = fromRadius + (toRadius - fromRadius) * alpha
-  return slerpOnSphere(from, to, alpha, blendedRadius)
 }
 
 const formatRendererError = (error: unknown) => {
@@ -1666,15 +1580,7 @@ const createScene = async (
   const lastHeadPositions = new Map<string, THREE.Vector3>()
   const lastForwardDirections = new Map<string, THREE.Vector3>()
   const lastTailDirections = new Map<string, THREE.Vector3>()
-  const lastSnakeLengths = new Map<string, number>()
   const lastSnakeStarts = new Map<string, number>()
-  const tailAddStates = new Map<string, TailAddState>()
-  const tailExtraStates = new Map<string, TailExtraState>()
-  const lastTailBasePositions = new Map<string, THREE.Vector3>()
-  const lastTailExtensionDistances = new Map<string, number>()
-  const lastTailTotalLengths = new Map<string, number>()
-  const tailGrowthStates = new Map<string, number>()
-  const tailDebugStates = new Map<string, TailDebugState>()
   const tongueStates = new Map<string, TongueState>()
   const tempVector = new THREE.Vector3()
   const tempVectorB = new THREE.Vector3()
@@ -1835,14 +1741,6 @@ const createScene = async (
     lastHeadPositions.delete(id)
     lastForwardDirections.delete(id)
     lastTailDirections.delete(id)
-    lastSnakeLengths.delete(id)
-    tailAddStates.delete(id)
-    tailExtraStates.delete(id)
-    lastTailBasePositions.delete(id)
-    lastTailExtensionDistances.delete(id)
-    lastTailTotalLengths.delete(id)
-    tailGrowthStates.delete(id)
-    tailDebugStates.delete(id)
     tongueStates.delete(id)
   }
 
@@ -4136,22 +4034,16 @@ const createScene = async (
 
   const buildDigestionVisuals = (digestions: DigestionSnapshot[]) => {
     const visuals: DigestionVisual[] = []
-    let tailGrowth = 0
-
     for (const digestion of digestions) {
-      const growth = clamp(digestion.progress - 1, 0, 1)
-      const travelProgress = clamp(digestion.progress, 0, 1)
-      const travelT =
-        growth > 0
-          ? 1 - (1 - growth) * DIGESTION_GROWTH_TAIL_OFFSET
-          : travelProgress
-      const travelBiased = Math.pow(clamp(travelT, 0, 1), DIGESTION_TRAVEL_EASE)
-      const strength = clamp(digestion.strength, 0.05, 1) * (1 - growth)
+      const progress = clamp(digestion.progress, 0, 2)
+      const travelT = clamp(progress, 0, 1)
+      const dissolve = progress > 1 ? 1 - clamp(progress - 1, 0, 1) : 1
+      const travelBiased = Math.pow(travelT, DIGESTION_TRAVEL_EASE)
+      const strength = clamp(digestion.strength, 0.05, 1) * dissolve
+      if (strength <= 1e-4) continue
       visuals.push({ t: travelBiased, strength })
-      if (growth > tailGrowth) tailGrowth = growth
     }
-
-    return { visuals, tailGrowth }
+    return visuals
   }
 
 
@@ -4649,59 +4541,8 @@ const createScene = async (
     }
 
     const nodes = player.snake
-    const debug = isTailDebugEnabled() && isLocal
-    const maxDigestion =
-      player.digestions.length > 0
-        ? Math.max(...player.digestions.map((digestion) => digestion.progress))
-        : 0
     const lastTailDirection = lastTailDirections.get(player.id) ?? null
-    let lengthIncreased = false
-    const prevLength = lastSnakeLengths.get(player.id)
-    if (prevLength !== undefined) {
-      if (nodes.length > prevLength && nodes.length >= 2) {
-        lengthIncreased = true
-        tailAddStates.set(player.id, {
-          progress: 0,
-          duration: Math.max(0.05, TAIL_ADD_SMOOTH_MS / 1000),
-          carryDistance: lastTailTotalLengths.get(player.id) ?? 0,
-          carryExtra: lastTailExtensionDistances.get(player.id) ?? 0,
-          startPos: null,
-        })
-        if (debug) {
-          console.log(
-            `[TAIL_DEBUG] ${player.id} length_increase ${prevLength} -> ${nodes.length} max_digestion=${maxDigestion.toFixed(
-              3,
-            )}`,
-          )
-        }
-      } else if (nodes.length < prevLength) {
-        tailAddStates.delete(player.id)
-        tailGrowthStates.delete(player.id)
-        if (debug) {
-          console.log(
-            `[TAIL_DEBUG] ${player.id} length_decrease ${prevLength} -> ${nodes.length}`,
-          )
-        }
-      }
-    }
-    lastSnakeLengths.set(player.id, nodes.length)
-    const digestionState = buildDigestionVisuals(player.digestions)
-    const targetTailGrowth = digestionState.tailGrowth
-    const previousGrowth = tailGrowthStates.get(player.id)
-    let smoothedTailGrowth = targetTailGrowth
-    if (previousGrowth !== undefined && targetTailGrowth < previousGrowth) {
-      smoothedTailGrowth = smoothValue(
-        previousGrowth,
-        targetTailGrowth,
-        deltaSeconds,
-        TAIL_GROWTH_RATE_UP,
-        TAIL_GROWTH_RATE_DOWN,
-      )
-    }
-    if (targetTailGrowth > 0) {
-      smoothedTailGrowth = Math.max(previousGrowth ?? 0, smoothedTailGrowth)
-    }
-    tailGrowthStates.set(player.id, smoothedTailGrowth)
+    const digestionVisuals = buildDigestionVisuals(player.digestions)
     const girthScale = clamp(player.girthScale, SNAKE_GIRTH_SCALE_MIN, SNAKE_GIRTH_SCALE_MAX)
     const girthT = clamp(
       (girthScale - SNAKE_GIRTH_SCALE_MIN) /
@@ -4725,19 +4566,7 @@ const createScene = async (
     let secondCurvePoint: THREE.Vector3 | null = null
     let tailCurveTail: THREE.Vector3 | null = null
     let tailCurvePrev: THREE.Vector3 | null = null
-    let tailExtendDistance = 0
-    let tailAddProgress = 0
-    let tailBasisPrev: THREE.Vector3 | null = null
-    let tailBasisTail: THREE.Vector3 | null = null
-    let tailSegmentLength = 0
-    let tailSegmentDir: THREE.Vector3 | null = null
     let tailDirMinLen = 0
-    let tailExtraTarget = 0
-    let tailExtensionDistance = 0
-    let tailDirDebug: THREE.Vector3 | null = null
-    let tailSegDirDebug: THREE.Vector3 | null = null
-    let tailDirAngle = 0
-    let tailExtendOverride: THREE.Vector3 | null = null
     if (nodes.length < 2) {
       visual.tube.visible = false
       visual.tail.visible = false
@@ -4752,81 +4581,21 @@ const createScene = async (
       )
       headCurvePoint = curvePoints[0]?.clone() ?? null
       secondCurvePoint = curvePoints[1]?.clone() ?? null
-      const tailAddState = tailAddStates.get(player.id)
-      if (tailAddState && curvePoints.length >= 2) {
-        tailAddState.progress = clamp(
-          tailAddState.progress + deltaSeconds / tailAddState.duration,
-          0,
-          1,
-        )
-        tailAddProgress = tailAddState.progress
-        const fallbackStart = curvePoints[curvePoints.length - 2]
-        const end = curvePoints[curvePoints.length - 1]
-        let referenceDir: THREE.Vector3 | null = null
-        let referenceDistance = fallbackStart.distanceTo(end)
-        if (curvePoints.length >= 3) {
-          const prev = curvePoints[curvePoints.length - 3]
-          const startNormal = fallbackStart.clone().normalize()
-          const rawDir = fallbackStart.clone().sub(prev)
-          rawDir.addScaledVector(startNormal, -rawDir.dot(startNormal))
-          if (rawDir.lengthSq() > 1e-8) {
-            referenceDistance = rawDir.length()
-            referenceDir = rawDir.multiplyScalar(1 / referenceDistance)
-          }
-        }
-        if (!tailAddState.startPos) {
-          tailAddState.startPos = fallbackStart.clone()
-        }
-        let start = tailAddState.startPos
-        if (!start) {
-          start = end
-        }
-        const startRadius = start.length()
-        if (startRadius > 1e-6) {
-          start = start.clone().normalize().multiplyScalar(startRadius)
-        } else {
-          start = end
-        }
-
-        let blendedEnd = end
-        if (referenceDir && referenceDistance > 1e-6) {
-          const syntheticEnd = advanceOnSphere(
-            start,
-            referenceDir,
-            referenceDistance,
-            Math.max(start.length(), 1e-6),
-          )
-          const alignBlend = clamp((tailAddState.progress - 0.35) / 0.35, 0, 1)
-          blendedEnd = slerpProjectedPoint(syntheticEnd, end, alignBlend)
-        }
-
-        curvePoints[curvePoints.length - 1] = slerpProjectedPoint(
-          start,
-          blendedEnd,
-          tailAddState.progress,
-        )
-        if (tailAddState.progress >= 1) {
-          tailAddStates.delete(player.id)
-        }
-        if (curvePoints.length >= 3) {
-          tailBasisPrev = curvePoints[curvePoints.length - 3]
-          tailBasisTail = curvePoints[curvePoints.length - 2]
-          if (tailBasisPrev.distanceToSquared(tailBasisTail) < 1e-6) {
-            tailBasisPrev = null
-            tailBasisTail = null
-          }
+      let tailBasisPrev: THREE.Vector3 | null = null
+      let tailBasisTail: THREE.Vector3 | null = null
+      let tailSegmentLength = 0
+      if (curvePoints.length >= 3) {
+        tailBasisPrev = curvePoints[curvePoints.length - 3]
+        tailBasisTail = curvePoints[curvePoints.length - 2]
+        if (tailBasisPrev.distanceToSquared(tailBasisTail) < 1e-6) {
+          tailBasisPrev = null
+          tailBasisTail = null
         }
       }
       if (curvePoints.length >= 2) {
         const tailPos = curvePoints[curvePoints.length - 1]
         const prevPos = curvePoints[curvePoints.length - 2]
         tailSegmentLength = tailPos.distanceTo(prevPos)
-        const tailNormal = tailPos.clone().normalize()
-        const segmentDir = tailPos.clone().sub(prevPos)
-        segmentDir.addScaledVector(tailNormal, -segmentDir.dot(tailNormal))
-        if (segmentDir.lengthSq() > 1e-8) {
-          tailSegmentDir = segmentDir.normalize()
-        }
       }
       const referenceLength =
         tailBasisPrev && tailBasisTail
@@ -4835,114 +4604,9 @@ const createScene = async (
       tailDirMinLen = Number.isFinite(referenceLength)
         ? Math.max(0, referenceLength * TAIL_DIR_MIN_RATIO)
         : 0
-      const baseLength = tailSegmentLength
-      const easedGrowth = Math.pow(clamp(smoothedTailGrowth, 0, 1), TAIL_GROWTH_EASE)
-      const growthExtra = referenceLength * easedGrowth
-      let extraLengthTarget = growthExtra
-      let minExtraLength = 0
-      if (tailAddState) {
-        const carryDistance = Number.isFinite(tailAddState.carryDistance)
-          ? tailAddState.carryDistance
-          : lastTailTotalLengths.get(player.id) ?? baseLength
-        tailAddState.carryDistance = carryDistance
-        minExtraLength = Math.max(0, carryDistance - baseLength)
-        extraLengthTarget = minExtraLength + growthExtra
-      }
-      const extraTargetClamped = Math.max(0, extraLengthTarget)
-      let extensionDistance = extraTargetClamped
-      const previousExtension = lastTailExtensionDistances.get(player.id)
-      const seedOverride = lengthIncreased ? extraTargetClamped : null
-      const extraState = tailExtraStates.get(player.id)
-      if (extraState) {
-        const seed = seedOverride ?? previousExtension ?? extraState.value ?? extraTargetClamped
-        extraState.value = seed
-        const rateUp = tailAddState ? TAIL_EXTEND_RATE_UP_ADD : TAIL_EXTEND_RATE_UP
-        const rateDown = tailAddState ? TAIL_EXTEND_RATE_DOWN_ADD : TAIL_EXTEND_RATE_DOWN
-        extensionDistance = smoothValue(
-          extraState.value,
-          extraTargetClamped,
-          deltaSeconds,
-          rateUp,
-          rateDown,
-        )
-        if (!Number.isFinite(extensionDistance)) {
-          extensionDistance = extraTargetClamped
-        }
-        extraState.value = extensionDistance
-      } else {
-        const seed = seedOverride ?? previousExtension ?? extraTargetClamped
-        const rateUp = tailAddState ? TAIL_EXTEND_RATE_UP_ADD : TAIL_EXTEND_RATE_UP
-        const rateDown = tailAddState ? TAIL_EXTEND_RATE_DOWN_ADD : TAIL_EXTEND_RATE_DOWN
-        extensionDistance = smoothValue(seed, extraTargetClamped, deltaSeconds, rateUp, rateDown)
-        if (!Number.isFinite(extensionDistance)) {
-          extensionDistance = extraTargetClamped
-        }
-        tailExtraStates.set(player.id, { value: extensionDistance })
-      }
-      if (tailAddState) {
-        extensionDistance = Math.min(extensionDistance, extraTargetClamped)
-        extensionDistance = Math.max(extensionDistance, minExtraLength)
-        const clampState = tailExtraStates.get(player.id)
-        if (clampState) {
-          clampState.value = extensionDistance
-        }
-      }
-      const prevExtension = lastTailExtensionDistances.get(player.id)
-      if (prevExtension !== undefined) {
-        const maxGrow =
-          (tailAddState ? TAIL_EXTEND_MAX_GROW_SPEED_ADD : TAIL_EXTEND_MAX_GROW_SPEED) *
-          deltaSeconds
-        const maxShrink =
-          (tailAddState
-            ? TAIL_EXTEND_MAX_SHRINK_SPEED_ADD
-            : TAIL_EXTEND_MAX_SHRINK_SPEED) * deltaSeconds
-        extensionDistance = clamp(
-          extensionDistance,
-          prevExtension - maxShrink,
-          prevExtension + maxGrow,
-        )
-        const limitedState = tailExtraStates.get(player.id)
-        if (limitedState) {
-          limitedState.value = extensionDistance
-        }
-      }
-      extensionDistance = Math.min(extensionDistance, extraTargetClamped)
-      if (seedOverride !== null) {
-        lastTailExtensionDistances.set(player.id, extensionDistance)
-      }
-      tailExtraTarget = extraTargetClamped
-      tailExtensionDistance = extensionDistance
-      lastTailExtensionDistances.set(player.id, extensionDistance)
+      const extensionRatio = clamp(player.tailExtension, 0, 0.999_999)
+      const extensionDistance = Math.max(0, referenceLength * extensionRatio)
       const extendDir = computeTailExtendDirection(curvePoints, tailDirMinLen)
-      if (extendDir) {
-        tailExtendOverride = extendDir
-      }
-      if (debug && (extensionDistance > 0 || extraTargetClamped > 0 || tailAddState)) {
-        tailDirDebug =
-          tailExtendOverride ??
-          tailSegmentDir ??
-          computeTailDirection(
-            curvePoints,
-            tailBasisPrev,
-            tailBasisTail,
-            lastTailDirection,
-            { preferFallbackBelow: tailDirMinLen },
-          )
-        if (curvePoints.length >= 2) {
-          const tailPos = curvePoints[curvePoints.length - 1]
-          const prevPos = curvePoints[curvePoints.length - 2]
-          const tailNormal = tailPos.clone().normalize()
-          tailSegDirDebug = tailPos.clone().sub(prevPos)
-          tailSegDirDebug.addScaledVector(tailNormal, -tailSegDirDebug.dot(tailNormal))
-          if (tailSegDirDebug.lengthSq() > 1e-8) {
-            tailSegDirDebug.normalize()
-          }
-        }
-        if (tailDirDebug && tailSegDirDebug && tailSegDirDebug.lengthSq() > 1e-8) {
-          const dotValue = clamp(tailDirDebug.dot(tailSegDirDebug), -1, 1)
-          tailDirAngle = Math.acos(dotValue)
-        }
-      }
       if (extensionDistance > 0) {
         const extendedTail = computeExtendedTailPoint(
           curvePoints,
@@ -4951,12 +4615,10 @@ const createScene = async (
           tailBasisTail,
           lastTailDirection,
           tailDirMinLen,
-          tailExtendOverride,
+          extendDir,
         )
         if (extendedTail) {
           curvePoints[curvePoints.length - 1] = extendedTail
-          const prevPos = curvePoints[curvePoints.length - 2]
-          tailSegmentLength = extendedTail.distanceTo(prevPos)
         }
       }
       if (curvePoints.length >= 2) {
@@ -4993,16 +4655,13 @@ const createScene = async (
       if (curvePoints.length >= 2) {
         tailCurvePrev = curvePoints[curvePoints.length - 2]
         tailCurveTail = curvePoints[curvePoints.length - 1]
-        tailExtendDistance = tailCurveTail.distanceTo(tailCurvePrev)
-        lastTailTotalLengths.set(player.id, baseLength + extensionDistance)
-        lastTailBasePositions.set(player.id, tailCurveTail.clone())
       }
       const baseCurve = new THREE.CatmullRomCurve3(curvePoints, false, 'centripetal')
       const tubularSegments = Math.max(8, curvePoints.length * 4)
       const tubeGeometry = new THREE.TubeGeometry(baseCurve, tubularSegments, radius, 10, false)
       const digestionStartOffset = computeDigestionStartOffset(curvePoints)
-      if (digestionState.visuals.length) {
-        applyDigestionBulges(tubeGeometry, digestionState.visuals, digestionStartOffset, digestionBulgeScale)
+      if (digestionVisuals.length) {
+        applyDigestionBulges(tubeGeometry, digestionVisuals, digestionStartOffset, digestionBulgeScale)
       }
       visual.tube.geometry.dispose()
       visual.tube.geometry = tubeGeometry
@@ -5019,14 +4678,6 @@ const createScene = async (
       lastHeadPositions.delete(player.id)
       lastForwardDirections.delete(player.id)
       lastTailDirections.delete(player.id)
-      lastSnakeLengths.delete(player.id)
-      tailAddStates.delete(player.id)
-      tailExtraStates.delete(player.id)
-      lastTailBasePositions.delete(player.id)
-      lastTailExtensionDistances.delete(player.id)
-      lastTailTotalLengths.delete(player.id)
-      tailGrowthStates.delete(player.id)
-      tailDebugStates.delete(player.id)
       tongueStates.delete(player.id)
       lastSnakeStarts.delete(player.id)
       if (isLocal) {
@@ -5055,49 +4706,6 @@ const createScene = async (
       visual.eyeRight.visible = true
       visual.pupilLeft.visible = true
       visual.pupilRight.visible = true
-
-    if (debug) {
-      const prevDebug = tailDebugStates.get(player.id)
-      const extendActive = tailExtraTarget > 0 || tailExtensionDistance > 0
-      const extBucket = extendActive ? Math.floor(tailExtensionDistance / 0.01) : -1
-      const angleBucket =
-        extendActive && Number.isFinite(tailDirAngle) ? Math.floor(tailDirAngle / 0.25) : -1
-      const extendStarted = extendActive && (!prevDebug || !prevDebug.lastExtendActive)
-      const extendEnded = !extendActive && !!prevDebug?.lastExtendActive
-      const extendStep =
-        extendActive &&
-        (!prevDebug ||
-          prevDebug.lastExtBucket !== extBucket ||
-          prevDebug.lastDirAngleBucket !== angleBucket)
-
-      if (extendStarted) {
-        console.log(
-          `[TAIL_DEBUG] ${player.id} tail_extend_start ` +
-            `ext=${formatNum(tailExtensionDistance)} target=${formatNum(tailExtraTarget)} ` +
-            `seg_len=${formatNum(tailSegmentLength)} add_prog=${formatNum(tailAddProgress, 3)} ` +
-            `tail_growth=${formatNum(digestionState.tailGrowth, 3)}`,
-        )
-      }
-
-      if (extendStep) {
-        console.log(
-          `[TAIL_DEBUG] ${player.id} tail_extend ` +
-            `ext=${formatNum(tailExtensionDistance)} target=${formatNum(tailExtraTarget)} ` +
-            `extend_len=${formatNum(tailExtendDistance)} seg_len=${formatNum(tailSegmentLength)} ` +
-            `dir_angle=${formatNum(tailDirAngle, 3)}`,
-        )
-      }
-
-      if (extendEnded) {
-        console.log(`[TAIL_DEBUG] ${player.id} tail_extend_end`)
-      }
-
-      tailDebugStates.set(player.id, {
-        lastExtendActive: extendActive,
-        lastExtBucket: extBucket,
-        lastDirAngleBucket: angleBucket,
-      })
-    }
 
     const headPoint = nodes[0]
     const headNormal = tempVector.set(headPoint.x, headPoint.y, headPoint.z).normalize()

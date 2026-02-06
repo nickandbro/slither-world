@@ -27,6 +27,7 @@ export type PlayerSnapshot = {
   stamina: number
   oxygen: number
   girthScale: number
+  tailExtension: number
   alive: boolean
   snakeDetail: 'full' | 'window' | 'stub'
   snakeStart: number

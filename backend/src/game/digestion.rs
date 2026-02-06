@@ -1,28 +1,33 @@
-use super::constants::{DIGESTION_GROWTH_STEPS, DIGESTION_TRAVEL_SPEED_MULT, NODE_QUEUE_SIZE};
+use super::constants::{DIGESTION_TAIL_SETTLE_STEPS, DIGESTION_TRAVEL_SPEED_MULT, NODE_QUEUE_SIZE};
 use super::math::clamp;
 use super::snake::add_snake_node;
 use super::types::{Digestion, Player};
 
 pub fn add_digestion(player: &mut Player) {
-    add_digestion_with_strength(player, 1.0, true);
+    add_digestion_with_strength(player, 1.0, 1.0);
 }
 
-pub fn add_digestion_with_strength(player: &mut Player, strength: f32, grows: bool) {
+pub fn add_digestion_with_strength(player: &mut Player, strength: f32, growth_amount: f64) {
+    let clamped_growth = growth_amount.max(0.0);
+    if clamped_growth <= 0.0 {
+        return;
+    }
     let travel_steps = (((player.snake.len().saturating_sub(1)) * NODE_QUEUE_SIZE) as f64
         / DIGESTION_TRAVEL_SPEED_MULT)
         .round()
         .max(1.0) as i64;
-    let growth_steps = if grows { DIGESTION_GROWTH_STEPS } else { 0 };
-    let total = travel_steps + growth_steps;
+    let settle_steps = DIGESTION_TAIL_SETTLE_STEPS.max(0);
+    let total = travel_steps + settle_steps;
     let id = player.next_digestion_id;
     player.next_digestion_id = player.next_digestion_id.wrapping_add(1);
     player.digestions.push(Digestion {
         id,
         remaining: total,
         total,
-        growth_steps,
+        settle_steps,
+        growth_amount: clamped_growth,
+        applied: false,
         strength: clamp(strength as f64, 0.05, 1.0) as f32,
-        grows,
     });
 }
 
@@ -30,38 +35,25 @@ pub fn advance_digestions(player: &mut Player, steps: i32) {
     let step_count = steps.max(1) as i32;
 
     for _ in 0..step_count {
-        let mut growth_taken = false;
-
         let mut i = 0;
         while i < player.digestions.len() {
-            if !player.digestions[i].grows {
-                // Keep purely visual digestions tied to movement steps so ring travel
-                // stays in sync with boosted movement speed.
-                player.digestions[i].remaining -= 1;
-                if player.digestions[i].remaining <= 0 {
-                    player.digestions.remove(i);
-                    continue;
-                }
-                i += 1;
-                continue;
-            }
+            player.digestions[i].remaining -= 1;
 
-            let at_tail = player.digestions[i].remaining <= player.digestions[i].growth_steps;
-            if at_tail {
-                if !growth_taken {
-                    player.digestions[i].remaining -= 1;
-                    growth_taken = true;
-                } else {
-                    let growth_steps = player.digestions[i].growth_steps;
-                    player.digestions[i].remaining =
-                        player.digestions[i].remaining.max(growth_steps);
+            if !player.digestions[i].applied
+                && player.digestions[i].remaining <= player.digestions[i].settle_steps
+            {
+                player.tail_extension += player.digestions[i].growth_amount.max(0.0);
+                player.digestions[i].applied = true;
+                while player.tail_extension >= 1.0 {
+                    add_snake_node(&mut player.snake, player.axis);
+                    player.tail_extension -= 1.0;
                 }
-            } else {
-                player.digestions[i].remaining -= 1;
+                if player.tail_extension < 0.0 {
+                    player.tail_extension = 0.0;
+                }
             }
 
             if player.digestions[i].remaining <= 0 {
-                add_snake_node(&mut player.snake, player.axis);
                 player.digestions.remove(i);
                 continue;
             }
@@ -72,27 +64,23 @@ pub fn advance_digestions(player: &mut Player, steps: i32) {
 }
 
 pub fn get_digestion_progress(digestion: &Digestion) -> f64 {
-    if !digestion.grows || digestion.growth_steps <= 0 {
-        if digestion.total <= 1 {
-            return 1.0;
-        }
-        let travel_total = (digestion.total - 1) as f64;
-        let travel_remaining = (digestion.remaining - 1).max(0) as f64;
-        return clamp(1.0 - travel_remaining / travel_total, 0.0, 1.0);
-    }
-    let travel_total = (digestion.total - digestion.growth_steps).max(1) as f64;
-    let travel_remaining = (digestion.remaining - digestion.growth_steps).max(0) as f64;
+    let settle_steps = digestion.settle_steps.max(0);
+    let travel_total = (digestion.total - settle_steps).max(1) as f64;
+    let travel_remaining = (digestion.remaining - settle_steps).max(0) as f64;
     let travel_progress = clamp(1.0 - travel_remaining / travel_total, 0.0, 1.0);
-    let growth_progress = if digestion.remaining <= digestion.growth_steps {
+
+    let settle_progress = if settle_steps > 0 && digestion.remaining <= settle_steps {
         clamp(
-            1.0 - (digestion.remaining as f64) / (digestion.growth_steps as f64),
+            1.0 - (digestion.remaining as f64) / (settle_steps as f64),
             0.0,
             1.0,
         )
+    } else if settle_steps <= 0 && digestion.remaining <= 0 {
+        1.0
     } else {
         0.0
     };
-    travel_progress + growth_progress
+    clamp(travel_progress + settle_progress, 0.0, 2.0)
 }
 
 #[cfg(test)]
@@ -140,6 +128,7 @@ mod tests {
             respawn_at: None,
             snake: make_snake(4),
             pellet_growth_fraction: 0.0,
+            tail_extension: 0.0,
             next_digestion_id: 0,
             digestions: Vec::new(),
         }
@@ -167,17 +156,19 @@ mod tests {
                 id: 7,
                 remaining: 1,
                 total: 1,
-                growth_steps: 1,
+                settle_steps: 0,
+                growth_amount: 1.0,
+                applied: false,
                 strength: 1.0,
-                grows: true,
             },
             Digestion {
                 id: 9,
                 remaining: 4,
                 total: 4,
-                growth_steps: 1,
+                settle_steps: 0,
+                growth_amount: 0.5,
+                applied: false,
                 strength: 1.0,
-                grows: true,
             },
         ];
 
@@ -188,6 +179,7 @@ mod tests {
         assert_eq!(player.digestions.len(), 1);
         assert_eq!(player.digestions[0].id, 9);
         assert_eq!(player.digestions[0].remaining, 3);
+        assert!(player.tail_extension.abs() < 1e-6);
     }
 
     #[test]
@@ -204,50 +196,70 @@ mod tests {
     }
 
     #[test]
-    fn non_growing_digestion_reaches_tail_before_cleanup() {
-        let digestion = Digestion {
-            id: 5,
+    fn fractional_growth_accumulates_without_new_node() {
+        let mut player = make_player();
+        player.digestions.push(Digestion {
+            id: 1,
             remaining: 1,
-            total: 12,
-            growth_steps: 0,
+            total: 1,
+            settle_steps: 0,
+            growth_amount: 0.4,
+            applied: false,
+            strength: 0.4,
+        });
+
+        let before_len = player.snake.len();
+        advance_digestions(&mut player, 1);
+        assert_eq!(player.snake.len(), before_len);
+        assert!(player.digestions.is_empty());
+        assert!((player.tail_extension - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fractional_growth_crossing_one_adds_exactly_one_node() {
+        let mut player = make_player();
+        player.tail_extension = 0.8;
+        player.digestions.push(Digestion {
+            id: 1,
+            remaining: 1,
+            total: 1,
+            settle_steps: 0,
+            growth_amount: 0.35,
+            applied: false,
+            strength: 0.8,
+        });
+
+        let before_len = player.snake.len();
+        advance_digestions(&mut player, 1);
+
+        assert_eq!(player.snake.len(), before_len + 1);
+        assert!(player.tail_extension > 0.14 && player.tail_extension < 0.16);
+    }
+
+    #[test]
+    fn digestion_progress_reaches_tail_at_one_and_cleanup_at_two() {
+        let at_tail = Digestion {
+            id: 5,
+            remaining: 4,
+            total: 10,
+            settle_steps: 4,
+            growth_amount: 0.2,
+            applied: true,
             strength: 0.3,
-            grows: false,
+        };
+        let finished = Digestion {
+            id: 6,
+            remaining: 0,
+            total: 10,
+            settle_steps: 4,
+            growth_amount: 0.2,
+            applied: true,
+            strength: 0.3,
         };
 
-        let progress = get_digestion_progress(&digestion);
-        assert!((progress - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn non_growing_digestion_advances_with_boost_steps() {
-        let mut player = make_player();
-        player.digestions.push(Digestion {
-            id: 1,
-            remaining: 10,
-            total: 10,
-            growth_steps: 0,
-            strength: 0.4,
-            grows: false,
-        });
-
-        advance_digestions(&mut player, 2);
-        assert_eq!(player.digestions.len(), 1);
-        assert_eq!(player.digestions[0].remaining, 8);
-    }
-
-    #[test]
-    fn non_growing_digestion_removed_when_boost_steps_exhaust_remaining() {
-        let mut player = make_player();
-        player.digestions.push(Digestion {
-            id: 1,
-            remaining: 2,
-            total: 2,
-            growth_steps: 0,
-            strength: 0.4,
-            grows: false,
-        });
-
-        advance_digestions(&mut player, 3);
-        assert!(player.digestions.is_empty());
+        let at_tail_progress = get_digestion_progress(&at_tail);
+        let finished_progress = get_digestion_progress(&finished);
+        assert!((at_tail_progress - 1.0).abs() < 1e-6);
+        assert!((finished_progress - 2.0).abs() < 1e-6);
     }
 }
