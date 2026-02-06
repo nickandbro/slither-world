@@ -27,6 +27,9 @@ type SnakeVisual = {
   bowl: THREE.Mesh<THREE.BufferGeometry, THREE.MeshPhysicalMaterial>
   bowlMaterial: THREE.MeshPhysicalMaterial
   bowlCrackUniform: { value: number }
+  boostDraft: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>
+  boostDraftMaterial: THREE.MeshBasicMaterial
+  boostDraftPhase: number
   color: string
 }
 
@@ -74,6 +77,11 @@ type BoostTrailMaterialUserData = {
   retireCutUniform?: { value: number }
 }
 
+type BoostDraftMaterialUserData = {
+  timeUniform?: { value: number }
+  opacityUniform?: { value: number }
+}
+
 type PelletSpriteBucket = {
   points: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>
   material: THREE.PointsMaterial
@@ -102,6 +110,44 @@ const createPelletSpriteTexture = () => {
   ctx.fillRect(0, 0, size, size)
   const texture = new THREE.CanvasTexture(canvas)
   texture.colorSpace = THREE.SRGBColorSpace
+  texture.needsUpdate = true
+  return texture
+}
+
+const createBoostDraftTexture = () => {
+  const canvas = document.createElement('canvas')
+  canvas.width = BOOST_DRAFT_TEXTURE_WIDTH
+  canvas.height = BOOST_DRAFT_TEXTURE_HEIGHT
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+
+  const width = canvas.width
+  const height = canvas.height
+  const imageData = ctx.createImageData(width, height)
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const u = width > 1 ? x / (width - 1) : 0
+      const v = height > 1 ? y / (height - 1) : 0
+      const swirlA = Math.sin((u * 6.8 + v * 3.9) * Math.PI * 2) * 0.5 + 0.5
+      const swirlB = Math.sin((u * 11.2 - v * 2.7) * Math.PI * 2) * 0.5 + 0.5
+      const noise = 0.84 + 0.16 * (swirlA * 0.6 + swirlB * 0.4)
+      const alpha = clamp(noise, 0, 1)
+      const alphaByte = Math.round(alpha * 255)
+      const offset = (y * width + x) * 4
+      imageData.data[offset] = 255
+      imageData.data[offset + 1] = 255
+      imageData.data[offset + 2] = 255
+      imageData.data[offset + 3] = alphaByte
+    }
+  }
+
+  ctx.putImageData(imageData, 0, 0)
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.wrapS = THREE.ClampToEdgeWrapping
+  texture.wrapT = THREE.ClampToEdgeWrapping
+  texture.magFilter = THREE.LinearFilter
+  texture.minFilter = THREE.LinearFilter
+  texture.colorSpace = THREE.NoColorSpace
   texture.needsUpdate = true
   return texture
 }
@@ -406,6 +452,20 @@ const BOOST_TRAIL_OPACITY = 0.55
 const BOOST_TRAIL_ALPHA_TEXTURE_WIDTH = 256
 const BOOST_TRAIL_ALPHA_TEXTURE_HEIGHT = 64
 const BOOST_TRAIL_COLOR = '#3a3129'
+const BOOST_DRAFT_TEXTURE_WIDTH = 192
+const BOOST_DRAFT_TEXTURE_HEIGHT = 64
+const BOOST_DRAFT_BASE_RADIUS = HEAD_RADIUS * 1.28
+const BOOST_DRAFT_FRONT_OFFSET = HEAD_RADIUS * 0.34
+const BOOST_DRAFT_LIFT = HEAD_RADIUS * 0.08
+const BOOST_DRAFT_PULSE_SPEED = 8.4
+const BOOST_DRAFT_OPACITY = 0.17
+const BOOST_DRAFT_EDGE_FADE_START = 0.9
+const BOOST_DRAFT_EDGE_FADE_END = 1.02
+const BOOST_DRAFT_COLOR_A = new THREE.Color('#56d9ff')
+const BOOST_DRAFT_COLOR_B = new THREE.Color('#ffffff')
+const BOOST_DRAFT_COLOR_SHIFT_SPEED = 3.8
+const BOOST_DRAFT_MIN_ACTIVE_OPACITY = 0.01
+const BOOST_DRAFT_LOCAL_FORWARD_AXIS = new THREE.Vector3(0, 1, 0)
 const DIGESTION_BULGE_MIN = 0.22
 const DIGESTION_BULGE_MAX = 0.54
 const DIGESTION_BULGE_GIRTH_MIN_SCALE = 0.25
@@ -1559,6 +1619,8 @@ const createScene = async (
     emissive: '#ff4f8a',
     emissiveIntensity: 0.3,
   })
+  const boostDraftGeometry = new THREE.SphereGeometry(1, 24, 16, 0, Math.PI * 2, 0, Math.PI * 0.5)
+  const boostDraftTexture = createBoostDraftTexture()
 
   const PELLET_COLOR_BUCKET_COUNT = PELLET_COLORS.length
   const PELLET_BUCKET_COUNT = PELLET_COLOR_BUCKET_COUNT * PELLET_SIZE_TIER_MULTIPLIERS.length
@@ -1699,6 +1761,11 @@ const createScene = async (
           oldestAgeMs: number
           newestAgeMs: number
         } | null
+        getBoostDraftInfo: (id: string) => {
+          visible: boolean
+          opacity: number
+          planeCount: number
+        } | null
       }
     | null = null
 
@@ -1743,6 +1810,11 @@ const createScene = async (
           retiring: boolean
           oldestAgeMs: number
           newestAgeMs: number
+        } | null
+        getBoostDraftInfo: (id: string) => {
+          visible: boolean
+          opacity: number
+          planeCount: number
         } | null
       }
     }
@@ -1827,6 +1899,19 @@ const createScene = async (
           retiring,
           oldestAgeMs: hasSamples ? Math.max(0, nowMs - oldestCreatedAt) : 0,
           newestAgeMs: hasSamples ? Math.max(0, nowMs - newestCreatedAt) : 0,
+        }
+      },
+      getBoostDraftInfo: (id: string) => {
+        const visual = snakes.get(id)
+        if (!visual) return null
+        const visible =
+          visual.boostDraft.visible &&
+          visual.boostDraftMaterial.opacity > BOOST_DRAFT_MIN_ACTIVE_OPACITY
+        const opacity = visual.boostDraftMaterial.opacity
+        return {
+          visible,
+          opacity,
+          planeCount: 1,
         }
       },
     }
@@ -3510,6 +3595,60 @@ const createScene = async (
 
   buildEnvironment(null)
 
+  const createBoostDraftMaterial = () => {
+    const material = new THREE.MeshBasicMaterial({
+      color: BOOST_DRAFT_COLOR_A,
+      transparent: true,
+      opacity: 0,
+      alphaMap: boostDraftTexture ?? undefined,
+      side: THREE.FrontSide,
+      blending: THREE.NormalBlending,
+    })
+    material.depthWrite = false
+    material.depthTest = true
+    material.alphaTest = 0.001
+    const materialUserData = material.userData as BoostDraftMaterialUserData
+    if (webglShaderHooksEnabled) {
+      material.onBeforeCompile = (shader) => {
+        const timeUniform = { value: 0 }
+        const opacityUniform = { value: 0 }
+        materialUserData.timeUniform = timeUniform
+        materialUserData.opacityUniform = opacityUniform
+        shader.uniforms.boostDraftTime = timeUniform
+        shader.uniforms.boostDraftOpacity = opacityUniform
+        shader.vertexShader = shader.vertexShader
+          .replace(
+            '#include <common>',
+            '#include <common>\nvarying vec3 vBoostDraftLocalPos;',
+          )
+          .replace(
+            '#include <begin_vertex>',
+            '#include <begin_vertex>\n  vBoostDraftLocalPos = position;',
+          )
+        shader.fragmentShader = shader.fragmentShader
+          .replace(
+            '#include <common>',
+            '#include <common>\nvarying vec3 vBoostDraftLocalPos;\nuniform float boostDraftTime;\nuniform float boostDraftOpacity;',
+          )
+          .replace(
+            '#include <color_fragment>',
+            `#include <color_fragment>
+vec3 boostLocal = normalize(vBoostDraftLocalPos);
+float boostRim = length(boostLocal.xz);
+float boostEdgeFade =
+  1.0 - smoothstep(${BOOST_DRAFT_EDGE_FADE_START.toFixed(3)}, ${BOOST_DRAFT_EDGE_FADE_END.toFixed(3)}, boostRim);
+float boostNoiseA = sin((boostLocal.x * 9.5) + (boostLocal.z * 8.2) + boostDraftTime * 3.7) * 0.5 + 0.5;
+float boostNoiseB = sin((boostLocal.z * 11.3) - (boostLocal.x * 7.6) - boostDraftTime * 2.9) * 0.5 + 0.5;
+float boostColorMix = clamp(0.28 + 0.72 * (boostNoiseA * 0.58 + boostNoiseB * 0.42), 0.0, 1.0);
+vec3 boostColor = mix(vec3(0.337, 0.851, 1.0), vec3(1.0), boostColorMix);
+diffuseColor.rgb = boostColor;
+diffuseColor.a *= boostDraftOpacity * (0.25 + (boostEdgeFade * 0.75));`,
+          )
+      }
+    }
+    return material
+  }
+
   const createSnakeVisual = (color: string): SnakeVisual => {
     const group = new THREE.Group()
 
@@ -3595,6 +3734,12 @@ const createScene = async (
     group.add(pupilRight)
     group.add(tongue)
 
+    const boostDraftMaterial = createBoostDraftMaterial()
+    const boostDraft = new THREE.Mesh(boostDraftGeometry, boostDraftMaterial)
+    boostDraft.visible = false
+    boostDraft.renderOrder = 2
+    group.add(boostDraft)
+
     return {
       group,
       tube,
@@ -3611,6 +3756,9 @@ const createScene = async (
       bowl,
       bowlMaterial,
       bowlCrackUniform,
+      boostDraft,
+      boostDraftMaterial,
+      boostDraftPhase: 0,
       color,
     }
   }
@@ -3633,6 +3781,62 @@ const createScene = async (
       material.needsUpdate = true
     }
     material.depthWrite = !shouldBeTransparent
+  }
+
+  const hideBoostDraft = (visual: SnakeVisual) => {
+    visual.boostDraft.visible = false
+    visual.boostDraftMaterial.opacity = 0
+    const userData = visual.boostDraftMaterial.userData as BoostDraftMaterialUserData
+    if (userData.timeUniform) {
+      userData.timeUniform.value = 0
+    }
+    if (userData.opacityUniform) {
+      userData.opacityUniform.value = 0
+    }
+  }
+
+  const updateBoostDraft = (
+    visual: SnakeVisual,
+    player: PlayerSnapshot,
+    headPosition: THREE.Vector3,
+    headNormal: THREE.Vector3,
+    forward: THREE.Vector3,
+    headRadius: number,
+    snakeOpacity: number,
+    deltaSeconds: number,
+  ) => {
+    const active = player.alive && player.isBoosting && snakeOpacity > BOOST_DRAFT_MIN_ACTIVE_OPACITY
+    if (!active) {
+      hideBoostDraft(visual)
+      return
+    }
+
+    const safeDelta = Math.max(0, deltaSeconds)
+    visual.boostDraftPhase = (visual.boostDraftPhase + safeDelta * BOOST_DRAFT_PULSE_SPEED) % (Math.PI * 2)
+    const radius = BOOST_DRAFT_BASE_RADIUS * (headRadius / HEAD_RADIUS)
+    visual.boostDraft.position
+      .copy(headPosition)
+      .addScaledVector(forward, BOOST_DRAFT_FRONT_OFFSET + radius * 0.58)
+      .addScaledVector(headNormal, BOOST_DRAFT_LIFT)
+    visual.boostDraft.scale.setScalar(radius)
+    tempQuat.setFromUnitVectors(BOOST_DRAFT_LOCAL_FORWARD_AXIS, forward)
+    visual.boostDraft.quaternion.copy(tempQuat)
+    visual.boostDraft.visible = true
+
+    const colorT =
+      0.5 +
+      0.5 *
+        Math.sin(visual.boostDraftPhase * (BOOST_DRAFT_COLOR_SHIFT_SPEED / BOOST_DRAFT_PULSE_SPEED))
+    visual.boostDraftMaterial.color.copy(BOOST_DRAFT_COLOR_A).lerp(BOOST_DRAFT_COLOR_B, colorT)
+    const opacity = BOOST_DRAFT_OPACITY * snakeOpacity
+    visual.boostDraftMaterial.opacity = opacity
+    const userData = visual.boostDraftMaterial.userData as BoostDraftMaterialUserData
+    if (userData.timeUniform) {
+      userData.timeUniform.value = visual.boostDraftPhase
+    }
+    if (userData.opacityUniform) {
+      userData.opacityUniform.value = opacity
+    }
   }
 
   const createGroundingInfo = (): SnakeGroundingInfo => ({
@@ -5191,6 +5395,7 @@ diffuseColor.a *= retireEdge;`,
       visual.pupilRight.visible = false
       visual.tongue.visible = false
       visual.bowl.visible = false
+      hideBoostDraft(visual)
       return null
     }
 
@@ -5338,6 +5543,7 @@ diffuseColor.a *= retireEdge;`,
       visual.pupilRight.visible = false
       visual.tongue.visible = false
       visual.bowl.visible = false
+      hideBoostDraft(visual)
       lastHeadPositions.delete(player.id)
       lastForwardDirections.delete(player.id)
       lastTailDirections.delete(player.id)
@@ -5362,6 +5568,7 @@ diffuseColor.a *= retireEdge;`,
       visual.pupilRight.visible = false
       visual.tongue.visible = false
       visual.bowl.visible = false
+      hideBoostDraft(visual)
       lastHeadPositions.delete(player.id)
       lastForwardDirections.delete(player.id)
       tongueStates.delete(player.id)
@@ -5491,6 +5698,16 @@ diffuseColor.a *= retireEdge;`,
       right.set(1, 0, 0)
     }
     right.normalize()
+    updateBoostDraft(
+      visual,
+      player,
+      headPosition,
+      headNormal,
+      forward,
+      headRadius,
+      opacity,
+      deltaSeconds,
+    )
 
     visual.eyeLeft.scale.setScalar(headScale)
     visual.eyeRight.scale.setScalar(headScale)
@@ -5656,6 +5873,7 @@ diffuseColor.a *= retireEdge;`,
     visual.tongueBase.material.dispose()
     visual.tongueForkLeft.material.dispose()
     visual.tongueForkRight.material.dispose()
+    visual.boostDraftMaterial.dispose()
     visual.bowlMaterial.dispose()
     resetSnakeTransientState(id)
     deathStates.delete(id)
@@ -6063,6 +6281,8 @@ diffuseColor.a *= retireEdge;`,
     tongueBaseGeometry.dispose()
     tongueForkGeometry.dispose()
     tongueMaterial.dispose()
+    boostDraftGeometry.dispose()
+    boostDraftTexture?.dispose()
     for (let i = 0; i < pelletBuckets.length; i += 1) {
       const bucket = pelletBuckets[i]
       if (!bucket) continue
