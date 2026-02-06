@@ -1,6 +1,5 @@
 import * as THREE from 'three'
 import { WebGPURenderer } from 'three/webgpu'
-import { ConvexGeometry } from 'three/examples/jsm/geometries/ConvexGeometry'
 import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils'
 import type {
   Camera,
@@ -96,6 +95,9 @@ type LakeMaterialUserData = {
   lakeWaterUniforms?: LakeWaterUniforms
 }
 
+type TerrainLodRebuildReason = 'force' | 'zoom' | 'detail' | 'center' | null
+type TerrainLodCenterMode = 'camera' | 'head'
+
 type TreeInstance = {
   normal: THREE.Vector3
   widthScale: number
@@ -145,20 +147,19 @@ export type CreateRenderSceneResult = {
 const BASE_PLANET_RADIUS = 1
 const PLANET_RADIUS = 3
 const PLANET_SCALE = PLANET_RADIUS / BASE_PLANET_RADIUS
-const PLANET_FIBONACCI_POINTS = 2048
+const PLANET_BASE_ICOSPHERE_DETAIL = 16
 const PLANET_PATCH_LOD_ENABLED = true
-const PLANET_PATCH_CENTER_REBUILD_ANGLE = 0.04
-const PLANET_PATCH_EDGE_MARGIN = 0.14
+const PLANET_PATCH_CENTER_REBUILD_ANGLE = 0.08
+const PLANET_PATCH_OUTER_REBUILD_ANGLE = 0.05
+const PLANET_PATCH_EDGE_MARGIN = 0.2
 const PLANET_PATCH_RING_EXPONENT = 1.8
 const PLANET_PATCH_OUTER_MIN = 0.72
-const PLANET_PATCH_OUTER_MAX = 1.36
-const PLANET_PATCH_MIN_RINGS = 22
-const PLANET_PATCH_MAX_RINGS = 56
-const PLANET_PATCH_MIN_SEGMENTS = 56
-const PLANET_PATCH_MAX_SEGMENTS = 144
+const PLANET_PATCH_OUTER_MAX = 1.5
+const PLANET_PATCH_FIXED_RINGS = 72
+const PLANET_PATCH_FIXED_SEGMENTS = 192
 const PLANET_PATCH_DISTANCE_NEAR = 4.2
-const PLANET_PATCH_DISTANCE_FAR = 9
-const LAKE_SURFACE_POINTS = PLANET_FIBONACCI_POINTS * 3
+const LAKE_SURFACE_ICOSPHERE_DETAIL = 18
+const PLANET_PATCH_CENTER_MODE = 'camera' as TerrainLodCenterMode
 const LAKE_SURFACE_SEGMENTS = 96
 const LAKE_SURFACE_RINGS = 64
 const LAKE_COUNT = 2
@@ -188,6 +189,7 @@ const DEATH_VISIBILITY_CUTOFF = 0.02
 
 const WORLD_UP = new THREE.Vector3(0, 1, 0)
 const WORLD_RIGHT = new THREE.Vector3(1, 0, 0)
+const PLANET_PATCH_CAMERA_FORWARD = new THREE.Vector3(0, 0, 1)
 const OXYGEN_DAMAGE_COLOR = new THREE.Color('#ff2d2d')
 const OXYGEN_DAMAGE_EMISSIVE = new THREE.Color('#ff0000')
 const LAKE_WATER_OVERDRAW = BASE_PLANET_RADIUS * 0.01
@@ -328,20 +330,11 @@ const computePatchOuterAngle = (cameraDistance: number, aspect: number) => {
   return clamp(base + PLANET_PATCH_EDGE_MARGIN, PLANET_PATCH_OUTER_MIN, PLANET_PATCH_OUTER_MAX)
 }
 
-const computePatchDetail = (cameraDistance: number) => {
-  const t = clamp(
-    (PLANET_PATCH_DISTANCE_FAR - cameraDistance) /
-      (PLANET_PATCH_DISTANCE_FAR - PLANET_PATCH_DISTANCE_NEAR),
-    0,
-    1,
-  )
-  const rings = Math.round(
-    PLANET_PATCH_MIN_RINGS + (PLANET_PATCH_MAX_RINGS - PLANET_PATCH_MIN_RINGS) * t,
-  )
-  const rawSegments =
-    PLANET_PATCH_MIN_SEGMENTS + (PLANET_PATCH_MAX_SEGMENTS - PLANET_PATCH_MIN_SEGMENTS) * t
-  const segments = Math.max(12, Math.round(rawSegments / 4) * 4)
-  return { rings, segments }
+const computePatchDetail = () => {
+  return {
+    rings: PLANET_PATCH_FIXED_RINGS,
+    segments: PLANET_PATCH_FIXED_SEGMENTS,
+  }
 }
 const createMountainGeometry = (seed: number) => {
   const rand = createSeededRandom(seed)
@@ -400,17 +393,9 @@ const createSeededRandom = (seed: number) => {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296
   }
 }
-const createFibonacciSphereGeometry = (radius: number, count: number) => {
-  const points: THREE.Vector3[] = []
-  const offset = 2 / count
-  const increment = Math.PI * (3 - Math.sqrt(5))
-  for (let i = 0; i < count; i += 1) {
-    const y = i * offset - 1 + offset * 0.5
-    const r = Math.sqrt(Math.max(0, 1 - y * y))
-    const phi = i * increment
-    points.push(new THREE.Vector3(Math.cos(phi) * r, y, Math.sin(phi) * r).multiplyScalar(radius))
-  }
-  const geometry = new ConvexGeometry(points)
+const createIcosphereGeometry = (radius: number, detail: number) => {
+  const clampedDetail = Math.max(0, Math.floor(detail))
+  const geometry = new THREE.IcosahedronGeometry(radius, clampedDetail)
   geometry.computeVertexNormals()
   geometry.computeBoundingSphere()
   return geometry
@@ -1300,6 +1285,8 @@ const createScene = async (
   let planetPatchOuterAngle = 0
   let planetPatchRings = 0
   let planetPatchSegments = 0
+  let planetPatchRebuildCount = 0
+  let planetPatchLastRebuildReason: TerrainLodRebuildReason = null
 
   const snakes = new Map<string, SnakeVisual>()
   const deathStates = new Map<string, DeathState>()
@@ -1326,6 +1313,8 @@ const createScene = async (
   const tempVectorF = new THREE.Vector3()
   const tempVectorG = new THREE.Vector3()
   const tempVectorH = new THREE.Vector3()
+  const patchCenterTemp = new THREE.Vector3()
+  const patchCenterQuat = new THREE.Quaternion()
   const lakeSampleTemp = new THREE.Vector3()
   const tempQuat = new THREE.Quaternion()
   const tongueUp = new THREE.Vector3(0, 1, 0)
@@ -1340,6 +1329,14 @@ const createScene = async (
           activeBackend: RendererBackend
           fallbackReason: string | null
           webglShaderHooksEnabled: boolean
+        }
+        getTerrainLodInfo: () => {
+          rings: number
+          segments: number
+          outerAngle: number
+          rebuildCount: number
+          lastRebuildReason: TerrainLodRebuildReason
+          centerMode: TerrainLodCenterMode
         }
       }
     | null = null
@@ -1356,6 +1353,14 @@ const createScene = async (
           activeBackend: RendererBackend
           fallbackReason: string | null
           webglShaderHooksEnabled: boolean
+        }
+        getTerrainLodInfo: () => {
+          rings: number
+          segments: number
+          outerAngle: number
+          rebuildCount: number
+          lastRebuildReason: TerrainLodRebuildReason
+          centerMode: TerrainLodCenterMode
         }
       }
     }
@@ -1379,6 +1384,14 @@ const createScene = async (
         activeBackend,
         fallbackReason,
         webglShaderHooksEnabled,
+      }),
+      getTerrainLodInfo: () => ({
+        rings: planetPatchRings,
+        segments: planetPatchSegments,
+        outerAngle: planetPatchOuterAngle,
+        rebuildCount: planetPatchRebuildCount,
+        lastRebuildReason: planetPatchLastRebuildReason,
+        centerMode: PLANET_PATCH_CENTER_MODE,
       }),
     }
     debugWindow.__SNAKE_DEBUG__ = debugApi
@@ -1417,6 +1430,8 @@ const createScene = async (
     planetPatchOuterAngle = 0
     planetPatchRings = 0
     planetPatchSegments = 0
+    planetPatchRebuildCount = 0
+    planetPatchLastRebuildReason = null
     if (planetMesh) {
       world.remove(planetMesh)
       planetMesh.geometry.dispose()
@@ -1845,6 +1860,17 @@ const createScene = async (
     }
   }
 
+  const getPatchCenterForRebuild = (headNormal: THREE.Vector3 | null) => {
+    if (PLANET_PATCH_CENTER_MODE === 'head' && headNormal) {
+      return headNormal
+    }
+    patchCenterQuat.copy(world.quaternion).invert()
+    return patchCenterTemp
+      .copy(PLANET_PATCH_CAMERA_FORWARD)
+      .applyQuaternion(patchCenterQuat)
+      .normalize()
+  }
+
   const maybeRebuildPlanetPatch = (
     center: THREE.Vector3,
     cameraDistance: number,
@@ -1854,19 +1880,27 @@ const createScene = async (
     const normalizedCenter = center.clone().normalize()
     const aspect = viewportHeight > 0 ? viewportWidth / viewportHeight : 1
     const outerAngle = computePatchOuterAngle(cameraDistance, aspect)
-    const detail = computePatchDetail(cameraDistance)
+    const detail = computePatchDetail()
 
     const centerDelta = Math.acos(clamp(planetPatchCenter.dot(normalizedCenter), -1, 1))
     const angleDelta = Math.abs(outerAngle - planetPatchOuterAngle)
     const detailChanged =
       detail.rings !== planetPatchRings || detail.segments !== planetPatchSegments
+    const centerChanged = centerDelta >= PLANET_PATCH_CENTER_REBUILD_ANGLE
+    const zoomChanged = angleDelta >= PLANET_PATCH_OUTER_REBUILD_ANGLE
 
-    if (
-      !force &&
-      !detailChanged &&
-      centerDelta < PLANET_PATCH_CENTER_REBUILD_ANGLE &&
-      angleDelta < 0.03
-    ) {
+    let rebuildReason: TerrainLodRebuildReason = null
+    if (force) {
+      rebuildReason = 'force'
+    } else if (detailChanged) {
+      rebuildReason = 'detail'
+    } else if (centerChanged) {
+      rebuildReason = 'center'
+    } else if (zoomChanged) {
+      rebuildReason = 'zoom'
+    }
+
+    if (!rebuildReason) {
       return
     }
 
@@ -1882,6 +1916,8 @@ const createScene = async (
     planetPatchOuterAngle = outerAngle
     planetPatchRings = detail.rings
     planetPatchSegments = detail.segments
+    planetPatchRebuildCount += 1
+    planetPatchLastRebuildReason = rebuildReason
     updateLakePatchVisibility(normalizedCenter, outerAngle)
   }
 
@@ -1899,9 +1935,9 @@ const createScene = async (
     if (PLANET_PATCH_LOD_ENABLED) {
       planetMesh = new THREE.Mesh(new THREE.BufferGeometry(), planetMaterial)
       world.add(planetMesh)
-      maybeRebuildPlanetPatch(planetPatchCenter, PLANET_PATCH_DISTANCE_NEAR, true)
+      maybeRebuildPlanetPatch(getPatchCenterForRebuild(null), PLANET_PATCH_DISTANCE_NEAR, true)
     } else {
-      const basePlanetGeometry = createFibonacciSphereGeometry(PLANET_RADIUS, PLANET_FIBONACCI_POINTS)
+      const basePlanetGeometry = createIcosphereGeometry(PLANET_RADIUS, PLANET_BASE_ICOSPHERE_DETAIL)
       const planetGeometry = basePlanetGeometry.clone()
       applyLakeDepressions(planetGeometry, lakes)
       planetMesh = new THREE.Mesh(planetGeometry, planetMaterial)
@@ -1962,7 +1998,7 @@ const createScene = async (
         lakeMaterials.push(lakeMaterial)
       }
     } else {
-      const lakeBaseGeometry = createFibonacciSphereGeometry(PLANET_RADIUS, LAKE_SURFACE_POINTS)
+      const lakeBaseGeometry = createIcosphereGeometry(PLANET_RADIUS, LAKE_SURFACE_ICOSPHERE_DETAIL)
       lakeSurfaceGeometry = createLakeSurfaceGeometry(lakeBaseGeometry, lakes)
       lakeBaseGeometry.dispose()
       if ((lakeSurfaceGeometry.attributes.position?.count ?? 0) > 0) {
@@ -1975,7 +2011,7 @@ const createScene = async (
       }
     }
     if (isLakeDebugEnabled()) {
-      const lakeBaseGeometry = createFibonacciSphereGeometry(PLANET_RADIUS, LAKE_SURFACE_POINTS)
+      const lakeBaseGeometry = createIcosphereGeometry(PLANET_RADIUS, LAKE_SURFACE_ICOSPHERE_DETAIL)
       const lakeGeometry = createLakeSurfaceGeometry(lakeBaseGeometry, lakes)
       lakeGeometry.dispose()
       lakeBaseGeometry.dispose()
@@ -3882,8 +3918,8 @@ const createScene = async (
       updateSnakes([], localPlayerId, deltaSeconds, null)
       updatePellets([], null)
     }
-    if (PLANET_PATCH_LOD_ENABLED && localHeadNormalForPatch && Number.isFinite(cameraDistance)) {
-      maybeRebuildPlanetPatch(localHeadNormalForPatch, cameraDistance)
+    if (PLANET_PATCH_LOD_ENABLED && Number.isFinite(cameraDistance)) {
+      maybeRebuildPlanetPatch(getPatchCenterForRebuild(localHeadNormalForPatch), cameraDistance)
     }
 
     const lakeTimeSeconds = now * 0.001
@@ -3940,7 +3976,7 @@ const createScene = async (
     camera.aspect = width / height
     camera.updateProjectionMatrix()
     if (PLANET_PATCH_LOD_ENABLED && planetMesh) {
-      maybeRebuildPlanetPatch(planetPatchCenter, camera.position.z, true)
+      maybeRebuildPlanetPatch(getPatchCenterForRebuild(null), camera.position.z, true)
     }
   }
 
