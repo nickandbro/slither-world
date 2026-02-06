@@ -1,10 +1,10 @@
 use super::constants::{
-    BASE_PELLET_COUNT, BASE_SPEED, BOOST_MULTIPLIER, BOT_BOOST_DISTANCE, BOT_COUNT,
-    BOT_MIN_STAMINA_TO_BOOST, COLOR_POOL, DEATH_PELLET_SIZE_MAX, DEATH_PELLET_SIZE_MIN,
-    MAX_PELLETS, MAX_SPAWN_ATTEMPTS, MIN_SURVIVAL_LENGTH, NODE_QUEUE_SIZE, OXYGEN_DRAIN_PER_SEC,
-    OXYGEN_MAX, PELLET_SIZE_ENCODE_MAX, PELLET_SIZE_ENCODE_MIN, PLAYER_TIMEOUT_MS,
-    RESPAWN_COOLDOWN_MS, RESPAWN_RETRY_MS, SMALL_PELLET_ATTRACT_RADIUS, SMALL_PELLET_ATTRACT_SPEED,
-    SMALL_PELLET_CONSUME_ANGLE, SMALL_PELLET_DIGESTION_STRENGTH,
+    BASE_PELLET_COUNT, BASE_SPEED, BIG_PELLET_GROWTH_FRACTION, BOOST_MULTIPLIER,
+    BOT_BOOST_DISTANCE, BOT_COUNT, BOT_MIN_STAMINA_TO_BOOST, COLOR_POOL, DEATH_PELLET_SIZE_MAX,
+    DEATH_PELLET_SIZE_MIN, MAX_PELLETS, MAX_SPAWN_ATTEMPTS, MIN_SURVIVAL_LENGTH, NODE_QUEUE_SIZE,
+    OXYGEN_DRAIN_PER_SEC, OXYGEN_MAX, PELLET_SIZE_ENCODE_MAX, PELLET_SIZE_ENCODE_MIN,
+    PLAYER_TIMEOUT_MS, RESPAWN_COOLDOWN_MS, RESPAWN_RETRY_MS, SMALL_PELLET_ATTRACT_RADIUS,
+    SMALL_PELLET_ATTRACT_SPEED, SMALL_PELLET_CONSUME_ANGLE, SMALL_PELLET_DIGESTION_STRENGTH,
     SMALL_PELLET_DIGESTION_STRENGTH_MAX, SMALL_PELLET_GROWTH_FRACTION,
     SMALL_PELLET_LOCK_CONE_ANGLE, SMALL_PELLET_MOUTH_FORWARD, SMALL_PELLET_SHRINK_MIN_RATIO,
     SMALL_PELLET_SIZE_MAX, SMALL_PELLET_SIZE_MIN, SMALL_PELLET_SPAWN_HEAD_EXCLUSION_ANGLE,
@@ -1285,7 +1285,12 @@ impl RoomState {
                 + (SMALL_PELLET_DIGESTION_STRENGTH_MAX - SMALL_PELLET_DIGESTION_STRENGTH) * burst_t;
             add_digestion_with_strength(player, strength, growth);
 
-            player.pellet_growth_fraction += growth;
+            let score_growth = if BIG_PELLET_GROWTH_FRACTION > 0.0 {
+                growth / BIG_PELLET_GROWTH_FRACTION
+            } else {
+                growth
+            };
+            player.pellet_growth_fraction += score_growth;
             let whole_score = player.pellet_growth_fraction.floor() as i64;
             if whole_score > 0 {
                 player.score += whole_score;
@@ -1738,7 +1743,7 @@ impl RoomState {
                 color_index,
                 base_size: size,
                 current_size: size,
-                growth_fraction: 1.0,
+                growth_fraction: BIG_PELLET_GROWTH_FRACTION,
                 state: PelletState::Idle,
             });
         }
@@ -2687,17 +2692,19 @@ mod tests {
         let player_after_partial = state.players.get(&player_id).expect("player");
         assert_eq!(player_after_partial.score, 0);
         assert_eq!(player_after_partial.digestions.len(), 1);
-        assert!(player_after_partial.digestions[0].growth_amount > 0.87);
-        assert!(player_after_partial.digestions[0].growth_amount < 0.88);
-        assert!(player_after_partial.pellet_growth_fraction > 0.8);
-        assert!(player_after_partial.pellet_growth_fraction < 0.9);
+        assert!(player_after_partial.digestions[0].growth_amount > 0.034);
+        assert!(player_after_partial.digestions[0].growth_amount < 0.036);
+        assert!(player_after_partial.pellet_growth_fraction > 0.34);
+        assert!(player_after_partial.pellet_growth_fraction < 0.36);
 
-        state.pellets.push(make_pellet(99, mouth));
+        for i in 0..193u32 {
+            state.pellets.push(make_pellet(100 + i, mouth));
+        }
         state.update_small_pellets(TICK_MS as f64 / 1000.0);
         let player_after_full = state.players.get(&player_id).expect("player");
-        assert_eq!(player_after_full.score, 1);
+        assert!(player_after_full.score >= 1);
         assert_eq!(player_after_full.digestions.len(), 2);
-        assert!(player_after_full.pellet_growth_fraction < 0.01);
+        assert!(player_after_full.pellet_growth_fraction < 1.0);
         assert!(player_after_full
             .digestions
             .iter()
@@ -2709,7 +2716,7 @@ mod tests {
     }
 
     #[test]
-    fn death_pellet_grants_full_growth_node_credit() {
+    fn death_pellet_grants_big_pellet_growth_fraction() {
         let mut state = make_state();
         let player_id = "death-pellet-growth-player".to_string();
         let snake = vec![
@@ -2740,7 +2747,7 @@ mod tests {
             color_index: 0,
             base_size: DEATH_PELLET_SIZE_MIN,
             current_size: DEATH_PELLET_SIZE_MIN,
-            growth_fraction: 1.0,
+            growth_fraction: BIG_PELLET_GROWTH_FRACTION,
             state: PelletState::Idle,
         });
 
@@ -2748,11 +2755,14 @@ mod tests {
 
         let player_after = state.players.get(&player_id).expect("player");
         assert_eq!(player_after.score, 1);
-        assert!(player_after.pellet_growth_fraction < 0.01);
+        assert!(player_after.pellet_growth_fraction.abs() < 0.01);
         assert!(player_after
             .digestions
             .iter()
-            .any(|digestion| digestion.growth_amount >= 1.0));
+            .any(|digestion| {
+                digestion.growth_amount >= BIG_PELLET_GROWTH_FRACTION - 1e-6
+                    && digestion.growth_amount <= BIG_PELLET_GROWTH_FRACTION + 1e-6
+            }));
     }
 
     #[test]

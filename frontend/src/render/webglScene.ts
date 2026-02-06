@@ -47,6 +47,11 @@ type DigestionVisual = {
   strength: number
 }
 
+type TailFrameState = {
+  normal: THREE.Vector3
+  tangent: THREE.Vector3
+}
+
 type PelletSpriteBucket = {
   points: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>
   material: THREE.PointsMaterial
@@ -376,7 +381,6 @@ const DIGESTION_MAX_BULGE_MIN = 0.55
 const DIGESTION_MAX_BULGE_MAX = 0.82
 const DIGESTION_START_NODE_INDEX = 1
 const DIGESTION_TRAVEL_EASE = 1
-const TAIL_EXTEND_CURVE_BLEND = 0.65
 const TREE_COUNT = 36
 const TREE_BASE_OFFSET = 0.004
 const TREE_HEIGHT = BASE_PLANET_RADIUS * 0.3
@@ -1580,6 +1584,7 @@ const createScene = async (
   const lastHeadPositions = new Map<string, THREE.Vector3>()
   const lastForwardDirections = new Map<string, THREE.Vector3>()
   const lastTailDirections = new Map<string, THREE.Vector3>()
+  const tailFrameStates = new Map<string, TailFrameState>()
   const lastSnakeStarts = new Map<string, number>()
   const tongueStates = new Map<string, TongueState>()
   const tempVector = new THREE.Vector3()
@@ -1741,6 +1746,7 @@ const createScene = async (
     lastHeadPositions.delete(id)
     lastForwardDirections.delete(id)
     lastTailDirections.delete(id)
+    tailFrameStates.delete(id)
     tongueStates.delete(id)
   }
 
@@ -4047,77 +4053,175 @@ const createScene = async (
   }
 
 
-  const computeTailDirection = (
+  const projectToTangentPlane = (direction: THREE.Vector3, normal: THREE.Vector3) => {
+    const projected = direction.clone().addScaledVector(normal, -direction.dot(normal))
+    if (projected.lengthSq() <= 1e-8) return null
+    return projected.normalize()
+  }
+
+  const transportDirectionOnSphere = (
+    direction: THREE.Vector3,
+    fromNormal: THREE.Vector3,
+    toNormal: THREE.Vector3,
+  ) => {
+    const from = fromNormal.clone().normalize()
+    const to = toNormal.clone().normalize()
+    const aligned = clamp(from.dot(to), -1, 1)
+    const transported = direction.clone()
+
+    if (aligned < 0.999_999) {
+      const axis = from.clone().cross(to)
+      if (axis.lengthSq() > 1e-10) {
+        axis.normalize()
+        transported.applyAxisAngle(axis, Math.acos(aligned))
+      } else if (aligned < -0.999_999) {
+        const fallbackAxis = new THREE.Vector3(1, 0, 0).cross(from)
+        if (fallbackAxis.lengthSq() < 1e-8) {
+          fallbackAxis.set(0, 1, 0).cross(from)
+        }
+        if (fallbackAxis.lengthSq() > 1e-8) {
+          fallbackAxis.normalize()
+          transported.applyAxisAngle(fallbackAxis, Math.PI)
+        }
+      }
+    }
+
+    return projectToTangentPlane(transported, to)
+  }
+
+  const computeTailDirectionFromRecentSegments = (
     curvePoints: THREE.Vector3[],
-    tailBasisPrev?: THREE.Vector3 | null,
-    tailBasisTail?: THREE.Vector3 | null,
-    fallbackDirection?: THREE.Vector3 | null,
-    overrides?: {
-      tailPos?: THREE.Vector3
-      prevPos?: THREE.Vector3
-      preferFallbackBelow?: number
-    },
+    tailNormal: THREE.Vector3,
+    minSegmentLength: number,
+  ) => {
+    const segmentCount = curvePoints.length - 1
+    if (segmentCount <= 0) return null
+    const sampleCount = Math.min(5, segmentCount)
+    const directionAccum = new THREE.Vector3()
+    let totalWeight = 0
+    const stableLength = Math.max(minSegmentLength, 1e-6)
+
+    for (let sample = 0; sample < sampleCount; sample += 1) {
+      const endIndex = curvePoints.length - 1 - sample
+      const startIndex = endIndex - 1
+      if (startIndex < 0) break
+      const endPoint = curvePoints[endIndex]
+      const startPoint = curvePoints[startIndex]
+      const segment = endPoint.clone().sub(startPoint)
+      const segmentLength = segment.length()
+      if (segmentLength <= 1e-8) continue
+
+      const endNormal = endPoint.clone().normalize()
+      const localTangent = projectToTangentPlane(segment.multiplyScalar(1 / segmentLength), endNormal)
+      if (!localTangent) continue
+
+      const transported = transportDirectionOnSphere(localTangent, endNormal, tailNormal)
+      if (!transported) continue
+
+      const recencyWeight = 1 / (sample + 1)
+      const lengthWeight = clamp(segmentLength / (stableLength * 1.8), 0.05, 1)
+      const weight = recencyWeight * lengthWeight
+      directionAccum.addScaledVector(transported, weight)
+      totalWeight += weight
+    }
+
+    if (totalWeight <= 1e-8 || directionAccum.lengthSq() <= 1e-8) return null
+    return directionAccum.normalize()
+  }
+
+  const computeTailExtendDirection = (
+    curvePoints: THREE.Vector3[],
+    minSegmentLength: number,
+    previousDirection?: THREE.Vector3 | null,
+    frameState?: TailFrameState | null,
   ) => {
     if (curvePoints.length < 2) return null
-    const tailPos = overrides?.tailPos ?? curvePoints[curvePoints.length - 1]
-    const prevPos = overrides?.prevPos ?? curvePoints[curvePoints.length - 2]
-    const preferFallbackBelow = overrides?.preferFallbackBelow ?? 0
+    const tailPos = curvePoints[curvePoints.length - 1]
+    const prevPos = curvePoints[curvePoints.length - 2]
     const tailNormal = tailPos.clone().normalize()
+    const stableLength = Math.max(minSegmentLength, 1e-6)
 
-    const projectToTangent = (dir: THREE.Vector3) => {
-      dir.addScaledVector(tailNormal, -dir.dot(tailNormal))
-      return dir
+    const recentDirection = computeTailDirectionFromRecentSegments(
+      curvePoints,
+      tailNormal,
+      stableLength,
+    )
+    const frameDirection =
+      frameState && frameState.tangent.lengthSq() > 1e-8
+        ? transportDirectionOnSphere(frameState.tangent, frameState.normal, tailNormal)
+        : null
+    const previousProjected =
+      previousDirection && previousDirection.lengthSq() > 1e-8
+        ? projectToTangentPlane(previousDirection, tailNormal)
+        : null
+    const alignReference = recentDirection ?? frameDirection ?? previousProjected
+    const alignToReference = (direction: THREE.Vector3 | null) => {
+      if (!direction || !alignReference) return direction
+      if (direction.dot(alignReference) < 0) {
+        direction.multiplyScalar(-1)
+      }
+      return direction
     }
 
-    const lastSegmentDir = projectToTangent(tailPos.clone().sub(prevPos))
-    const lastSegmentLen = lastSegmentDir.length()
-    const hasLastSegment = lastSegmentLen > 1e-8
-    const lastSegmentUnit = hasLastSegment
-      ? lastSegmentDir.multiplyScalar(1 / lastSegmentLen)
-      : null
+    const recentAligned = alignToReference(recentDirection)
+    const frameAligned = alignToReference(frameDirection)
+    const previousAligned = alignToReference(previousProjected)
 
-    let fallbackDir: THREE.Vector3 | null = null
-    if (tailBasisPrev && tailBasisTail) {
-      const basisDir = projectToTangent(tailBasisTail.clone().sub(tailBasisPrev))
-      if (basisDir.lengthSq() > 1e-8) {
-        fallbackDir = basisDir.normalize()
+    let chosenDirection: THREE.Vector3 | null
+    if (recentAligned && frameAligned) {
+      const tailSegmentLength = tailPos.distanceTo(prevPos)
+      const tailConfidence = clamp(tailSegmentLength / (stableLength * 1.6), 0, 1)
+      const recentWeight = 0.6 + tailConfidence * 0.3
+      chosenDirection = frameAligned
+        .clone()
+        .multiplyScalar(1 - recentWeight)
+        .addScaledVector(recentAligned, recentWeight)
+    } else {
+      chosenDirection = recentAligned?.clone() ?? frameAligned?.clone() ?? previousAligned?.clone() ?? null
+    }
+
+    if (!chosenDirection || chosenDirection.lengthSq() <= 1e-8) {
+      chosenDirection = projectToTangentPlane(tailPos.clone().sub(prevPos), tailNormal)
+    }
+    if (!chosenDirection || chosenDirection.lengthSq() <= 1e-8) {
+      chosenDirection = previousAligned?.clone() ?? null
+    }
+    if (!chosenDirection || chosenDirection.lengthSq() <= 1e-8) {
+      chosenDirection = tailNormal.clone().cross(new THREE.Vector3(0, 1, 0))
+      if (chosenDirection.lengthSq() <= 1e-8) {
+        chosenDirection.crossVectors(tailNormal, new THREE.Vector3(1, 0, 0))
       }
     }
 
-    if (!fallbackDir && fallbackDirection) {
-      const providedDir = projectToTangent(fallbackDirection.clone())
-      if (providedDir.lengthSq() > 1e-8) {
-        fallbackDir = providedDir.normalize()
-      }
-    }
+    if (chosenDirection.lengthSq() <= 1e-8) return null
+    return chosenDirection.normalize()
+  }
 
-    if (lastSegmentUnit && fallbackDir && preferFallbackBelow > 0) {
-      const blendStart = preferFallbackBelow
-      const blendEnd = preferFallbackBelow * 1.5
-      if (lastSegmentLen <= blendStart) {
-        return fallbackDir
-      }
-      if (lastSegmentLen >= blendEnd) {
-        return lastSegmentUnit
-      }
-      const t = clamp((lastSegmentLen - blendStart) / (blendEnd - blendStart), 0, 1)
-      return fallbackDir.clone().lerp(lastSegmentUnit, t).normalize()
+  const storeTailFrameState = (
+    playerId: string,
+    tailNormal: THREE.Vector3,
+    tailDirection: THREE.Vector3,
+  ) => {
+    const tangent = projectToTangentPlane(tailDirection, tailNormal)
+    if (!tangent) {
+      tailFrameStates.delete(playerId)
+      return
     }
-
-    if (lastSegmentUnit) {
-      return lastSegmentUnit
+    const state = tailFrameStates.get(playerId)
+    if (state) {
+      state.normal.copy(tailNormal)
+      state.tangent.copy(tangent)
+    } else {
+      tailFrameStates.set(playerId, {
+        normal: tailNormal.clone(),
+        tangent,
+      })
     }
-
-    return fallbackDir
   }
 
   const computeExtendedTailPoint = (
     curvePoints: THREE.Vector3[],
     extendDistance: number,
-    tailBasisPrev?: THREE.Vector3 | null,
-    tailBasisTail?: THREE.Vector3 | null,
-    fallbackDirection?: THREE.Vector3 | null,
-    preferFallbackBelow?: number,
     overrideDirection?: THREE.Vector3 | null,
   ) => {
     if (extendDistance <= 0 || curvePoints.length < 2) return null
@@ -4125,23 +4229,7 @@ const createScene = async (
     const tailRadius = tailPos.length()
     if (!Number.isFinite(tailRadius) || tailRadius <= 1e-6) return null
     const tailNormal = tailPos.clone().normalize()
-    let tailDir = overrideDirection
-      ? overrideDirection.clone()
-      : computeTailDirection(
-          curvePoints,
-          tailBasisPrev,
-          tailBasisTail,
-          fallbackDirection,
-          { preferFallbackBelow },
-        )
-    if (tailDir) {
-      tailDir.addScaledVector(tailNormal, -tailDir.dot(tailNormal))
-      if (tailDir.lengthSq() > 1e-8) {
-        tailDir.normalize()
-      } else {
-        tailDir = null
-      }
-    }
+    const tailDir = overrideDirection ? projectToTangentPlane(overrideDirection, tailNormal) : null
     if (!tailDir) return null
 
     const axis = tailNormal.clone().cross(tailDir)
@@ -4162,55 +4250,6 @@ const createScene = async (
         .multiplyScalar(tailRadius)
     }
     return extended
-  }
-
-  const computeTailExtendDirection = (
-    curvePoints: THREE.Vector3[],
-    preferFallbackBelow: number,
-  ) => {
-    if (curvePoints.length < 2) return null
-    const tailPos = curvePoints[curvePoints.length - 1]
-    const prevPos = curvePoints[curvePoints.length - 2]
-    const tailNormal = tailPos.clone().normalize()
-
-    const projectToTangent = (dir: THREE.Vector3) => {
-      dir.addScaledVector(tailNormal, -dir.dot(tailNormal))
-      return dir
-    }
-
-    const lastDir = projectToTangent(tailPos.clone().sub(prevPos))
-    const lastLen = lastDir.length()
-
-    let prevDir: THREE.Vector3 | null = null
-    let prevLen = 0
-    if (curvePoints.length >= 3) {
-      const prevPrev = curvePoints[curvePoints.length - 3]
-      prevDir = projectToTangent(prevPos.clone().sub(prevPrev))
-      prevLen = prevDir.length()
-    }
-
-    if (lastLen < preferFallbackBelow && prevDir && prevLen > 1e-8) {
-      return prevDir.multiplyScalar(1 / prevLen)
-    }
-
-    if (lastLen > 1e-8 && prevDir && prevLen > 1e-8) {
-      lastDir.multiplyScalar(1 / lastLen)
-      prevDir.multiplyScalar(1 / prevLen)
-      if (prevDir.dot(lastDir) < 0) {
-        prevDir.multiplyScalar(-1)
-      }
-      return prevDir.lerp(lastDir, TAIL_EXTEND_CURVE_BLEND).normalize()
-    }
-
-    if (lastLen > 1e-8) {
-      return lastDir.multiplyScalar(1 / lastLen)
-    }
-
-    if (prevDir && prevLen > 1e-8) {
-      return prevDir.multiplyScalar(1 / prevLen)
-    }
-
-    return null
   }
 
   const getPelletTerrainRadius = (pellet: PelletSnapshot) => {
@@ -4542,6 +4581,7 @@ const createScene = async (
 
     const nodes = player.snake
     const lastTailDirection = lastTailDirections.get(player.id) ?? null
+    const tailFrameState = tailFrameStates.get(player.id) ?? null
     const digestionVisuals = buildDigestionVisuals(player.digestions)
     const girthScale = clamp(player.girthScale, SNAKE_GIRTH_SCALE_MIN, SNAKE_GIRTH_SCALE_MAX)
     const girthT = clamp(
@@ -4566,10 +4606,13 @@ const createScene = async (
     let secondCurvePoint: THREE.Vector3 | null = null
     let tailCurveTail: THREE.Vector3 | null = null
     let tailCurvePrev: THREE.Vector3 | null = null
+    let tailExtensionDirection: THREE.Vector3 | null = null
     let tailDirMinLen = 0
     if (nodes.length < 2) {
       visual.tube.visible = false
       visual.tail.visible = false
+      lastTailDirections.delete(player.id)
+      tailFrameStates.delete(player.id)
     } else {
       visual.tube.visible = true
       visual.tail.visible = true
@@ -4604,18 +4647,22 @@ const createScene = async (
       tailDirMinLen = Number.isFinite(referenceLength)
         ? Math.max(0, referenceLength * TAIL_DIR_MIN_RATIO)
         : 0
-      const extensionRatio = clamp(player.tailExtension, 0, 0.999_999)
+      const hasAuthoritativeTailWindow = player.snakeStart + nodes.length >= player.snakeTotalLen
+      const extensionRatio = hasAuthoritativeTailWindow
+        ? clamp(player.tailExtension, 0, 0.999_999)
+        : 0
       const extensionDistance = Math.max(0, referenceLength * extensionRatio)
-      const extendDir = computeTailExtendDirection(curvePoints, tailDirMinLen)
+      tailExtensionDirection = computeTailExtendDirection(
+        curvePoints,
+        tailDirMinLen,
+        lastTailDirection,
+        tailFrameState,
+      )
       if (extensionDistance > 0) {
         const extendedTail = computeExtendedTailPoint(
           curvePoints,
           extensionDistance,
-          tailBasisPrev,
-          tailBasisTail,
-          lastTailDirection,
-          tailDirMinLen,
-          extendDir,
+          tailExtensionDirection,
         )
         if (extendedTail) {
           curvePoints[curvePoints.length - 1] = extendedTail
@@ -4678,6 +4725,7 @@ const createScene = async (
       lastHeadPositions.delete(player.id)
       lastForwardDirections.delete(player.id)
       lastTailDirections.delete(player.id)
+      tailFrameStates.delete(player.id)
       tongueStates.delete(player.id)
       lastSnakeStarts.delete(player.id)
       if (isLocal) {
@@ -4926,15 +4974,18 @@ const createScene = async (
           return prevNormalFallback.multiplyScalar(prevRadius)
         })()
       const tailNormal = tailPos.clone().normalize()
-      const tailDir = tailPos.clone().sub(prevPos)
-      tailDir.addScaledVector(tailNormal, -tailDir.dot(tailNormal))
-      if (tailDir.lengthSq() < 1e-8 || (tailDirMinLen > 0 && tailDir.length() < tailDirMinLen)) {
-        if (lastTailDirection) {
-          tailDir.copy(lastTailDirection)
-        }
+      const tailSegmentLength = tailPos.distanceTo(prevPos)
+      let tailDir = projectToTangentPlane(tailPos.clone().sub(prevPos), tailNormal)
+      if (!tailDir || (tailDirMinLen > 0 && tailSegmentLength < tailDirMinLen)) {
+        tailDir =
+          (tailExtensionDirection && projectToTangentPlane(tailExtensionDirection, tailNormal)) ??
+          (tailFrameState
+            ? transportDirectionOnSphere(tailFrameState.tangent, tailFrameState.normal, tailNormal)
+            : null) ??
+          (lastTailDirection ? projectToTangentPlane(lastTailDirection, tailNormal) : null)
       }
-      if (tailDir.lengthSq() < 1e-8) {
-        tailDir.crossVectors(tailNormal, new THREE.Vector3(0, 1, 0))
+      if (!tailDir) {
+        tailDir = tailNormal.clone().cross(new THREE.Vector3(0, 1, 0))
         if (tailDir.lengthSq() < 1e-6) {
           tailDir.crossVectors(tailNormal, new THREE.Vector3(1, 0, 0))
         }
@@ -4945,6 +4996,7 @@ const createScene = async (
       } else {
         lastTailDirections.set(player.id, tailDir.clone())
       }
+      storeTailFrameState(player.id, tailNormal, tailDir)
       if (visual.tube.geometry instanceof THREE.TubeGeometry) {
         const capGeometry = buildTailCapGeometry(visual.tube.geometry, tailDir)
         if (capGeometry) {

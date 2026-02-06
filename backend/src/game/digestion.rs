@@ -44,13 +44,6 @@ pub fn advance_digestions(player: &mut Player, steps: i32) {
             {
                 player.tail_extension += player.digestions[i].growth_amount.max(0.0);
                 player.digestions[i].applied = true;
-                while player.tail_extension >= 1.0 {
-                    add_snake_node(&mut player.snake, player.axis);
-                    player.tail_extension -= 1.0;
-                }
-                if player.tail_extension < 0.0 {
-                    player.tail_extension = 0.0;
-                }
             }
 
             if player.digestions[i].remaining <= 0 {
@@ -59,6 +52,14 @@ pub fn advance_digestions(player: &mut Player, steps: i32) {
             }
 
             i += 1;
+        }
+
+        if player.tail_extension >= 1.0 {
+            add_snake_node(&mut player.snake, player.axis);
+            player.tail_extension -= 1.0;
+        }
+        if player.tail_extension < 0.0 {
+            player.tail_extension = 0.0;
         }
     }
 }
@@ -234,6 +235,38 @@ mod tests {
 
         assert_eq!(player.snake.len(), before_len + 1);
         assert!(player.tail_extension > 0.14 && player.tail_extension < 0.16);
+    }
+
+    #[test]
+    fn burst_growth_adds_only_one_node_per_step() {
+        let mut player = make_player();
+        player.digestions.push(Digestion {
+            id: 1,
+            remaining: 1,
+            total: 1,
+            settle_steps: 0,
+            growth_amount: 2.4,
+            applied: false,
+            strength: 1.0,
+        });
+
+        let before_len = player.snake.len();
+        advance_digestions(&mut player, 1);
+
+        assert_eq!(player.snake.len(), before_len + 1);
+        assert!(player.tail_extension > 1.39 && player.tail_extension < 1.41);
+    }
+
+    #[test]
+    fn tail_extension_carryover_consumes_one_node_per_substep() {
+        let mut player = make_player();
+        player.tail_extension = 2.2;
+        let before_len = player.snake.len();
+
+        advance_digestions(&mut player, 2);
+
+        assert_eq!(player.snake.len(), before_len + 2);
+        assert!(player.tail_extension > 0.19 && player.tail_extension < 0.21);
     }
 
     #[test]
