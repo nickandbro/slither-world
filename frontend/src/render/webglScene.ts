@@ -127,6 +127,16 @@ type TreeCullEntry = {
   topRadius: number
 }
 
+type CactusCullEntry = {
+  basePoint: THREE.Vector3
+  topPoint: THREE.Vector3
+  leftArmTipPoint: THREE.Vector3
+  rightArmTipPoint: THREE.Vector3
+  baseRadius: number
+  topRadius: number
+  armRadius: number
+}
+
 type MountainCullEntry = {
   basePoint: THREE.Vector3
   peakPoint: THREE.Vector3
@@ -1386,6 +1396,9 @@ const createScene = async (
   let treeVisibleIndices: number[] = []
   let cactusTrunkSourceMatrices: THREE.Matrix4[] = []
   let cactusPartSourceMatrices: THREE.Matrix4[][] = []
+  let cactusCullEntries: CactusCullEntry[] = []
+  let cactusVisibilityState: boolean[] = []
+  let cactusVisibleIndices: number[] = []
   let visibleTreeCount = 0
   let visibleCactusCount = 0
   let mountainSourceMatricesByVariant: THREE.Matrix4[][] = []
@@ -1749,6 +1762,9 @@ const createScene = async (
     treeCullEntries = []
     treeVisibilityState = []
     treeVisibleIndices = []
+    cactusCullEntries = []
+    cactusVisibilityState = []
+    cactusVisibleIndices = []
     visibleTreeCount = 0
     visibleCactusCount = 0
     mountainSourceMatricesByVariant = []
@@ -2283,6 +2299,9 @@ const createScene = async (
     const treeMargin = PLANET_OBJECT_VIEW_MARGIN + TREE_EDGE_PRELOAD_MARGIN * edgePreload
     const treeHideExtra = PLANET_OBJECT_HIDE_EXTRA + TREE_EDGE_PRELOAD_HIDE_EXTRA * edgePreload
     const treeOcclusionLead = 1 + TREE_EDGE_PRELOAD_OCCLUSION_LEAD * edgePreload
+    const cactusMargin = treeMargin
+    const cactusHideExtra = treeHideExtra
+    const cactusOcclusionLead = treeOcclusionLead
     const rockMargin = PLANET_OBJECT_VIEW_MARGIN + ROCK_EDGE_PRELOAD_MARGIN * edgePreload
     const rockHideExtra = PLANET_OBJECT_HIDE_EXTRA + ROCK_EDGE_PRELOAD_HIDE_EXTRA * edgePreload
     const rockOcclusionLead = 1 + ROCK_EDGE_PRELOAD_OCCLUSION_LEAD * edgePreload
@@ -2345,7 +2364,84 @@ const createScene = async (
       }
     }
     visibleTreeCount = treeVisibleIndices.length
-    visibleCactusCount = cactusTrunkSourceMatrices.length
+
+    const nextCactusVisible: number[] = []
+    for (let i = 0; i < cactusCullEntries.length; i += 1) {
+      const entry = cactusCullEntries[i]
+      const wasVisible = cactusVisibilityState[i] ?? false
+      const visible =
+        isPointVisible(
+          entry.basePoint,
+          entry.baseRadius,
+          cameraLocalPos,
+          cameraLocalDir,
+          viewAngle,
+          wasVisible,
+          cactusMargin,
+          cactusHideExtra,
+          cactusOcclusionLead,
+        ) ||
+        isPointVisible(
+          entry.topPoint,
+          entry.topRadius,
+          cameraLocalPos,
+          cameraLocalDir,
+          viewAngle,
+          wasVisible,
+          cactusMargin,
+          cactusHideExtra,
+          cactusOcclusionLead,
+        ) ||
+        isPointVisible(
+          entry.leftArmTipPoint,
+          entry.armRadius,
+          cameraLocalPos,
+          cameraLocalDir,
+          viewAngle,
+          wasVisible,
+          cactusMargin,
+          cactusHideExtra,
+          cactusOcclusionLead,
+        ) ||
+        isPointVisible(
+          entry.rightArmTipPoint,
+          entry.armRadius,
+          cameraLocalPos,
+          cameraLocalDir,
+          viewAngle,
+          wasVisible,
+          cactusMargin,
+          cactusHideExtra,
+          cactusOcclusionLead,
+        )
+      cactusVisibilityState[i] = visible
+      if (visible) nextCactusVisible.push(i)
+    }
+    if (!arraysEqual(nextCactusVisible, cactusVisibleIndices)) {
+      cactusVisibleIndices = nextCactusVisible
+      if (cactusTrunkMesh) {
+        for (let write = 0; write < cactusVisibleIndices.length; write += 1) {
+          const source = cactusTrunkSourceMatrices[cactusVisibleIndices[write]]
+          if (!source) continue
+          cactusTrunkMesh.setMatrixAt(write, source)
+        }
+        cactusTrunkMesh.count = cactusVisibleIndices.length
+        cactusTrunkMesh.instanceMatrix.needsUpdate = true
+      }
+      for (let p = 0; p < cactusPartMeshes.length; p += 1) {
+        const mesh = cactusPartMeshes[p]
+        const sourceMatrices = cactusPartSourceMatrices[p]
+        if (!mesh || !sourceMatrices) continue
+        for (let write = 0; write < cactusVisibleIndices.length; write += 1) {
+          const source = sourceMatrices[cactusVisibleIndices[write]]
+          if (!source) continue
+          mesh.setMatrixAt(write, source)
+        }
+        mesh.count = cactusVisibleIndices.length
+        mesh.instanceMatrix.needsUpdate = true
+      }
+    }
+    visibleCactusCount = cactusVisibleIndices.length
 
     let mountainVisibleTotal = 0
     for (let variant = 0; variant < mountainMeshes.length; variant += 1) {
@@ -2661,16 +2757,16 @@ const createScene = async (
       new THREE.Vector3(0, CACTUS_TRUNK_HEIGHT, 0),
     ]
     const leftArmSpinePoints = [
-      new THREE.Vector3(-CACTUS_TRUNK_RADIUS * 0.42, CACTUS_LEFT_ARM_BASE_HEIGHT, 0),
-      new THREE.Vector3(-CACTUS_TRUNK_RADIUS * 1.18, CACTUS_LEFT_ARM_BASE_HEIGHT + CACTUS_TRUNK_HEIGHT * 0.09, 0),
-      new THREE.Vector3(-CACTUS_TRUNK_RADIUS * 1.54, CACTUS_LEFT_ARM_BASE_HEIGHT + CACTUS_TRUNK_HEIGHT * 0.26, 0),
-      new THREE.Vector3(-CACTUS_TRUNK_RADIUS * 1.34, CACTUS_LEFT_ARM_BASE_HEIGHT + CACTUS_TRUNK_HEIGHT * 0.47, 0),
+      new THREE.Vector3(-CACTUS_TRUNK_RADIUS * 0.5, CACTUS_LEFT_ARM_BASE_HEIGHT, 0),
+      new THREE.Vector3(-CACTUS_TRUNK_RADIUS * 1.28, CACTUS_LEFT_ARM_BASE_HEIGHT + CACTUS_TRUNK_HEIGHT * 0.09, 0),
+      new THREE.Vector3(-CACTUS_TRUNK_RADIUS * 1.72, CACTUS_LEFT_ARM_BASE_HEIGHT + CACTUS_TRUNK_HEIGHT * 0.26, 0),
+      new THREE.Vector3(-CACTUS_TRUNK_RADIUS * 1.66, CACTUS_LEFT_ARM_BASE_HEIGHT + CACTUS_TRUNK_HEIGHT * 0.47, 0),
     ]
     const rightArmSpinePoints = [
-      new THREE.Vector3(CACTUS_TRUNK_RADIUS * 0.4, CACTUS_RIGHT_ARM_BASE_HEIGHT, 0),
-      new THREE.Vector3(CACTUS_TRUNK_RADIUS * 0.98, CACTUS_RIGHT_ARM_BASE_HEIGHT + CACTUS_TRUNK_HEIGHT * 0.07, 0),
-      new THREE.Vector3(CACTUS_TRUNK_RADIUS * 1.22, CACTUS_RIGHT_ARM_BASE_HEIGHT + CACTUS_TRUNK_HEIGHT * 0.21, 0),
-      new THREE.Vector3(CACTUS_TRUNK_RADIUS * 1.02, CACTUS_RIGHT_ARM_BASE_HEIGHT + CACTUS_TRUNK_HEIGHT * 0.37, 0),
+      new THREE.Vector3(CACTUS_TRUNK_RADIUS * 0.48, CACTUS_RIGHT_ARM_BASE_HEIGHT, 0),
+      new THREE.Vector3(CACTUS_TRUNK_RADIUS * 1.1, CACTUS_RIGHT_ARM_BASE_HEIGHT + CACTUS_TRUNK_HEIGHT * 0.07, 0),
+      new THREE.Vector3(CACTUS_TRUNK_RADIUS * 1.42, CACTUS_RIGHT_ARM_BASE_HEIGHT + CACTUS_TRUNK_HEIGHT * 0.21, 0),
+      new THREE.Vector3(CACTUS_TRUNK_RADIUS * 1.32, CACTUS_RIGHT_ARM_BASE_HEIGHT + CACTUS_TRUNK_HEIGHT * 0.37, 0),
     ]
 
     const trunkCurve = new THREE.CatmullRomCurve3(trunkSpinePoints, false, 'centripetal', 0.25)
@@ -2718,28 +2814,33 @@ const createScene = async (
       material: THREE.Material
     }> = [
       {
+        point: trunkSpinePoints[0].clone(),
+        radius: CACTUS_TRUNK_RADIUS * 1.05,
+        material: cactusBodyMaterial,
+      },
+      {
         point: trunkSpinePoints[trunkSpinePoints.length - 1].clone(),
-        radius: CACTUS_TRUNK_RADIUS * 0.92,
+        radius: CACTUS_TRUNK_RADIUS * 1.05,
         material: cactusBodyMaterial,
       },
       {
         point: leftArmSpinePoints[0].clone(),
-        radius: CACTUS_LEFT_ARM_RADIUS * 0.95,
+        radius: CACTUS_LEFT_ARM_RADIUS * 1.05,
         material: cactusBodyMaterial,
       },
       {
         point: leftArmSpinePoints[leftArmSpinePoints.length - 1].clone(),
-        radius: CACTUS_LEFT_ARM_RADIUS * 0.88,
+        radius: CACTUS_LEFT_ARM_RADIUS * 1.03,
         material: cactusArmMat,
       },
       {
         point: rightArmSpinePoints[0].clone(),
-        radius: CACTUS_RIGHT_ARM_RADIUS * 0.95,
+        radius: CACTUS_RIGHT_ARM_RADIUS * 1.05,
         material: cactusBodyMaterial,
       },
       {
         point: rightArmSpinePoints[rightArmSpinePoints.length - 1].clone(),
-        radius: CACTUS_RIGHT_ARM_RADIUS * 0.88,
+        radius: CACTUS_RIGHT_ARM_RADIUS * 1.03,
         material: cactusArmMat,
       },
     ]
@@ -2808,6 +2909,9 @@ const createScene = async (
     treeCullEntries = []
     treeVisibilityState = []
     treeVisibleIndices = []
+    cactusCullEntries = []
+    cactusVisibilityState = []
+    cactusVisibleIndices = []
     visibleTreeCount = 0
     visibleCactusCount = 0
     mountainSourceMatricesByVariant = mountainMeshes.map(() => [])
@@ -2931,8 +3035,18 @@ const createScene = async (
     }
     cactusTrunkSourceMatrices = []
     cactusPartSourceMatrices = cactusPartMeshes.map(() => [])
+    cactusCullEntries = []
+    cactusVisibilityState = []
+    cactusVisibleIndices = []
     const cactusBaseRadius = PLANET_RADIUS + TREE_BASE_OFFSET - CACTUS_BASE_SINK
     const appliedCactusCount = Math.min(treeInstanceCount, cactusTrees.length)
+    const cactusTopLocalPoint = trunkSpinePoints[trunkSpinePoints.length - 1] ?? new THREE.Vector3(0, CACTUS_TRUNK_HEIGHT, 0)
+    const cactusLeftTipLocalPoint =
+      leftArmSpinePoints[leftArmSpinePoints.length - 1] ??
+      new THREE.Vector3(-CACTUS_TRUNK_RADIUS * 1.66, CACTUS_LEFT_ARM_BASE_HEIGHT + CACTUS_TRUNK_HEIGHT * 0.47, 0)
+    const cactusRightTipLocalPoint =
+      rightArmSpinePoints[rightArmSpinePoints.length - 1] ??
+      new THREE.Vector3(CACTUS_TRUNK_RADIUS * 1.32, CACTUS_RIGHT_ARM_BASE_HEIGHT + CACTUS_TRUNK_HEIGHT * 0.37, 0)
     for (let i = 0; i < appliedCactusCount; i += 1) {
       const cactus = cactusTrees[i]
       const widthScale = Math.abs(cactus.widthScale)
@@ -2952,6 +3066,22 @@ const createScene = async (
       for (let p = 0; p < cactusPartMeshes.length; p += 1) {
         cactusPartSourceMatrices[p]?.push(baseMatrix.clone())
       }
+      const basePoint = new THREE.Vector3(0, 0, 0).applyMatrix4(baseMatrix)
+      const topPoint = cactusTopLocalPoint.clone().applyMatrix4(baseMatrix)
+      const leftArmTipPoint = cactusLeftTipLocalPoint.clone().applyMatrix4(baseMatrix)
+      const rightArmTipPoint = cactusRightTipLocalPoint.clone().applyMatrix4(baseMatrix)
+      const baseRadius = CACTUS_TRUNK_RADIUS * cactusScale
+      const armRadius = Math.max(CACTUS_LEFT_ARM_RADIUS, CACTUS_RIGHT_ARM_RADIUS) * cactusScale
+      cactusCullEntries.push({
+        basePoint,
+        topPoint,
+        leftArmTipPoint,
+        rightArmTipPoint,
+        baseRadius,
+        topRadius: baseRadius * 0.96,
+        armRadius,
+      })
+      cactusVisibilityState.push(false)
     }
 
     if (treeTrunkMesh) {
@@ -2963,26 +3093,15 @@ const createScene = async (
       mesh.instanceMatrix.needsUpdate = true
     }
     if (cactusTrunkMesh) {
-      for (let i = 0; i < cactusTrunkSourceMatrices.length; i += 1) {
-        const source = cactusTrunkSourceMatrices[i]
-        if (!source) continue
-        cactusTrunkMesh.setMatrixAt(i, source)
-      }
-      cactusTrunkMesh.count = cactusTrunkSourceMatrices.length
+      cactusTrunkMesh.count = 0
       cactusTrunkMesh.instanceMatrix.needsUpdate = true
     }
     for (let p = 0; p < cactusPartMeshes.length; p += 1) {
       const mesh = cactusPartMeshes[p]
-      const sourceMatrices = cactusPartSourceMatrices[p] ?? []
-      for (let i = 0; i < sourceMatrices.length; i += 1) {
-        const source = sourceMatrices[i]
-        if (!source) continue
-        mesh.setMatrixAt(i, source)
-      }
-      mesh.count = sourceMatrices.length
+      mesh.count = 0
       mesh.instanceMatrix.needsUpdate = true
     }
-    visibleCactusCount = cactusTrunkSourceMatrices.length
+    visibleCactusCount = 0
 
     if (data?.mountains?.length) {
       mountains = data.mountains.map(buildMountainFromData)
