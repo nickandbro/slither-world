@@ -796,6 +796,7 @@ impl RoomState {
             axis,
             target_axis: axis,
             boost: false,
+            is_boosting: false,
             stamina: STAMINA_MAX,
             oxygen: OXYGEN_MAX,
             oxygen_damage_accumulator: 0.0,
@@ -1518,6 +1519,7 @@ impl RoomState {
             let wants_boost = player.boost;
             let has_stamina = player.stamina > 0.0;
             let is_boosting = wants_boost && has_stamina;
+            player.is_boosting = is_boosting;
             if is_boosting {
                 player.stamina = (player.stamina - STAMINA_DRAIN_PER_SEC * dt_seconds).max(0.0);
             } else if !wants_boost {
@@ -1709,6 +1711,7 @@ impl RoomState {
             }
             player.alive = false;
             player.respawn_at = Some(Self::now_millis() + RESPAWN_COOLDOWN_MS);
+            player.is_boosting = false;
             player.digestions.clear();
             player.next_digestion_id = 0;
             player.pellet_growth_fraction = 0.0;
@@ -1769,6 +1772,7 @@ impl RoomState {
         player.score = 0;
         player.alive = true;
         player.boost = false;
+        player.is_boosting = false;
         player.stamina = STAMINA_MAX;
         player.oxygen = OXYGEN_MAX;
         player.oxygen_damage_accumulator = 0.0;
@@ -1803,7 +1807,7 @@ impl RoomState {
         for visible in visible_players.iter().take(visible_player_count) {
             let player = visible.player;
             let window = visible.window;
-            capacity += 16 + 1 + 4 + 4 + 4 + 4 + 4 + 1 + 2;
+            capacity += 16 + 1 + 4 + 4 + 4 + 1 + 4 + 4 + 1 + 2;
             match window.detail {
                 SnakeDetail::Full => {
                     capacity += 2 + window.len * 12;
@@ -1858,7 +1862,7 @@ impl RoomState {
         for visible in visible_players.iter().take(visible_player_count) {
             let player = visible.player;
             let window = visible.window;
-            capacity += 16 + 1 + 4 + 4 + 4 + 4 + 4 + 1 + 2;
+            capacity += 16 + 1 + 4 + 4 + 4 + 1 + 4 + 4 + 1 + 2;
             match window.detail {
                 SnakeDetail::Full => {
                     capacity += 2 + window.len * 12;
@@ -1974,6 +1978,7 @@ impl RoomState {
         encoder.write_i32(player.score as i32);
         encoder.write_f32(player.stamina as f32);
         encoder.write_f32(player.oxygen as f32);
+        encoder.write_u8(if player.is_boosting { 1 } else { 0 });
         let girth_scale = Self::player_girth_scale_from_len(player.snake.len());
         encoder.write_f32(girth_scale as f32);
         encoder.write_f32(clamp(player.tail_extension, 0.0, 1.0) as f32);
@@ -2102,6 +2107,7 @@ mod tests {
                 z: 0.0,
             },
             boost: false,
+            is_boosting: false,
             stamina: STAMINA_MAX,
             oxygen: OXYGEN_MAX,
             oxygen_damage_accumulator: 0.0,
@@ -2169,6 +2175,7 @@ mod tests {
         *offset += 4; // score
         *offset += 4; // stamina
         *offset += 4; // oxygen
+        *offset += 1; // is_boosting
         *offset += 4; // girth scale
         *offset += 4; // tail extension
         let detail = read_u8(bytes, offset);
@@ -2533,6 +2540,9 @@ mod tests {
         let payload = encoder.into_vec();
 
         let mut offset = 16 + 1 + 4 + 4 + 4;
+        let encoded_is_boosting = payload[offset];
+        assert_eq!(encoded_is_boosting, 0);
+        offset += 1;
         let encoded_girth_scale =
             f32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
         assert!((encoded_girth_scale - 1.0).abs() < 1e-6);
@@ -2572,6 +2582,26 @@ mod tests {
     }
 
     #[test]
+    fn write_player_state_encodes_authoritative_is_boosting_flag() {
+        let state = make_state();
+        let mut player = make_player("player-boosting", make_snake(3, 0.0));
+        player.boost = true;
+        player.is_boosting = true;
+
+        let mut encoder = protocol::Encoder::with_capacity(256);
+        state.write_player_state(&mut encoder, &player);
+        let payload = encoder.into_vec();
+
+        let mut offset = 16 + 1 + 4 + 4 + 4; // id, alive, score, stamina, oxygen
+        let encoded_is_boosting = payload[offset];
+        assert_eq!(encoded_is_boosting, 1);
+        offset += 1;
+        let encoded_girth_scale =
+            f32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
+        assert!((encoded_girth_scale - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn write_player_state_encodes_most_recent_digestions_when_capped() {
         let state = make_state();
         let mut player = make_player("player-recent-digest", make_snake(2, 0.0));
@@ -2591,7 +2621,7 @@ mod tests {
         state.write_player_state(&mut encoder, &player);
         let payload = encoder.into_vec();
 
-        let mut offset = 16 + 1 + 4 + 4 + 4 + 4 + 4; // id, alive, score, stamina, oxygen, girth, tail_extension
+        let mut offset = 16 + 1 + 4 + 4 + 4 + 1 + 4 + 4; // id, alive, score, stamina, oxygen, is_boosting, girth, tail_extension
         let detail = payload[offset];
         assert_eq!(detail, protocol::SNAKE_DETAIL_FULL);
         offset += 1;

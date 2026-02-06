@@ -52,6 +52,22 @@ type TailFrameState = {
   tangent: THREE.Vector3
 }
 
+type TrailSample = {
+  point: THREE.Vector3
+  normal: THREE.Vector3
+  createdAt: number
+}
+
+type BoostTrailState = {
+  mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
+  samples: TrailSample[]
+  boosting: boolean
+  retiring: boolean
+  retireStartedAt: number
+  retireInitialCount: number
+  dirty: boolean
+}
+
 type PelletSpriteBucket = {
   points: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>
   material: THREE.PointsMaterial
@@ -370,6 +386,14 @@ const TONGUE_PELLET_MATCH = HEAD_RADIUS * 1.6
 const TONGUE_ENABLED = false
 const TAIL_CAP_SEGMENTS = 5
 const TAIL_DIR_MIN_RATIO = 0.35
+const BOOST_TRAIL_FADE_SECONDS = 4.5
+const BOOST_TRAIL_SURFACE_OFFSET = 0.0008
+const BOOST_TRAIL_RADIUS = SNAKE_RADIUS * 0.16
+const BOOST_TRAIL_MIN_SAMPLE_DISTANCE = SNAKE_RADIUS * 0.38
+const BOOST_TRAIL_MAX_SAMPLES = 280
+const BOOST_TRAIL_MAX_ARC_ANGLE = 0.055
+const BOOST_TRAIL_TUBE_SEGMENTS_PER_POINT = 4
+const BOOST_TRAIL_COLOR = '#3a3129'
 const DIGESTION_BULGE_MIN = 0.22
 const DIGESTION_BULGE_MAX = 0.54
 const DIGESTION_BULGE_GIRTH_MIN_SCALE = 0.25
@@ -1484,8 +1508,10 @@ const createScene = async (
   const environmentGroup = new THREE.Group()
   world.add(environmentGroup)
 
+  const boostTrailsGroup = new THREE.Group()
   const snakesGroup = new THREE.Group()
   const pelletsGroup = new THREE.Group()
+  world.add(boostTrailsGroup)
   world.add(snakesGroup)
   world.add(pelletsGroup)
 
@@ -1579,11 +1605,13 @@ const createScene = async (
   let lastFrameTime = performance.now()
 
   const snakes = new Map<string, SnakeVisual>()
+  const boostTrails = new Map<string, BoostTrailState>()
   const deathStates = new Map<string, DeathState>()
   const lastAliveStates = new Map<string, boolean>()
   const lastHeadPositions = new Map<string, THREE.Vector3>()
   const lastForwardDirections = new Map<string, THREE.Vector3>()
   const lastTailDirections = new Map<string, THREE.Vector3>()
+  const lastTailContactNormals = new Map<string, THREE.Vector3>()
   const tailFrameStates = new Map<string, TailFrameState>()
   const lastSnakeStarts = new Map<string, number>()
   const tongueStates = new Map<string, TongueState>()
@@ -1610,6 +1638,8 @@ const createScene = async (
   const snakeContactPointTemp = new THREE.Vector3()
   const snakeContactNormalTemp = new THREE.Vector3()
   const snakeContactFallbackTemp = new THREE.Vector3()
+  const trailSamplePointTemp = new THREE.Vector3()
+  const trailSlerpNormalTemp = new THREE.Vector3()
   const tongueUp = new THREE.Vector3(0, 1, 0)
   const debugEnabled = import.meta.env.DEV || import.meta.env.VITE_E2E_DEBUG === '1'
   let debugApi:
@@ -1645,6 +1675,13 @@ const createScene = async (
         }
         getSnakeGroundingInfo: () => SnakeGroundingInfo | null
         getSnakeIds: () => string[]
+        getBoostTrailInfo: (id: string) => {
+          sampleCount: number
+          boosting: boolean
+          retiring: boolean
+          oldestAgeMs: number
+          newestAgeMs: number
+        } | null
       }
     | null = null
 
@@ -1683,6 +1720,13 @@ const createScene = async (
         }
         getSnakeGroundingInfo: () => SnakeGroundingInfo | null
         getSnakeIds: () => string[]
+        getBoostTrailInfo: (id: string) => {
+          sampleCount: number
+          boosting: boolean
+          retiring: boolean
+          oldestAgeMs: number
+          newestAgeMs: number
+        } | null
       }
     }
     debugApi = {
@@ -1736,6 +1780,20 @@ const createScene = async (
             }
           : null,
       getSnakeIds: () => Array.from(snakes.keys()),
+      getBoostTrailInfo: (id: string) => {
+        const trail = boostTrails.get(id)
+        if (!trail) return null
+        const nowMs = performance.now()
+        const oldest = trail.samples[0]
+        const newest = trail.samples[trail.samples.length - 1]
+        return {
+          sampleCount: trail.samples.length,
+          boosting: trail.boosting,
+          retiring: trail.retiring,
+          oldestAgeMs: oldest ? Math.max(0, nowMs - oldest.createdAt) : 0,
+          newestAgeMs: newest ? Math.max(0, nowMs - newest.createdAt) : 0,
+        }
+      },
     }
     debugWindow.__SNAKE_DEBUG__ = debugApi
   }
@@ -1746,6 +1804,7 @@ const createScene = async (
     lastHeadPositions.delete(id)
     lastForwardDirections.delete(id)
     lastTailDirections.delete(id)
+    lastTailContactNormals.delete(id)
     tailFrameStates.delete(id)
     tongueStates.delete(id)
   }
@@ -3581,6 +3640,255 @@ const createScene = async (
     return getAnalyticTerrainRadius(normal, sample)
   }
 
+  const createBoostTrail = (): BoostTrailState => {
+    const material = new THREE.MeshStandardMaterial({
+      color: BOOST_TRAIL_COLOR,
+      roughness: 0.96,
+      metalness: 0.0,
+      emissive: '#000000',
+      transparent: false,
+    })
+    material.depthWrite = false
+    material.polygonOffset = true
+    material.polygonOffsetFactor = -1
+    material.polygonOffsetUnits = -1
+    const mesh = new THREE.Mesh(new THREE.BufferGeometry(), material)
+    mesh.visible = false
+    mesh.renderOrder = 1
+    boostTrailsGroup.add(mesh)
+    return {
+      mesh,
+      samples: [],
+      boosting: false,
+      retiring: false,
+      retireStartedAt: 0,
+      retireInitialCount: 0,
+      dirty: false,
+    }
+  }
+
+  const removeBoostTrail = (id: string, trail: BoostTrailState) => {
+    boostTrailsGroup.remove(trail.mesh)
+    trail.mesh.geometry.dispose()
+    trail.mesh.material.dispose()
+    boostTrails.delete(id)
+  }
+
+  const getTrailSurfacePointFromNormal = (
+    normal: THREE.Vector3,
+    out: THREE.Vector3,
+  ) => {
+    const radius = getTerrainRadius(normal)
+    out.copy(normal).multiplyScalar(radius + BOOST_TRAIL_SURFACE_OFFSET)
+    return out
+  }
+
+  const slerpNormals = (
+    a: THREE.Vector3,
+    b: THREE.Vector3,
+    t: number,
+    out: THREE.Vector3,
+  ) => {
+    const dotValue = clamp(a.dot(b), -1, 1)
+    if (dotValue > 0.9995) {
+      return out.copy(a).lerp(b, t).normalize()
+    }
+    const theta = Math.acos(dotValue)
+    const sinTheta = Math.sin(theta)
+    if (sinTheta <= 1e-5) {
+      return out.copy(a).lerp(b, t).normalize()
+    }
+    const wA = Math.sin((1 - t) * theta) / sinTheta
+    const wB = Math.sin(t * theta) / sinTheta
+    out.set(
+      a.x * wA + b.x * wB,
+      a.y * wA + b.y * wB,
+      a.z * wA + b.z * wB,
+    )
+    if (out.lengthSq() <= 1e-10) {
+      return out.copy(a).normalize()
+    }
+    return out.normalize()
+  }
+
+  const markBoostTrailDirty = (trail: BoostTrailState) => {
+    trail.dirty = true
+  }
+
+  const trimBoostTrailSamples = (trail: BoostTrailState) => {
+    if (trail.samples.length <= BOOST_TRAIL_MAX_SAMPLES) return
+    const excess = trail.samples.length - BOOST_TRAIL_MAX_SAMPLES
+    trail.samples.splice(0, excess)
+    if (trail.retiring) {
+      trail.retireInitialCount = Math.max(1, trail.samples.length)
+    }
+    markBoostTrailDirty(trail)
+  }
+
+  const pushBoostTrailSample = (
+    trail: BoostTrailState,
+    normal: THREE.Vector3,
+    nowMs: number,
+  ) => {
+    getTrailSurfacePointFromNormal(normal, trailSamplePointTemp)
+    trail.samples.push({
+      point: trailSamplePointTemp.clone(),
+      normal: normal.clone(),
+      createdAt: nowMs,
+    })
+    trimBoostTrailSamples(trail)
+    markBoostTrailDirty(trail)
+  }
+
+  const appendBoostTrailSample = (
+    trail: BoostTrailState,
+    normal: THREE.Vector3,
+    nowMs: number,
+  ) => {
+    if (!Number.isFinite(normal.x) || !Number.isFinite(normal.y) || !Number.isFinite(normal.z)) {
+      return
+    }
+    const normalized = trailSlerpNormalTemp.copy(normal)
+    if (normalized.lengthSq() <= 1e-10) return
+    normalized.normalize()
+    const last = trail.samples[trail.samples.length - 1]
+    if (!last) {
+      pushBoostTrailSample(trail, normalized, nowMs)
+      return
+    }
+
+    getTrailSurfacePointFromNormal(normalized, trailSamplePointTemp)
+    const minDistanceSq = BOOST_TRAIL_MIN_SAMPLE_DISTANCE * BOOST_TRAIL_MIN_SAMPLE_DISTANCE
+    if (trailSamplePointTemp.distanceToSquared(last.point) < minDistanceSq) {
+      return
+    }
+
+    const arcAngle = Math.acos(clamp(last.normal.dot(normalized), -1, 1))
+    const subdivisions = Math.max(0, Math.ceil(arcAngle / BOOST_TRAIL_MAX_ARC_ANGLE) - 1)
+    if (subdivisions > 0) {
+      for (let step = 1; step <= subdivisions; step += 1) {
+        const t = step / (subdivisions + 1)
+        slerpNormals(last.normal, normalized, t, trailSlerpNormalTemp)
+        pushBoostTrailSample(trail, trailSlerpNormalTemp, nowMs)
+      }
+    }
+    pushBoostTrailSample(trail, normalized, nowMs)
+  }
+
+  const beginBoostTrailRetirement = (trail: BoostTrailState, nowMs: number) => {
+    if (trail.samples.length === 0) {
+      trail.retiring = false
+      trail.retireInitialCount = 0
+      return
+    }
+    trail.retiring = true
+    trail.retireStartedAt = nowMs
+    trail.retireInitialCount = trail.samples.length
+  }
+
+  const advanceBoostTrailRetirement = (trail: BoostTrailState, nowMs: number) => {
+    if (!trail.retiring) return
+    const durationMs = BOOST_TRAIL_FADE_SECONDS * 1000
+    const elapsed = Math.max(0, nowMs - trail.retireStartedAt)
+    const t = durationMs > 0 ? clamp(elapsed / durationMs, 0, 1) : 1
+    const targetRemain = Math.max(0, Math.ceil((1 - t) * trail.retireInitialCount))
+    if (trail.samples.length > targetRemain) {
+      const removeCount = trail.samples.length - targetRemain
+      trail.samples.splice(0, removeCount)
+      markBoostTrailDirty(trail)
+    }
+    if (t >= 1 || trail.samples.length === 0) {
+      if (trail.samples.length > 0) {
+        trail.samples.length = 0
+        markBoostTrailDirty(trail)
+      }
+      trail.retiring = false
+      trail.retireInitialCount = 0
+    }
+  }
+
+  const rebuildBoostTrailGeometry = (trail: BoostTrailState) => {
+    if (!trail.dirty) return
+    trail.dirty = false
+    const points = trail.samples
+    if (points.length < 2) {
+      trail.mesh.visible = false
+      return
+    }
+
+    const curvePoints = points.map((sample) => sample.point.clone())
+    const curve = new THREE.CatmullRomCurve3(curvePoints, false, 'centripetal', 0.25)
+    const tubularSegments = Math.max(
+      8,
+      Math.min(512, (curvePoints.length - 1) * BOOST_TRAIL_TUBE_SEGMENTS_PER_POINT),
+    )
+    const geometry = new THREE.TubeGeometry(curve, tubularSegments, BOOST_TRAIL_RADIUS, 6, false)
+    trail.mesh.geometry.dispose()
+    trail.mesh.geometry = geometry
+    trail.mesh.visible = true
+  }
+
+  const updateBoostTrailForPlayer = (
+    player: PlayerSnapshot,
+    tailContactNormal: THREE.Vector3 | null,
+    nowMs: number,
+  ) => {
+    const hasSnake = player.alive && player.snakeDetail !== 'stub' && player.snake.length > 0
+    const shouldBoost = hasSnake && player.isBoosting
+    let trail = boostTrails.get(player.id)
+    if (!trail) {
+      if (!shouldBoost) return
+      trail = createBoostTrail()
+      boostTrails.set(player.id, trail)
+    }
+
+    if (shouldBoost) {
+      if (trail.retiring) {
+        trail.retiring = false
+        trail.retireInitialCount = 0
+      }
+      trail.boosting = true
+      if (tailContactNormal) {
+        trailSlerpNormalTemp.copy(tailContactNormal)
+      } else {
+        const tail = player.snake[player.snake.length - 1]
+        trailSlerpNormalTemp.set(tail.x, tail.y, tail.z)
+      }
+      if (trailSlerpNormalTemp.lengthSq() > 1e-10) {
+        appendBoostTrailSample(trail, trailSlerpNormalTemp, nowMs)
+      }
+    } else {
+      if (trail.boosting) {
+        trail.boosting = false
+        beginBoostTrailRetirement(trail, nowMs)
+      }
+    }
+
+    advanceBoostTrailRetirement(trail, nowMs)
+    rebuildBoostTrailGeometry(trail)
+    if (!trail.boosting && !trail.retiring && trail.samples.length === 0) {
+      removeBoostTrail(player.id, trail)
+    }
+  }
+
+  const updateInactiveBoostTrails = (
+    activeIds: Set<string>,
+    nowMs: number,
+  ) => {
+    for (const [id, trail] of boostTrails) {
+      if (activeIds.has(id)) continue
+      if (trail.boosting) {
+        trail.boosting = false
+        beginBoostTrailRetirement(trail, nowMs)
+      }
+      advanceBoostTrailRetirement(trail, nowMs)
+      rebuildBoostTrailGeometry(trail)
+      if (!trail.boosting && !trail.retiring && trail.samples.length === 0) {
+        removeBoostTrail(id, trail)
+      }
+    }
+  }
+
   const sampleSnakeContactLift = (
     normal: THREE.Vector3,
     tangent: THREE.Vector3,
@@ -4567,6 +4875,7 @@ const createScene = async (
         localGroundingInfo = null
       }
       resetSnakeTransientState(player.id)
+      lastTailContactNormals.delete(player.id)
       visual.tube.visible = false
       visual.tail.visible = false
       visual.head.visible = false
@@ -4612,6 +4921,7 @@ const createScene = async (
       visual.tube.visible = false
       visual.tail.visible = false
       lastTailDirections.delete(player.id)
+      lastTailContactNormals.delete(player.id)
       tailFrameStates.delete(player.id)
     } else {
       visual.tube.visible = true
@@ -4725,6 +5035,7 @@ const createScene = async (
       lastHeadPositions.delete(player.id)
       lastForwardDirections.delete(player.id)
       lastTailDirections.delete(player.id)
+      lastTailContactNormals.delete(player.id)
       tailFrameStates.delete(player.id)
       tongueStates.delete(player.id)
       lastSnakeStarts.delete(player.id)
@@ -4974,6 +5285,12 @@ const createScene = async (
           return prevNormalFallback.multiplyScalar(prevRadius)
         })()
       const tailNormal = tailPos.clone().normalize()
+      const contactNormal = lastTailContactNormals.get(player.id)
+      if (contactNormal) {
+        contactNormal.copy(tailNormal)
+      } else {
+        lastTailContactNormals.set(player.id, tailNormal.clone())
+      }
       const tailSegmentLength = tailPos.distanceTo(prevPos)
       let tailDir = projectToTangentPlane(tailPos.clone().sub(prevPos), tailNormal)
       if (!tailDir || (tailDirMinLen > 0 && tailSegmentLength < tailDirMinLen)) {
@@ -5045,6 +5362,7 @@ const createScene = async (
     localPlayerId: string | null,
     deltaSeconds: number,
     pellets: PelletSnapshot[] | null,
+    nowMs: number,
   ): PelletOverride | null => {
     const activeIds = new Set<string>()
     localGroundingInfo = null
@@ -5060,6 +5378,8 @@ const createScene = async (
       if (override) {
         pelletOverride = override
       }
+      const tailContactNormal = lastTailContactNormals.get(player.id) ?? null
+      updateBoostTrailForPlayer(player, tailContactNormal, nowMs)
     }
 
     for (const [id, visual] of snakes) {
@@ -5070,6 +5390,7 @@ const createScene = async (
         lastForwardDirections.delete(id)
       }
     }
+    updateInactiveBoostTrails(activeIds, nowMs)
 
     return pelletOverride
   }
@@ -5336,10 +5657,11 @@ const createScene = async (
         localPlayerId,
         deltaSeconds,
         snapshot.pellets,
+        now,
       )
       updatePellets(snapshot.pellets, pelletOverride)
     } else {
-      updateSnakes([], localPlayerId, deltaSeconds, null)
+      updateSnakes([], localPlayerId, deltaSeconds, null, now)
       updatePellets([], null)
     }
 
@@ -5450,6 +5772,10 @@ const createScene = async (
       removeSnake(visual, id)
     }
     snakes.clear()
+    for (const [id, trail] of boostTrails) {
+      removeBoostTrail(id, trail)
+    }
+    boostTrails.clear()
 
     if (debugEnabled && typeof window !== 'undefined') {
       const debugWindow = window as Window & { __SNAKE_DEBUG__?: unknown }

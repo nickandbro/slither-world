@@ -54,6 +54,7 @@ pub struct Player {
     pub axis: Point,
     pub target_axis: Point,
     pub boost: bool,
+    pub is_boosting: bool,
     pub stamina: f64,
     pub oxygen: f64,
     pub oxygen_damage_accumulator: f64,

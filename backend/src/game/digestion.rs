@@ -119,6 +119,7 @@ mod tests {
                 z: 0.0,
             },
             boost: false,
+            is_boosting: false,
             stamina: 1.0,
             oxygen: 1.0,
             oxygen_damage_accumulator: 0.0,

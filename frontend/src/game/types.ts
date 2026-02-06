@@ -26,6 +26,7 @@ export type PlayerSnapshot = {
   score: number
   stamina: number
   oxygen: number
+  isBoosting: boolean
   girthScale: number
   tailExtension: number
   alive: boolean
