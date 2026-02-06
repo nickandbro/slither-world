@@ -3926,6 +3926,11 @@ const createScene = async (
         activeTrail.boosting = true
         trails.push(activeTrail)
       }
+      for (const trail of trails) {
+        if (trail === activeTrail || !trail.boosting) continue
+        trail.boosting = false
+        beginBoostTrailRetirement(trail, nowMs)
+      }
       if (activeTrail.retiring) {
         activeTrail.retiring = false
         activeTrail.retireInitialCount = 0
