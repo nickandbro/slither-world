@@ -69,6 +69,11 @@ type BoostTrailState = {
   dirty: boolean
 }
 
+type BoostTrailMaterialUserData = {
+  retireCut: number
+  retireCutUniform?: { value: number }
+}
+
 type PelletSpriteBucket = {
   points: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>
   material: THREE.PointsMaterial
@@ -396,6 +401,7 @@ const BOOST_TRAIL_CURVE_SEGMENTS_PER_POINT = 10
 const BOOST_TRAIL_WIDTH = SNAKE_RADIUS * 0.42
 const BOOST_TRAIL_EDGE_FADE_CAP = 0.22
 const BOOST_TRAIL_SIDE_FADE_CAP = 0.28
+const BOOST_TRAIL_RETIRE_FEATHER = 0.14
 const BOOST_TRAIL_OPACITY = 0.55
 const BOOST_TRAIL_ALPHA_TEXTURE_WIDTH = 256
 const BOOST_TRAIL_ALPHA_TEXTURE_HEIGHT = 64
@@ -3730,6 +3736,44 @@ const createScene = async (
     material.polygonOffset = true
     material.polygonOffsetFactor = -2
     material.polygonOffsetUnits = -2
+    const materialUserData = material.userData as BoostTrailMaterialUserData
+    materialUserData.retireCut = 0
+    if (webglShaderHooksEnabled) {
+      material.onBeforeCompile = (shader) => {
+        const retireCutUniform = {
+          value: clamp(materialUserData.retireCut ?? 0, 0, 1),
+        }
+        materialUserData.retireCutUniform = retireCutUniform
+        shader.uniforms.boostTrailRetireCut = retireCutUniform
+        shader.uniforms.boostTrailRetireFeather = {
+          value: clamp(BOOST_TRAIL_RETIRE_FEATHER, 1e-4, 0.5),
+        }
+        shader.vertexShader = shader.vertexShader
+          .replace(
+            '#include <common>',
+            '#include <common>\nattribute float trailProgress;\nvarying float vTrailProgress;',
+          )
+          .replace(
+            '#include <begin_vertex>',
+            '#include <begin_vertex>\n  vTrailProgress = trailProgress;',
+          )
+        shader.fragmentShader = shader.fragmentShader
+          .replace(
+            '#include <common>',
+            '#include <common>\nvarying float vTrailProgress;\nuniform float boostTrailRetireCut;\nuniform float boostTrailRetireFeather;',
+          )
+          .replace(
+            '#include <color_fragment>',
+            `#include <color_fragment>
+float retireEdge = smoothstep(
+  boostTrailRetireCut,
+  min(1.0, boostTrailRetireCut + boostTrailRetireFeather),
+  vTrailProgress
+);
+diffuseColor.a *= retireEdge;`,
+          )
+      }
+    }
     return material
   }
 
@@ -3755,6 +3799,15 @@ const createScene = async (
     boostTrailsGroup.remove(trail.mesh)
     trail.mesh.geometry.dispose()
     trail.mesh.material.dispose()
+  }
+
+  const setBoostTrailRetireCut = (trail: BoostTrailState) => {
+    const retireCut = trail.retiring ? clamp(trail.retireCut, 0, 1) : 0
+    const materialUserData = trail.mesh.material.userData as BoostTrailMaterialUserData
+    materialUserData.retireCut = retireCut
+    if (materialUserData.retireCutUniform) {
+      materialUserData.retireCutUniform.value = retireCut
+    }
   }
 
   const getTrailSurfacePointFromNormal = (
@@ -3932,6 +3985,7 @@ const createScene = async (
 
     const positionArray = new Float32Array(vertexCount * 3)
     const uvArray = new Float32Array(vertexCount * 2)
+    const trailProgressArray = new Float32Array(vertexCount)
     const segmentCount = centerCount - 1
     const indexArray =
       vertexCount > 65535
@@ -3939,7 +3993,10 @@ const createScene = async (
         : new Uint16Array(segmentCount * 6)
     const halfWidth = BOOST_TRAIL_WIDTH * 0.5
     const retireCut = trail.retiring ? clamp(trail.retireCut, 0, 0.9999) : 0
-    const retireDenominator = Math.max(1e-4, 1 - retireCut)
+    const retireFadeEnd = trail.retiring
+      ? clamp(retireCut + BOOST_TRAIL_RETIRE_FEATHER, retireCut + 1e-4, 1)
+      : 0
+    const edgeCap = clamp(BOOST_TRAIL_EDGE_FADE_CAP, 1e-4, 0.5)
 
     for (let i = 0; i < centerCount; i += 1) {
       const center = projectedPoints[i]
@@ -3980,9 +4037,18 @@ const createScene = async (
       const leftVertexIndex = i * 2
       const rightVertexIndex = leftVertexIndex + 1
       const baseU = centerCount > 1 ? i / (centerCount - 1) : 0
-      const u = trail.retiring
-        ? clamp((baseU - retireCut) / retireDenominator, 0, 1)
-        : baseU
+      let u = baseU
+      if (!webglShaderHooksEnabled && trail.retiring) {
+        if (baseU <= retireCut) {
+          u = 0
+        } else if (baseU < retireFadeEnd) {
+          const fadeT = (baseU - retireCut) / Math.max(1e-4, retireFadeEnd - retireCut)
+          u = smoothstep(0, 1, fadeT) * edgeCap
+        } else {
+          const remainT = (baseU - retireFadeEnd) / Math.max(1e-4, 1 - retireFadeEnd)
+          u = edgeCap + clamp(remainT, 0, 1) * (1 - edgeCap)
+        }
+      }
 
       trailOffsetTemp.copy(center).addScaledVector(trailSideTemp, halfWidth)
       trailReprojectPointTemp.copy(trailOffsetTemp)
@@ -3997,6 +4063,7 @@ const createScene = async (
       positionArray[leftVertexIndex * 3 + 2] = trailOffsetTemp.z
       uvArray[leftVertexIndex * 2] = u
       uvArray[leftVertexIndex * 2 + 1] = 0
+      trailProgressArray[leftVertexIndex] = baseU
 
       trailOffsetTemp.copy(center).addScaledVector(trailSideTemp, -halfWidth)
       trailReprojectPointTemp.copy(trailOffsetTemp)
@@ -4011,6 +4078,7 @@ const createScene = async (
       positionArray[rightVertexIndex * 3 + 2] = trailOffsetTemp.z
       uvArray[rightVertexIndex * 2] = u
       uvArray[rightVertexIndex * 2 + 1] = 1
+      trailProgressArray[rightVertexIndex] = baseU
     }
 
     let indexOffset = 0
@@ -4031,6 +4099,9 @@ const createScene = async (
     const geometry = new THREE.BufferGeometry()
     geometry.setAttribute('position', new THREE.BufferAttribute(positionArray, 3))
     geometry.setAttribute('uv', new THREE.BufferAttribute(uvArray, 2))
+    if (webglShaderHooksEnabled) {
+      geometry.setAttribute('trailProgress', new THREE.BufferAttribute(trailProgressArray, 1))
+    }
     geometry.setIndex(new THREE.BufferAttribute(indexArray, 1))
     geometry.computeBoundingSphere()
     trail.mesh.geometry.dispose()
@@ -4042,6 +4113,7 @@ const createScene = async (
     for (let i = trails.length - 1; i >= 0; i -= 1) {
       const trail = trails[i]
       advanceBoostTrailRetirement(trail, nowMs)
+      setBoostTrailRetireCut(trail)
       rebuildBoostTrailGeometry(trail)
       if (!trail.boosting && !trail.retiring && trail.samples.length === 0) {
         removeBoostTrail(trail)
