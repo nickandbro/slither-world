@@ -23,7 +23,7 @@ pub const SPAWN_CONE_ANGLE: f64 = std::f64::consts::PI / 3.0;
 pub const MAX_SPAWN_ATTEMPTS: usize = 32;
 pub const SPAWN_PLAYER_MIN_DISTANCE: f64 = COLLISION_DISTANCE * 2.0;
 pub const DIGESTION_GROWTH_STEPS: i64 = NODE_QUEUE_SIZE as i64;
-pub const BOT_COUNT: usize = 20;
+pub const BOT_COUNT: usize = 5;
 pub const BOT_BOOST_DISTANCE: f64 = 0.6 / WORLD_SCALE;
 pub const BOT_MIN_STAMINA_TO_BOOST: f64 = 0.6;
 

@@ -150,6 +150,32 @@ type PebbleCullEntry = {
   radius: number
 }
 
+type TerrainContactTriangle = {
+  ax: number
+  ay: number
+  az: number
+  e1x: number
+  e1y: number
+  e1z: number
+  e2x: number
+  e2y: number
+  e2z: number
+}
+
+type TerrainContactSampler = {
+  bands: number
+  slices: number
+  buckets: number[][]
+  triangles: TerrainContactTriangle[]
+}
+
+type SnakeGroundingInfo = {
+  minClearance: number
+  maxPenetration: number
+  maxAppliedLift: number
+  sampleCount: number
+}
+
 export type RendererPreference = 'auto' | 'webgl' | 'webgpu'
 export type RendererBackend = 'webgl' | 'webgpu'
 
@@ -186,6 +212,9 @@ const PLANET_BASE_ICOSPHERE_DETAIL = 16
 const PLANET_PATCH_ENABLED = true
 const PLANET_PATCH_BANDS = 12
 const PLANET_PATCH_SLICES = 24
+const TERRAIN_CONTACT_BANDS = PLANET_PATCH_BANDS
+const TERRAIN_CONTACT_SLICES = PLANET_PATCH_SLICES
+const TERRAIN_CONTACT_EPS = 1e-6
 const PLANET_PATCH_VIEW_MARGIN = 0.18
 const PLANET_PATCH_HIDE_EXTRA = 0.06
 const PLANET_OBJECT_VIEW_MARGIN = 0.14
@@ -267,6 +296,10 @@ const HEAD_RADIUS = SNAKE_RADIUS * 1.35
 const SNAKE_LIFT_FACTOR = 0.85
 const SNAKE_UNDERWATER_CLEARANCE = SNAKE_RADIUS * 0.18
 const SNAKE_MIN_TERRAIN_CLEARANCE = SNAKE_RADIUS * 0.1
+const SNAKE_CONTACT_CLEARANCE = SNAKE_RADIUS * 0.04
+const SNAKE_CONTACT_ARC_SAMPLES = 7
+const SNAKE_CONTACT_LIFT_ITERATIONS = 2
+const SNAKE_CONTACT_LIFT_EPS = 1e-5
 const SNAKE_WATERLINE_BLEND_START = 0.08
 const SNAKE_WATERLINE_BLEND_END = 0.55
 const SNAKE_SLOPE_INSERT_RADIUS_DELTA = SNAKE_RADIUS * 0.4
@@ -465,6 +498,147 @@ const createIcosphereGeometry = (radius: number, detail: number) => {
   geometry.computeBoundingSphere()
   return geometry
 }
+
+const bucketIndexFromDirection = (
+  normal: THREE.Vector3,
+  bands: number,
+  slices: number,
+) => {
+  const latitude = Math.asin(clamp(normal.y, -1, 1))
+  const longitude = Math.atan2(normal.z, normal.x)
+  const band = clamp(
+    Math.floor(((latitude + Math.PI * 0.5) / Math.PI) * bands),
+    0,
+    bands - 1,
+  )
+  const slice = clamp(
+    Math.floor(((longitude + Math.PI) / (Math.PI * 2)) * slices),
+    0,
+    slices - 1,
+  )
+  return { band, slice }
+}
+
+const createTerrainContactSampler = (
+  geometry: THREE.BufferGeometry,
+  bands: number,
+  slices: number,
+): TerrainContactSampler | null => {
+  const positionAttr = geometry.getAttribute('position')
+  if (!(positionAttr instanceof THREE.BufferAttribute)) return null
+  const indexAttr = geometry.getIndex()
+  const triCount = indexAttr
+    ? Math.floor(indexAttr.count / 3)
+    : Math.floor(positionAttr.count / 3)
+  if (triCount <= 0) return null
+
+  const buckets = Array.from({ length: bands * slices }, () => [] as number[])
+  const triangles: TerrainContactTriangle[] = []
+  const a = new THREE.Vector3()
+  const b = new THREE.Vector3()
+  const c = new THREE.Vector3()
+  const edge1 = new THREE.Vector3()
+  const edge2 = new THREE.Vector3()
+  const cross = new THREE.Vector3()
+  const centroid = new THREE.Vector3()
+
+  const readVertex = (index: number, out: THREE.Vector3) => {
+    out.set(positionAttr.getX(index), positionAttr.getY(index), positionAttr.getZ(index))
+  }
+
+  for (let tri = 0; tri < triCount; tri += 1) {
+    const i0 = indexAttr ? indexAttr.getX(tri * 3) : tri * 3
+    const i1 = indexAttr ? indexAttr.getX(tri * 3 + 1) : tri * 3 + 1
+    const i2 = indexAttr ? indexAttr.getX(tri * 3 + 2) : tri * 3 + 2
+    readVertex(i0, a)
+    readVertex(i1, b)
+    readVertex(i2, c)
+
+    edge1.copy(b).sub(a)
+    edge2.copy(c).sub(a)
+    cross.copy(edge1).cross(edge2)
+    if (cross.lengthSq() <= TERRAIN_CONTACT_EPS) continue
+
+    centroid.copy(a).add(b).add(c).multiplyScalar(1 / 3)
+    if (centroid.lengthSq() <= TERRAIN_CONTACT_EPS) continue
+    centroid.normalize()
+    const { band, slice } = bucketIndexFromDirection(centroid, bands, slices)
+    const triIndex = triangles.length
+    triangles.push({
+      ax: a.x,
+      ay: a.y,
+      az: a.z,
+      e1x: edge1.x,
+      e1y: edge1.y,
+      e1z: edge1.z,
+      e2x: edge2.x,
+      e2y: edge2.y,
+      e2z: edge2.z,
+    })
+    buckets[band * slices + slice].push(triIndex)
+  }
+
+  if (triangles.length === 0) return null
+  return { bands, slices, buckets, triangles }
+}
+
+const sampleTerrainContactRadius = (
+  sampler: TerrainContactSampler,
+  direction: THREE.Vector3,
+): number | null => {
+  if (direction.lengthSq() <= TERRAIN_CONTACT_EPS) return null
+  const { band, slice } = bucketIndexFromDirection(
+    direction,
+    sampler.bands,
+    sampler.slices,
+  )
+  let bestT = Number.POSITIVE_INFINITY
+
+  for (let bandOffset = -1; bandOffset <= 1; bandOffset += 1) {
+    const sampleBand = band + bandOffset
+    if (sampleBand < 0 || sampleBand >= sampler.bands) continue
+    for (let sliceOffset = -1; sliceOffset <= 1; sliceOffset += 1) {
+      let sampleSlice = slice + sliceOffset
+      if (sampleSlice < 0) sampleSlice += sampler.slices
+      if (sampleSlice >= sampler.slices) sampleSlice -= sampler.slices
+      const bucket = sampler.buckets[sampleBand * sampler.slices + sampleSlice]
+      if (!bucket || bucket.length === 0) continue
+
+      for (let i = 0; i < bucket.length; i += 1) {
+        const triangle = sampler.triangles[bucket[i]]
+        if (!triangle) continue
+
+        const hx = direction.y * triangle.e2z - direction.z * triangle.e2y
+        const hy = direction.z * triangle.e2x - direction.x * triangle.e2z
+        const hz = direction.x * triangle.e2y - direction.y * triangle.e2x
+        const det = triangle.e1x * hx + triangle.e1y * hy + triangle.e1z * hz
+        if (Math.abs(det) <= TERRAIN_CONTACT_EPS) continue
+        const invDet = 1 / det
+
+        const sx = -triangle.ax
+        const sy = -triangle.ay
+        const sz = -triangle.az
+        const u = (sx * hx + sy * hy + sz * hz) * invDet
+        if (u < 0 || u > 1) continue
+
+        const qx = sy * triangle.e1z - sz * triangle.e1y
+        const qy = sz * triangle.e1x - sx * triangle.e1z
+        const qz = sx * triangle.e1y - sy * triangle.e1x
+        const v = (direction.x * qx + direction.y * qy + direction.z * qz) * invDet
+        if (v < 0 || u + v > 1) continue
+
+        const t = (triangle.e2x * qx + triangle.e2y * qy + triangle.e2z * qz) * invDet
+        if (t > TERRAIN_CONTACT_EPS && t < bestT) {
+          bestT = t
+        }
+      }
+    }
+  }
+
+  if (!Number.isFinite(bestT)) return null
+  return bestT
+}
+
 const createLakes = (seed: number, count: number) => {
   const rng = createSeededRandom(seed)
   const lakes: Lake[] = []
@@ -1413,6 +1587,8 @@ const createScene = async (
   let pebbleVisibleIndices: number[] = []
   let visiblePebbleCount = 0
   let visibleLakeCount = 0
+  let terrainContactSampler: TerrainContactSampler | null = null
+  let localGroundingInfo: SnakeGroundingInfo | null = null
   let pelletMesh: THREE.InstancedMesh | null = null
   let pelletCapacity = 0
   let viewportWidth = 1
@@ -1452,6 +1628,13 @@ const createScene = async (
   const directionTemp = new THREE.Vector3()
   const rayDirTemp = new THREE.Vector3()
   const occlusionPointTemp = new THREE.Vector3()
+  const snakeContactCenterTemp = new THREE.Vector3()
+  const snakeContactTangentTemp = new THREE.Vector3()
+  const snakeContactBitangentTemp = new THREE.Vector3()
+  const snakeContactOffsetTemp = new THREE.Vector3()
+  const snakeContactPointTemp = new THREE.Vector3()
+  const snakeContactNormalTemp = new THREE.Vector3()
+  const snakeContactFallbackTemp = new THREE.Vector3()
   const tongueUp = new THREE.Vector3(0, 1, 0)
   const debugEnabled = import.meta.env.DEV || import.meta.env.VITE_E2E_DEBUG === '1'
   let debugApi:
@@ -1485,6 +1668,7 @@ const createScene = async (
           totalLakes: number
           visibleLakes: number
         }
+        getSnakeGroundingInfo: () => SnakeGroundingInfo | null
       }
     | null = null
 
@@ -1521,6 +1705,7 @@ const createScene = async (
           totalLakes: number
           visibleLakes: number
         }
+        getSnakeGroundingInfo: () => SnakeGroundingInfo | null
       }
     }
     debugApi = {
@@ -1564,6 +1749,15 @@ const createScene = async (
         totalLakes: lakes.length,
         visibleLakes: visibleLakeCount,
       }),
+      getSnakeGroundingInfo: () =>
+        localGroundingInfo
+          ? {
+              minClearance: localGroundingInfo.minClearance,
+              maxPenetration: localGroundingInfo.maxPenetration,
+              maxAppliedLift: localGroundingInfo.maxAppliedLift,
+              sampleCount: localGroundingInfo.sampleCount,
+            }
+          : null,
     }
     debugWindow.__SNAKE_DEBUG__ = debugApi
   }
@@ -1598,6 +1792,7 @@ const createScene = async (
 
   const disposeEnvironment = () => {
     visiblePlanetPatchCount = 0
+    terrainContactSampler = null
     if (planetMesh) {
       world.remove(planetMesh)
       planetMesh.geometry.dispose()
@@ -2548,6 +2743,11 @@ const createScene = async (
       const basePlanetGeometry = createIcosphereGeometry(PLANET_RADIUS, PLANET_BASE_ICOSPHERE_DETAIL)
       const planetGeometry = basePlanetGeometry.clone()
       applyLakeDepressions(planetGeometry, lakes)
+      terrainContactSampler = createTerrainContactSampler(
+        planetGeometry,
+        TERRAIN_CONTACT_BANDS,
+        TERRAIN_CONTACT_SLICES,
+      )
       planetPatchMaterial = planetMaterial
       buildPlanetPatchAtlas(planetGeometry, planetMaterial)
 
@@ -2595,6 +2795,11 @@ const createScene = async (
       const basePlanetGeometry = createIcosphereGeometry(PLANET_RADIUS, PLANET_BASE_ICOSPHERE_DETAIL)
       const planetGeometry = basePlanetGeometry.clone()
       applyLakeDepressions(planetGeometry, lakes)
+      terrainContactSampler = createTerrainContactSampler(
+        planetGeometry,
+        TERRAIN_CONTACT_BANDS,
+        TERRAIN_CONTACT_SLICES,
+      )
       planetMesh = new THREE.Mesh(planetGeometry, planetMaterial)
       world.add(planetMesh)
 
@@ -3364,15 +3569,159 @@ const createScene = async (
     material.depthWrite = !shouldBeTransparent
   }
 
+  const createGroundingInfo = (): SnakeGroundingInfo => ({
+    minClearance: Number.POSITIVE_INFINITY,
+    maxPenetration: 0,
+    maxAppliedLift: 0,
+    sampleCount: 0,
+  })
+
+  const finalizeGroundingInfo = (
+    info: SnakeGroundingInfo | null,
+  ): SnakeGroundingInfo | null => {
+    if (!info || info.sampleCount <= 0) return null
+    return {
+      minClearance: Number.isFinite(info.minClearance) ? info.minClearance : 0,
+      maxPenetration: info.maxPenetration,
+      maxAppliedLift: info.maxAppliedLift,
+      sampleCount: info.sampleCount,
+    }
+  }
+
+  const getAnalyticTerrainRadius = (
+    normal: THREE.Vector3,
+    sample?: ReturnType<typeof sampleLakes>,
+  ) => {
+    const lakeSample = sample ?? sampleLakes(normal, lakes, lakeSampleTemp)
+    const depth = getVisualLakeTerrainDepth(lakeSample)
+    const duneOffset = sampleDuneOffset(normal) * sampleDesertBlend(normal)
+    return PLANET_RADIUS + duneOffset - depth
+  }
+
+  const getTerrainRadius = (
+    normal: THREE.Vector3,
+    sample?: ReturnType<typeof sampleLakes>,
+  ) => {
+    if (terrainContactSampler) {
+      const sampled = sampleTerrainContactRadius(terrainContactSampler, normal)
+      if (sampled !== null) return sampled
+    }
+    return getAnalyticTerrainRadius(normal, sample)
+  }
+
+  const sampleSnakeContactLift = (
+    normal: THREE.Vector3,
+    tangent: THREE.Vector3,
+    centerlineRadius: number,
+    supportRadius: number,
+    clearance: number,
+    stats: SnakeGroundingInfo | null,
+  ) => {
+    if (supportRadius <= 0) return 0
+    snakeContactTangentTemp.copy(tangent)
+    snakeContactTangentTemp.addScaledVector(normal, -snakeContactTangentTemp.dot(normal))
+    if (snakeContactTangentTemp.lengthSq() <= 1e-8) {
+      buildTangentBasis(normal, snakeContactTangentTemp, snakeContactBitangentTemp)
+    } else {
+      snakeContactTangentTemp.normalize()
+      snakeContactBitangentTemp.crossVectors(normal, snakeContactTangentTemp)
+      if (snakeContactBitangentTemp.lengthSq() <= 1e-8) {
+        buildTangentBasis(normal, snakeContactTangentTemp, snakeContactBitangentTemp)
+      } else {
+        snakeContactBitangentTemp.normalize()
+      }
+    }
+
+    snakeContactCenterTemp.copy(normal).multiplyScalar(centerlineRadius)
+    let maxLift = 0
+    const sampleCount = Math.max(3, SNAKE_CONTACT_ARC_SAMPLES)
+    const denominator = sampleCount - 1
+    for (let i = 0; i < sampleCount; i += 1) {
+      const t = denominator > 0 ? i / denominator : 0.5
+      const angle = -Math.PI * 0.5 + t * Math.PI
+      const sin = Math.sin(angle)
+      const cos = Math.cos(angle)
+      snakeContactOffsetTemp.copy(snakeContactBitangentTemp).multiplyScalar(sin)
+      snakeContactOffsetTemp.addScaledVector(normal, -cos)
+      snakeContactPointTemp
+        .copy(snakeContactCenterTemp)
+        .addScaledVector(snakeContactOffsetTemp, supportRadius)
+      const pointRadius = snakeContactPointTemp.length()
+      if (!Number.isFinite(pointRadius) || pointRadius <= 1e-6) continue
+      snakeContactNormalTemp.copy(snakeContactPointTemp).multiplyScalar(1 / pointRadius)
+      const terrainRadius = getTerrainRadius(snakeContactNormalTemp)
+      const requiredRadius = terrainRadius + clearance
+      const clearanceValue = pointRadius - requiredRadius
+      if (stats) {
+        stats.sampleCount += 1
+        stats.minClearance = Math.min(stats.minClearance, clearanceValue)
+        if (clearanceValue < 0) {
+          stats.maxPenetration = Math.max(stats.maxPenetration, -clearanceValue)
+        }
+      }
+      if (clearanceValue >= 0) continue
+
+      const pointDotNormal = snakeContactPointTemp.dot(normal)
+      const requiredSq = requiredRadius * requiredRadius
+      const pointSq = pointRadius * pointRadius
+      const discriminant = Math.max(
+        0,
+        pointDotNormal * pointDotNormal + (requiredSq - pointSq),
+      )
+      let lift = -clearanceValue
+      const solvedLift = -pointDotNormal + Math.sqrt(discriminant)
+      if (Number.isFinite(solvedLift) && solvedLift > lift) {
+        lift = solvedLift
+      }
+      if (lift > maxLift) maxLift = lift
+    }
+
+    return maxLift
+  }
+
+  const applySnakeContactLift = (
+    normal: THREE.Vector3,
+    tangent: THREE.Vector3,
+    centerlineRadius: number,
+    supportRadius: number,
+    groundingInfo: SnakeGroundingInfo | null,
+  ) => {
+    let liftedRadius = centerlineRadius
+    let totalLift = 0
+    for (let iteration = 0; iteration < SNAKE_CONTACT_LIFT_ITERATIONS; iteration += 1) {
+      const lift = sampleSnakeContactLift(
+        normal,
+        tangent,
+        liftedRadius,
+        supportRadius,
+        SNAKE_CONTACT_CLEARANCE,
+        null,
+      )
+      if (lift <= SNAKE_CONTACT_LIFT_EPS) break
+      liftedRadius += lift
+      totalLift += lift
+    }
+    if (groundingInfo) {
+      sampleSnakeContactLift(
+        normal,
+        tangent,
+        liftedRadius,
+        supportRadius,
+        SNAKE_CONTACT_CLEARANCE,
+        groundingInfo,
+      )
+      groundingInfo.maxAppliedLift = Math.max(groundingInfo.maxAppliedLift, totalLift)
+    }
+    return totalLift
+  }
+
   const getSnakeCenterlineRadius = (
     normal: THREE.Vector3,
     radiusOffset: number,
     snakeRadius: number,
   ) => {
     const sample = sampleLakes(normal, lakes, lakeSampleTemp)
-    const depth = getVisualLakeTerrainDepth(sample)
-    const duneOffset = sampleDuneOffset(normal) * sampleDesertBlend(normal)
-    const terrainRadius = PLANET_RADIUS + duneOffset - depth
+    const terrainRadius = getTerrainRadius(normal, sample)
     let centerlineRadius = terrainRadius + radiusOffset
     if (!sample.lake || sample.boundary <= LAKE_WATER_MASK_THRESHOLD) {
       return centerlineRadius
@@ -3401,17 +3750,62 @@ const createScene = async (
     nodes: Point[],
     radiusOffset: number,
     snakeRadius: number,
+    groundingInfo: SnakeGroundingInfo | null,
   ) => {
     const curvePoints: THREE.Vector3[] = []
-    let prevNormal: THREE.Vector3 | null = null
-    let prevRadius = PLANET_RADIUS + radiusOffset
+    if (nodes.length === 0) return curvePoints
 
+    const nodeNormals = new Array<THREE.Vector3>(nodes.length)
     for (let i = 0; i < nodes.length; i += 1) {
       const node = nodes[i]
-      const normal = new THREE.Vector3(node.x, node.y, node.z).normalize()
-      const nodeRadius = getSnakeCenterlineRadius(normal, radiusOffset, snakeRadius)
+      nodeNormals[i] = new THREE.Vector3(node.x, node.y, node.z).normalize()
+    }
+
+    const nodeTangents = new Array<THREE.Vector3>(nodes.length)
+    for (let i = 0; i < nodeNormals.length; i += 1) {
+      const normal = nodeNormals[i]
+      snakeContactFallbackTemp.set(0, 0, 0)
+      if (i + 1 < nodeNormals.length) {
+        snakeContactFallbackTemp.add(nodeNormals[i + 1]).addScaledVector(normal, -1)
+      }
+      if (i > 0) {
+        snakeContactFallbackTemp.add(normal).addScaledVector(nodeNormals[i - 1], -1)
+      }
+      snakeContactFallbackTemp.addScaledVector(normal, -snakeContactFallbackTemp.dot(normal))
+      if (snakeContactFallbackTemp.lengthSq() <= 1e-8) {
+        buildTangentBasis(normal, snakeContactFallbackTemp, snakeContactOffsetTemp)
+      } else {
+        snakeContactFallbackTemp.normalize()
+      }
+      nodeTangents[i] = snakeContactFallbackTemp.clone()
+    }
+
+    const nodeRadii = new Array<number>(nodes.length)
+    for (let i = 0; i < nodeNormals.length; i += 1) {
+      const normal = nodeNormals[i]
+      const tangent = nodeTangents[i]
+      let nodeRadius = getSnakeCenterlineRadius(normal, radiusOffset, snakeRadius)
+      nodeRadius += applySnakeContactLift(
+        normal,
+        tangent,
+        nodeRadius,
+        snakeRadius,
+        groundingInfo,
+      )
+      nodeRadii[i] = nodeRadius
+    }
+
+    let prevNormal: THREE.Vector3 | null = null
+    let prevTangent: THREE.Vector3 | null = null
+    let prevRadius = nodeRadii[0] ?? PLANET_RADIUS + radiusOffset
+
+    for (let i = 0; i < nodes.length; i += 1) {
+      const normal = nodeNormals[i]
+      const tangent = nodeTangents[i]
+      const nodeRadius = nodeRadii[i]
       if (
         prevNormal &&
+        prevTangent &&
         i > 1 &&
         i < nodes.length - 1 &&
         Math.abs(nodeRadius - prevRadius) >= SNAKE_SLOPE_INSERT_RADIUS_DELTA
@@ -3422,16 +3816,34 @@ const createScene = async (
         } else {
           midpointNormal.copy(normal)
         }
-        const midpointRadius = getSnakeCenterlineRadius(
+        snakeContactFallbackTemp.copy(prevTangent).add(tangent)
+        snakeContactFallbackTemp.addScaledVector(
+          midpointNormal,
+          -snakeContactFallbackTemp.dot(midpointNormal),
+        )
+        if (snakeContactFallbackTemp.lengthSq() <= 1e-8) {
+          buildTangentBasis(midpointNormal, snakeContactFallbackTemp, snakeContactOffsetTemp)
+        } else {
+          snakeContactFallbackTemp.normalize()
+        }
+        let midpointRadius = getSnakeCenterlineRadius(
           midpointNormal,
           radiusOffset,
           snakeRadius,
+        )
+        midpointRadius += applySnakeContactLift(
+          midpointNormal,
+          snakeContactFallbackTemp,
+          midpointRadius,
+          snakeRadius,
+          groundingInfo,
         )
         curvePoints.push(midpointNormal.multiplyScalar(midpointRadius))
       }
 
       curvePoints.push(normal.clone().multiplyScalar(nodeRadius))
       prevNormal = normal
+      prevTangent = tangent
       prevRadius = nodeRadius
     }
 
@@ -4016,6 +4428,7 @@ const createScene = async (
     if (visual.color !== player.color) {
       visual.color = player.color
     }
+    const groundingInfo = isLocal ? createGroundingInfo() : null
 
     const wasAlive = lastAliveStates.get(player.id)
     if (wasAlive === undefined || wasAlive !== player.alive) {
@@ -4057,6 +4470,9 @@ const createScene = async (
     lastSnakeStarts.set(player.id, player.snakeStart)
 
     if (player.snakeDetail === 'stub') {
+      if (isLocal) {
+        localGroundingInfo = null
+      }
       resetSnakeTransientState(player.id)
       visual.tube.visible = false
       visual.tail.visible = false
@@ -4149,7 +4565,12 @@ const createScene = async (
     } else {
       visual.tube.visible = true
       visual.tail.visible = true
-      const curvePoints = buildSnakeCurvePoints(nodes, radiusOffset, radius)
+      const curvePoints = buildSnakeCurvePoints(
+        nodes,
+        radiusOffset,
+        radius,
+        groundingInfo,
+      )
       headCurvePoint = curvePoints[0]?.clone() ?? null
       secondCurvePoint = curvePoints[1]?.clone() ?? null
       const tailAddState = tailAddStates.get(player.id)
@@ -4360,6 +4781,37 @@ const createScene = async (
         }
       }
       if (curvePoints.length >= 2) {
+        const tailPos = curvePoints[curvePoints.length - 1]
+        const prevPos = curvePoints[curvePoints.length - 2]
+        snakeContactNormalTemp.copy(tailPos).normalize()
+        snakeContactTangentTemp.copy(tailPos).sub(prevPos)
+        snakeContactTangentTemp.addScaledVector(
+          snakeContactNormalTemp,
+          -snakeContactTangentTemp.dot(snakeContactNormalTemp),
+        )
+        if (snakeContactTangentTemp.lengthSq() <= 1e-8) {
+          buildTangentBasis(
+            snakeContactNormalTemp,
+            snakeContactTangentTemp,
+            snakeContactBitangentTemp,
+          )
+        } else {
+          snakeContactTangentTemp.normalize()
+        }
+        const tailRadius = tailPos.length()
+        const tailLift = applySnakeContactLift(
+          snakeContactNormalTemp,
+          snakeContactTangentTemp,
+          tailRadius,
+          radius,
+          groundingInfo,
+        )
+        if (tailLift > 0) {
+          tailPos.addScaledVector(snakeContactNormalTemp, tailLift)
+          tailSegmentLength = tailPos.distanceTo(prevPos)
+        }
+      }
+      if (curvePoints.length >= 2) {
         tailCurvePrev = curvePoints[curvePoints.length - 2]
         tailCurveTail = curvePoints[curvePoints.length - 1]
         tailExtendDistance = tailCurveTail.distanceTo(tailCurvePrev)
@@ -4397,6 +4849,9 @@ const createScene = async (
       tailDebugStates.delete(player.id)
       tongueStates.delete(player.id)
       lastSnakeStarts.delete(player.id)
+      if (isLocal) {
+        localGroundingInfo = finalizeGroundingInfo(groundingInfo)
+      }
       return null
     }
 
@@ -4466,11 +4921,38 @@ const createScene = async (
 
     const headPoint = nodes[0]
     const headNormal = tempVector.set(headPoint.x, headPoint.y, headPoint.z).normalize()
-    const headPosition =
-      headCurvePoint ??
-      headNormal
-        .clone()
-        .multiplyScalar(getSnakeCenterlineRadius(headNormal, radiusOffset, radius))
+    snakeContactTangentTemp.set(0, 0, 0)
+    if (headCurvePoint && secondCurvePoint) {
+      snakeContactTangentTemp.copy(headCurvePoint).sub(secondCurvePoint)
+    } else if (nodes.length > 1) {
+      const nextPoint = nodes[1]
+      snakeContactFallbackTemp.set(nextPoint.x, nextPoint.y, nextPoint.z).normalize()
+      snakeContactTangentTemp.copy(headNormal).sub(snakeContactFallbackTemp)
+    }
+    snakeContactTangentTemp.addScaledVector(
+      headNormal,
+      -snakeContactTangentTemp.dot(headNormal),
+    )
+    if (snakeContactTangentTemp.lengthSq() <= 1e-8) {
+      buildTangentBasis(headNormal, snakeContactTangentTemp, snakeContactBitangentTemp)
+    } else {
+      snakeContactTangentTemp.normalize()
+    }
+    const headCenterlineRadius = getSnakeCenterlineRadius(
+      headNormal,
+      radiusOffset,
+      radius,
+    )
+    const headLift = applySnakeContactLift(
+      headNormal,
+      snakeContactTangentTemp,
+      headCenterlineRadius,
+      HEAD_RADIUS,
+      groundingInfo,
+    )
+    const headPosition = headNormal
+      .clone()
+      .multiplyScalar(headCenterlineRadius + headLift)
     visual.head.position.copy(headPosition)
     visual.bowl.position.copy(headPosition)
 
@@ -4673,6 +5155,10 @@ const createScene = async (
       visual.tail.scale.setScalar(1)
     }
 
+    if (isLocal) {
+      localGroundingInfo = finalizeGroundingInfo(groundingInfo)
+    }
+
     return tongueOverride
   }
 
@@ -4705,6 +5191,7 @@ const createScene = async (
     pellets: Point[] | null,
   ): PelletOverride | null => {
     const activeIds = new Set<string>()
+    localGroundingInfo = null
     let pelletOverride: PelletOverride | null = null
     for (const player of players) {
       activeIds.add(player.id)
@@ -4791,9 +5278,38 @@ const createScene = async (
         const radius = SNAKE_RADIUS * 1.1
         const radiusOffset = radius * SNAKE_LIFT_FACTOR
         const headNormal = tempVectorC.set(head.x, head.y, head.z).normalize()
+        snakeContactTangentTemp.set(0, 0, 0)
+        if (localPlayer && localPlayer.snake.length > 1) {
+          const next = localPlayer.snake[1]
+          snakeContactFallbackTemp.set(next.x, next.y, next.z).normalize()
+          snakeContactTangentTemp.copy(headNormal).sub(snakeContactFallbackTemp)
+          snakeContactTangentTemp.addScaledVector(
+            headNormal,
+            -snakeContactTangentTemp.dot(headNormal),
+          )
+          if (snakeContactTangentTemp.lengthSq() <= 1e-8) {
+            buildTangentBasis(headNormal, snakeContactTangentTemp, snakeContactBitangentTemp)
+          } else {
+            snakeContactTangentTemp.normalize()
+          }
+        } else {
+          buildTangentBasis(headNormal, snakeContactTangentTemp, snakeContactBitangentTemp)
+        }
+        const headCenterlineRadius = getSnakeCenterlineRadius(
+          headNormal,
+          radiusOffset,
+          radius,
+        )
+        const headLift = applySnakeContactLift(
+          headNormal,
+          snakeContactTangentTemp,
+          headCenterlineRadius,
+          HEAD_RADIUS,
+          null,
+        )
         const headPosition = headNormal
           .clone()
-          .multiplyScalar(getSnakeCenterlineRadius(headNormal, radiusOffset, radius))
+          .multiplyScalar(headCenterlineRadius + headLift)
         headPosition.applyQuaternion(world.quaternion)
         headPosition.project(camera)
 
