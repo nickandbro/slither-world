@@ -3,8 +3,9 @@ use super::constants::{
     BOT_MIN_STAMINA_TO_BOOST, COLOR_POOL, MAX_PELLETS, MAX_SPAWN_ATTEMPTS, MIN_SURVIVAL_LENGTH,
     OXYGEN_DRAIN_PER_SEC, OXYGEN_MAX, PLAYER_TIMEOUT_MS, RESPAWN_COOLDOWN_MS, RESPAWN_RETRY_MS,
     SMALL_PELLET_ATTRACT_RADIUS, SMALL_PELLET_ATTRACT_SPEED, SMALL_PELLET_CONSUME_ANGLE,
-    SMALL_PELLET_DIGESTION_STRENGTH, SMALL_PELLET_GROWTH_FRACTION, SMALL_PELLET_LOCK_CONE_ANGLE,
-    SMALL_PELLET_MOUTH_FORWARD, SMALL_PELLET_SHRINK_MIN_RATIO, SMALL_PELLET_SIZE_MAX,
+    SMALL_PELLET_DIGESTION_STRENGTH, SMALL_PELLET_DIGESTION_STRENGTH_MAX,
+    SMALL_PELLET_GROWTH_FRACTION, SMALL_PELLET_LOCK_CONE_ANGLE, SMALL_PELLET_MOUTH_FORWARD,
+    SMALL_PELLET_RING_BATCH_SIZE_CAP, SMALL_PELLET_SHRINK_MIN_RATIO, SMALL_PELLET_SIZE_MAX,
     SMALL_PELLET_SIZE_MIN, SMALL_PELLET_SPAWN_HEAD_EXCLUSION_ANGLE, SMALL_PELLET_VIEW_MARGIN_MAX,
     SMALL_PELLET_VIEW_MARGIN_MIN, SMALL_PELLET_VISIBLE_MAX, SMALL_PELLET_VISIBLE_MIN,
     SMALL_PELLET_ZOOM_MAX_CAMERA_DISTANCE, SMALL_PELLET_ZOOM_MIN_CAMERA_DISTANCE, SPAWN_CONE_ANGLE,
@@ -1089,11 +1090,15 @@ impl RoomState {
             if !player.alive || count == 0 {
                 continue;
             }
+            let visual_units = count.min(SMALL_PELLET_RING_BATCH_SIZE_CAP);
+            for _ in 0..visual_units {
+                add_digestion_with_strength(player, SMALL_PELLET_DIGESTION_STRENGTH, false);
+            }
             player.pellet_growth_fraction += count as f64 * SMALL_PELLET_GROWTH_FRACTION;
             while player.pellet_growth_fraction >= 1.0 {
                 player.pellet_growth_fraction -= 1.0;
                 player.score += 1;
-                add_digestion_with_strength(player, SMALL_PELLET_DIGESTION_STRENGTH);
+                add_digestion_with_strength(player, SMALL_PELLET_DIGESTION_STRENGTH_MAX, true);
             }
         }
     }
@@ -1968,6 +1973,7 @@ mod tests {
             total: 4,
             growth_steps: 1,
             strength: 0.35,
+            grows: true,
         });
 
         let mut encoder = protocol::Encoder::with_capacity(256);
@@ -2081,7 +2087,14 @@ mod tests {
         state.update_small_pellets(TICK_MS as f64 / 1000.0);
         let player_after_partial = state.players.get(&player_id).expect("player");
         assert_eq!(player_after_partial.score, 0);
-        assert_eq!(player_after_partial.digestions.len(), 0);
+        assert_eq!(
+            player_after_partial.digestions.len(),
+            SMALL_PELLET_RING_BATCH_SIZE_CAP
+        );
+        assert!(player_after_partial
+            .digestions
+            .iter()
+            .all(|digestion| !digestion.grows));
         assert!(player_after_partial.pellet_growth_fraction > 0.8);
         assert!(player_after_partial.pellet_growth_fraction < 0.9);
 
@@ -2089,9 +2102,19 @@ mod tests {
         state.update_small_pellets(TICK_MS as f64 / 1000.0);
         let player_after_full = state.players.get(&player_id).expect("player");
         assert_eq!(player_after_full.score, 1);
-        assert_eq!(player_after_full.digestions.len(), 1);
+        assert_eq!(
+            player_after_full.digestions.len(),
+            SMALL_PELLET_RING_BATCH_SIZE_CAP + 2
+        );
         assert!(player_after_full.pellet_growth_fraction < 0.01);
-        assert!(player_after_full.digestions[0].strength <= 1.0);
+        assert!(player_after_full
+            .digestions
+            .iter()
+            .any(|digestion| digestion.grows));
+        assert!(player_after_full
+            .digestions
+            .iter()
+            .all(|digestion| digestion.strength <= 1.0));
     }
 
     #[test]

@@ -23,6 +23,7 @@ pub struct Digestion {
     pub total: i64,
     pub growth_steps: i64,
     pub strength: f32,
+    pub grows: bool,
 }
 
 #[derive(Debug, Clone)]

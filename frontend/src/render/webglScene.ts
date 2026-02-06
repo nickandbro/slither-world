@@ -47,6 +47,34 @@ type DigestionVisual = {
   strength: number
 }
 
+type PelletSpriteBucket = {
+  points: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>
+  positionAttribute: THREE.BufferAttribute
+  capacity: number
+}
+
+const createPelletSpriteTexture = () => {
+  const size = 64
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+  const center = size * 0.5
+  const gradient = ctx.createRadialGradient(center, center, 0, center, center, center)
+  gradient.addColorStop(0, 'rgba(255,255,255,0.96)')
+  gradient.addColorStop(0.2, 'rgba(255,255,255,0.82)')
+  gradient.addColorStop(0.54, 'rgba(255,255,255,0.3)')
+  gradient.addColorStop(1, 'rgba(255,255,255,0)')
+  ctx.clearRect(0, 0, size, size)
+  ctx.fillStyle = gradient
+  ctx.fillRect(0, 0, size, size)
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.colorSpace = THREE.SRGBColorSpace
+  texture.needsUpdate = true
+  return texture
+}
+
 type TailAddState = {
   progress: number
   duration: number
@@ -340,11 +368,14 @@ const TONGUE_GRAB_EPS = HEAD_RADIUS * 0.12
 const TONGUE_PELLET_MATCH = HEAD_RADIUS * 1.6
 const TAIL_CAP_SEGMENTS = 5
 const TAIL_DIR_MIN_RATIO = 0.35
-const DIGESTION_BULGE = 0.14
-const DIGESTION_WIDTH = 1.2
-const DIGESTION_MAX_BULGE = 0.22
-const DIGESTION_START_RINGS = 1
-const DIGESTION_START_MAX = 0.06
+const DIGESTION_BULGE_MIN = 0.14
+const DIGESTION_BULGE_MAX = 0.55
+const DIGESTION_WIDTH_MIN = 1.5
+const DIGESTION_WIDTH_MAX = 3.2
+const DIGESTION_MAX_BULGE_MIN = 0.8
+const DIGESTION_MAX_BULGE_MAX = 0.85
+const DIGESTION_START_RINGS = 0
+const DIGESTION_START_MAX = 0
 const DIGESTION_TRAVEL_EASE = 1
 const TAIL_ADD_SMOOTH_MS = 180
 const TAIL_EXTEND_RATE_UP = 0.14
@@ -1555,14 +1586,9 @@ const createScene = async (
     emissiveIntensity: 0.3,
   })
 
-  const pelletGeometry = new THREE.SphereGeometry(PELLET_RADIUS, 8, 8)
-  const pelletMaterial = new THREE.MeshStandardMaterial({
-    color: '#ffffff',
-    emissive: '#2d2d2d',
-    emissiveIntensity: 0.35,
-    roughness: 0.22,
-    metalness: 0.02,
-  })
+  const PELLET_BUCKET_COUNT = PELLET_COLORS.length
+  const PELLET_POINT_SIZE = PELLET_RADIUS * 7.1
+  const pelletSpriteTexture = createPelletSpriteTexture()
   let treeTierGeometries: THREE.BufferGeometry[] = []
   let treeTierMeshes: THREE.InstancedMesh[] = []
   let treeTrunkGeometry: THREE.BufferGeometry | null = null
@@ -1606,8 +1632,9 @@ const createScene = async (
   let visibleLakeCount = 0
   let terrainContactSampler: TerrainContactSampler | null = null
   let localGroundingInfo: SnakeGroundingInfo | null = null
-  let pelletMesh: THREE.InstancedMesh | null = null
-  let pelletCapacity = 0
+  const pelletBuckets: Array<PelletSpriteBucket | null> = new Array(PELLET_BUCKET_COUNT).fill(null)
+  const pelletBucketCounts = new Array<number>(PELLET_BUCKET_COUNT).fill(0)
+  const pelletBucketOffsets = new Array<number>(PELLET_BUCKET_COUNT).fill(0)
   const pelletGroundCache = new Map<number, { x: number; y: number; z: number; radius: number }>()
   const pelletIdsSeen = new Set<number>()
   let viewportWidth = 1
@@ -1630,7 +1657,6 @@ const createScene = async (
   const tailGrowthStates = new Map<string, number>()
   const tailDebugStates = new Map<string, TailDebugState>()
   const tongueStates = new Map<string, TongueState>()
-  const tempMatrix = new THREE.Matrix4()
   const tempVector = new THREE.Vector3()
   const tempVectorB = new THREE.Vector3()
   const tempVectorC = new THREE.Vector3()
@@ -1639,9 +1665,6 @@ const createScene = async (
   const tempVectorF = new THREE.Vector3()
   const tempVectorG = new THREE.Vector3()
   const tempVectorH = new THREE.Vector3()
-  const pelletScaleTemp = new THREE.Vector3(1, 1, 1)
-  const pelletColorTemp = new THREE.Color()
-  const identityQuat = new THREE.Quaternion()
   const patchCenterQuat = new THREE.Quaternion()
   const lakeSampleTemp = new THREE.Vector3()
   const tempQuat = new THREE.Quaternion()
@@ -3994,31 +4017,52 @@ const createScene = async (
     const positions = tubeGeometry.attributes.position
     if (!positions) return
 
-    const bulgeByRing = new Array(ringCount).fill(0)
+    const bulgeByRing = new Array<number>(ringCount).fill(0)
     const startOffset = Math.min(
       DIGESTION_START_MAX,
       DIGESTION_START_RINGS / Math.max(1, ringCount - 1),
     )
-    const influenceRadius = DIGESTION_WIDTH
+    const endOffset = startOffset
     for (const digestion of digestions) {
       const strength = clamp(digestion.strength, 0, 1)
       if (strength <= 0) continue
+      const influenceRadius = THREE.MathUtils.lerp(DIGESTION_WIDTH_MIN, DIGESTION_WIDTH_MAX, strength)
+      const bulgeStrength = THREE.MathUtils.lerp(DIGESTION_BULGE_MIN, DIGESTION_BULGE_MAX, strength)
       const t = clamp(digestion.t, 0, 1)
-      const mapped = startOffset + t * (1 - startOffset)
+      const mapped = startOffset + t * Math.max(0, 1 - startOffset - endOffset)
       const center = mapped * (ringCount - 1)
       const start = Math.max(0, Math.floor(center - influenceRadius))
       const end = Math.min(ringCount - 1, Math.ceil(center + influenceRadius))
+      const sigma = Math.max(0.5, influenceRadius * 0.7)
+      const tailFade = smoothstep(0, 0.016, 1 - mapped)
+      const headFade = smoothstep(0, 0.012, mapped)
+      const travelFade = Math.min(headFade, tailFade)
+      if (travelFade <= 0) continue
       for (let ring = start; ring <= end; ring += 1) {
         const dist = ring - center
-        const normalized = dist / influenceRadius
-        const cap = 1 - normalized * normalized
-        if (cap <= 0) continue
-        const weight = Math.sqrt(cap)
-        bulgeByRing[ring] = Math.min(
-          DIGESTION_MAX_BULGE,
-          bulgeByRing[ring] + weight * DIGESTION_BULGE * strength,
-        )
+        const normalized = dist / sigma
+        const weight = Math.exp(-0.5 * normalized * normalized)
+        bulgeByRing[ring] += weight * bulgeStrength * travelFade
       }
+    }
+    for (let pass = 0; pass < 2; pass += 1) {
+      const source = bulgeByRing.slice()
+      for (let ring = 0; ring < ringCount; ring += 1) {
+        const prev = source[Math.max(0, ring - 1)]
+        const current = source[ring]
+        const next = source[Math.min(ringCount - 1, ring + 1)]
+        bulgeByRing[ring] = prev * 0.22 + current * 0.56 + next * 0.22
+      }
+    }
+    for (let ring = 0; ring < ringCount; ring += 1) {
+      const distanceToEdge = Math.min(ring, ringCount - 1 - ring)
+      const edgeClamp = smoothstep(0, 1.35, distanceToEdge)
+      const maxRingBulge = THREE.MathUtils.lerp(
+        DIGESTION_MAX_BULGE_MIN,
+        DIGESTION_MAX_BULGE_MAX,
+        edgeClamp,
+      )
+      bulgeByRing[ring] = Math.min(maxRingBulge, bulgeByRing[ring])
     }
 
     const center = new THREE.Vector3()
@@ -5277,44 +5321,130 @@ const createScene = async (
     return pelletOverride
   }
 
-  const updatePellets = (pellets: PelletSnapshot[], override: PelletOverride | null) => {
-    const count = pellets.length
-    if (!pelletMesh || pelletCapacity < Math.max(count, 1)) {
-      if (pelletMesh) {
-        pelletsGroup.remove(pelletMesh)
+  const normalizePelletColorIndex = (colorIndex: number) => {
+    if (PELLET_BUCKET_COUNT <= 0) return 0
+    const mod = colorIndex % PELLET_BUCKET_COUNT
+    return mod >= 0 ? mod : mod + PELLET_BUCKET_COUNT
+  }
+
+  const createPelletBucket = (bucketIndex: number, capacity: number): PelletSpriteBucket => {
+    const geometry = new THREE.BufferGeometry()
+    const positionArray = new Float32Array(capacity * 3)
+    const positionAttribute = new THREE.BufferAttribute(positionArray, 3)
+    positionAttribute.setUsage(THREE.DynamicDrawUsage)
+    geometry.setAttribute('position', positionAttribute)
+    geometry.setDrawRange(0, 0)
+
+    const material = new THREE.PointsMaterial({
+      size: PELLET_POINT_SIZE,
+      map: pelletSpriteTexture ?? undefined,
+      alphaMap: pelletSpriteTexture ?? undefined,
+      color: PELLET_COLORS[bucketIndex] ?? '#ffd166',
+      transparent: true,
+      opacity: 0.84,
+      depthWrite: false,
+      depthTest: true,
+      blending: THREE.AdditiveBlending,
+      sizeAttenuation: true,
+      toneMapped: false,
+    })
+    const points = new THREE.Points(geometry, material)
+    points.visible = false
+    points.frustumCulled = false
+    pelletsGroup.add(points)
+    return { points, positionAttribute, capacity }
+  }
+
+  const ensurePelletBucketCapacity = (bucketIndex: number, required: number): PelletSpriteBucket => {
+    const targetCapacity = Math.max(1, required)
+    let bucket = pelletBuckets[bucketIndex]
+    if (!bucket) {
+      let capacity = 1
+      while (capacity < targetCapacity) {
+        capacity *= 2
       }
-      let nextCapacity = Math.max(1, pelletCapacity)
-      while (nextCapacity < count) {
-        nextCapacity *= 2
-      }
-      pelletCapacity = Math.max(nextCapacity, 1)
-      pelletMesh = new THREE.InstancedMesh(pelletGeometry, pelletMaterial, pelletCapacity)
-      pelletMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
-      pelletsGroup.add(pelletMesh)
+      bucket = createPelletBucket(bucketIndex, capacity)
+      pelletBuckets[bucketIndex] = bucket
+      return bucket
+    }
+    if (bucket.capacity >= targetCapacity) {
+      return bucket
     }
 
-    if (!pelletMesh) return
-    pelletMesh.count = count
-    pelletMesh.visible = count > 0
-    pelletIdsSeen.clear()
+    let nextCapacity = Math.max(1, bucket.capacity)
+    while (nextCapacity < targetCapacity) {
+      nextCapacity *= 2
+    }
+    const geometry = new THREE.BufferGeometry()
+    const positionArray = new Float32Array(nextCapacity * 3)
+    const positionAttribute = new THREE.BufferAttribute(positionArray, 3)
+    positionAttribute.setUsage(THREE.DynamicDrawUsage)
+    geometry.setAttribute('position', positionAttribute)
+    geometry.setDrawRange(0, 0)
 
-    for (let i = 0; i < count; i += 1) {
+    bucket.points.geometry.dispose()
+    bucket.points.geometry = geometry
+    bucket.positionAttribute = positionAttribute
+    bucket.capacity = nextCapacity
+    return bucket
+  }
+
+  const updatePellets = (pellets: PelletSnapshot[], override: PelletOverride | null) => {
+    pelletIdsSeen.clear()
+    for (let i = 0; i < PELLET_BUCKET_COUNT; i += 1) {
+      pelletBucketCounts[i] = 0
+      pelletBucketOffsets[i] = 0
+    }
+
+    for (let i = 0; i < pellets.length; i += 1) {
       const pellet = pellets[i]
+      const bucketIndex = normalizePelletColorIndex(pellet.colorIndex)
+      pelletBucketCounts[bucketIndex] += 1
       pelletIdsSeen.add(pellet.id)
+    }
+
+    const bucketPositions: Array<Float32Array | null> = new Array(PELLET_BUCKET_COUNT).fill(null)
+    for (let bucketIndex = 0; bucketIndex < PELLET_BUCKET_COUNT; bucketIndex += 1) {
+      const required = pelletBucketCounts[bucketIndex]
+      const bucket = pelletBuckets[bucketIndex]
+      if (required <= 0) {
+        if (bucket) {
+          bucket.points.visible = false
+          bucket.points.geometry.setDrawRange(0, 0)
+        }
+        continue
+      }
+      const nextBucket = ensurePelletBucketCapacity(bucketIndex, required)
+      nextBucket.points.visible = true
+      nextBucket.points.geometry.setDrawRange(0, required)
+      bucketPositions[bucketIndex] = nextBucket.positionAttribute.array as Float32Array
+    }
+
+    for (let i = 0; i < pellets.length; i += 1) {
+      const pellet = pellets[i]
+      const bucketIndex = normalizePelletColorIndex(pellet.colorIndex)
+      const positions = bucketPositions[bucketIndex]
+      if (!positions) continue
+
       if (override && override.id === pellet.id) {
         tempVector.copy(override.position)
       } else {
         getPelletSurfacePosition(pellet, tempVector)
       }
-      pelletScaleTemp.setScalar(Math.max(0.12, pellet.size))
-      tempMatrix.compose(tempVector, identityQuat, pelletScaleTemp)
-      pelletMesh.setMatrixAt(i, tempMatrix)
-      pelletColorTemp.set(PELLET_COLORS[pellet.colorIndex % PELLET_COLORS.length] ?? '#ffd166')
-      pelletMesh.setColorAt(i, pelletColorTemp)
+
+      const itemIndex = pelletBucketOffsets[bucketIndex]
+      pelletBucketOffsets[bucketIndex] += 1
+      const pOffset = itemIndex * 3
+      positions[pOffset] = tempVector.x
+      positions[pOffset + 1] = tempVector.y
+      positions[pOffset + 2] = tempVector.z
     }
-    pelletMesh.instanceMatrix.needsUpdate = true
-    if (pelletMesh.instanceColor) {
-      pelletMesh.instanceColor.needsUpdate = true
+
+    for (let bucketIndex = 0; bucketIndex < PELLET_BUCKET_COUNT; bucketIndex += 1) {
+      if (pelletBucketCounts[bucketIndex] <= 0) continue
+      const bucket = pelletBuckets[bucketIndex]
+      if (!bucket) continue
+      bucket.positionAttribute.needsUpdate = true
     }
 
     for (const id of pelletGroundCache.keys()) {
@@ -5500,11 +5630,15 @@ const createScene = async (
     tongueBaseGeometry.dispose()
     tongueForkGeometry.dispose()
     tongueMaterial.dispose()
-    pelletGeometry.dispose()
-    pelletMaterial.dispose()
-    if (pelletMesh) {
-      pelletsGroup.remove(pelletMesh)
+    for (let i = 0; i < pelletBuckets.length; i += 1) {
+      const bucket = pelletBuckets[i]
+      if (!bucket) continue
+      pelletsGroup.remove(bucket.points)
+      bucket.points.geometry.dispose()
+      bucket.points.material.dispose()
+      pelletBuckets[i] = null
     }
+    pelletSpriteTexture?.dispose()
     pelletGroundCache.clear()
     pelletIdsSeen.clear()
     for (const [id, visual] of snakes) {
