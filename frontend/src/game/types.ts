@@ -67,6 +67,7 @@ export type GameStateSnapshot = {
   now: number
   pellets: Point[]
   players: PlayerSnapshot[]
+  totalPlayers: number
 }
 
 export type Quaternion = {

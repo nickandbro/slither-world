@@ -11,7 +11,7 @@ export type PlayerMeta = {
   color: string
 }
 
-const VERSION = 4
+const VERSION = 5
 
 const TYPE_JOIN = 0x01
 const TYPE_INPUT = 0x02
@@ -161,8 +161,9 @@ function decodeInit(reader: Reader, meta: Map<string, PlayerMeta>): DecodedMessa
   const pellets = readPoints(reader, pelletsCount)
   if (!pellets) return null
 
+  const totalPlayers = reader.readU16()
   const metaCount = reader.readU16()
-  if (metaCount === null) return null
+  if (totalPlayers === null || metaCount === null) return null
   for (let i = 0; i < metaCount; i += 1) {
     const id = reader.readUuid()
     const name = reader.readString()
@@ -179,7 +180,7 @@ function decodeInit(reader: Reader, meta: Map<string, PlayerMeta>): DecodedMessa
   return {
     type: 'init',
     playerId,
-    state: { now, pellets, players },
+    state: { now, pellets, players, totalPlayers },
     environment,
   }
 }
@@ -192,12 +193,14 @@ function decodeState(reader: Reader, meta: Map<string, PlayerMeta>): DecodedMess
   const pellets = readPoints(reader, pelletsCount)
   if (!pellets) return null
 
+  const totalPlayers = reader.readU16()
+  if (totalPlayers === null) return null
   const players = readPlayerStates(reader, meta)
   if (!players) return null
 
   return {
     type: 'state',
-    state: { now, pellets, players },
+    state: { now, pellets, players, totalPlayers },
   }
 }
 

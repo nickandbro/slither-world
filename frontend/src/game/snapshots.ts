@@ -130,6 +130,7 @@ function blendSnapshots(a: GameStateSnapshot, b: GameStateSnapshot, t: number): 
     now: lerp(a.now, b.now, t),
     pellets: t < 0.5 ? a.pellets : b.pellets,
     players,
+    totalPlayers: t < 0.5 ? a.totalPlayers : b.totalPlayers,
   }
 }
 

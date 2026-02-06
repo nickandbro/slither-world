@@ -161,7 +161,7 @@ export default function App() {
   const score = localPlayer?.score ?? 0
   const oxygenPct = localPlayer ? Math.round(clamp(localPlayer.oxygen, 0, 1) * 100) : 0
   const oxygenLow = oxygenPct <= 35
-  const playersOnline = gameState?.players.length ?? 0
+  const playersOnline = gameState?.totalPlayers ?? 0
   const staminaPlayers = useMemo(() => {
     if (!gameState) return []
     const localId = playerId
