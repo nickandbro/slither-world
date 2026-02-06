@@ -59,7 +59,7 @@ type TrailSample = {
 }
 
 type BoostTrailState = {
-  mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
+  mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>
   samples: TrailSample[]
   boosting: boolean
   retiring: boolean
@@ -387,16 +387,17 @@ const TONGUE_ENABLED = false
 const TAIL_CAP_SEGMENTS = 5
 const TAIL_DIR_MIN_RATIO = 0.35
 const BOOST_TRAIL_FADE_SECONDS = 4.5
-const BOOST_TRAIL_SURFACE_OFFSET = 0.0008
-const BOOST_TRAIL_RADIUS = SNAKE_RADIUS * 0.16
+const BOOST_TRAIL_SURFACE_OFFSET = 0.00006
 const BOOST_TRAIL_MIN_SAMPLE_DISTANCE = SNAKE_RADIUS * 0.38
 const BOOST_TRAIL_MAX_SAMPLES = 280
 const BOOST_TRAIL_MAX_ARC_ANGLE = 0.055
-const BOOST_TRAIL_TUBE_SEGMENTS_PER_POINT = 4
-const BOOST_TRAIL_EDGE_FADE_CAP = 0.12
+const BOOST_TRAIL_CURVE_SEGMENTS_PER_POINT = 10
+const BOOST_TRAIL_WIDTH = SNAKE_RADIUS * 0.42
+const BOOST_TRAIL_EDGE_FADE_CAP = 0.22
+const BOOST_TRAIL_SIDE_FADE_CAP = 0.28
 const BOOST_TRAIL_OPACITY = 0.8
 const BOOST_TRAIL_ALPHA_TEXTURE_WIDTH = 256
-const BOOST_TRAIL_ALPHA_TEXTURE_HEIGHT = 4
+const BOOST_TRAIL_ALPHA_TEXTURE_HEIGHT = 64
 const BOOST_TRAIL_COLOR = '#3a3129'
 const DIGESTION_BULGE_MIN = 0.22
 const DIGESTION_BULGE_MAX = 0.54
@@ -1644,6 +1645,11 @@ const createScene = async (
   const snakeContactFallbackTemp = new THREE.Vector3()
   const trailSamplePointTemp = new THREE.Vector3()
   const trailSlerpNormalTemp = new THREE.Vector3()
+  const trailReprojectNormalTemp = new THREE.Vector3()
+  const trailReprojectPointTemp = new THREE.Vector3()
+  const trailTangentTemp = new THREE.Vector3()
+  const trailSideTemp = new THREE.Vector3()
+  const trailOffsetTemp = new THREE.Vector3()
   const tongueUp = new THREE.Vector3(0, 1, 0)
   const debugEnabled = import.meta.env.DEV || import.meta.env.VITE_E2E_DEBUG === '1'
   let debugApi:
@@ -3671,17 +3677,22 @@ const createScene = async (
     const width = canvas.width
     const height = canvas.height
     const imageData = ctx.createImageData(width, height)
-    const cap = clamp(BOOST_TRAIL_EDGE_FADE_CAP, 0, 0.5)
-    for (let x = 0; x < width; x += 1) {
-      const u = width > 1 ? x / (width - 1) : 0
-      let alpha = 1
-      if (cap > 1e-4) {
-        const headFade = smoothstep(0, cap, u)
-        const tailFade = smoothstep(0, cap, 1 - u)
-        alpha = clamp(headFade * tailFade, 0, 1)
-      }
-      const alphaByte = Math.round(alpha * 255)
-      for (let y = 0; y < height; y += 1) {
+    const edgeCap = clamp(BOOST_TRAIL_EDGE_FADE_CAP, 0, 0.5)
+    const sideCap = clamp(BOOST_TRAIL_SIDE_FADE_CAP, 0, 0.5)
+
+    for (let y = 0; y < height; y += 1) {
+      const v = height > 1 ? y / (height - 1) : 0
+      const distanceToSide = Math.min(v, 1 - v)
+      const sideFade =
+        sideCap > 1e-4
+          ? smoothstep(0, sideCap, distanceToSide)
+          : 1
+      for (let x = 0; x < width; x += 1) {
+        const u = width > 1 ? x / (width - 1) : 0
+        const headFade = edgeCap > 1e-4 ? smoothstep(0, edgeCap, u) : 1
+        const tailFade = edgeCap > 1e-4 ? smoothstep(0, edgeCap, 1 - u) : 1
+        const alpha = clamp(headFade * tailFade * sideFade, 0, 1)
+        const alphaByte = Math.round(alpha * 255)
         const offset = (y * width + x) * 4
         imageData.data[offset] = 255
         imageData.data[offset + 1] = 255
@@ -3689,33 +3700,39 @@ const createScene = async (
         imageData.data[offset + 3] = alphaByte
       }
     }
+
     ctx.putImageData(imageData, 0, 0)
     const texture = new THREE.CanvasTexture(canvas)
     texture.wrapS = THREE.ClampToEdgeWrapping
     texture.wrapT = THREE.ClampToEdgeWrapping
     texture.magFilter = THREE.LinearFilter
     texture.minFilter = THREE.LinearFilter
+    texture.colorSpace = THREE.NoColorSpace
     texture.needsUpdate = true
     return texture
   }
 
   const boostTrailAlphaTexture = createBoostTrailAlphaTexture()
 
-  const createBoostTrail = (): BoostTrailState => {
-    const material = new THREE.MeshStandardMaterial({
+  const createBoostTrailMaterial = () => {
+    const material = new THREE.MeshBasicMaterial({
       color: BOOST_TRAIL_COLOR,
-      roughness: 0.96,
-      metalness: 0.0,
-      emissive: '#000000',
       transparent: true,
       opacity: BOOST_TRAIL_OPACITY,
-      alphaMap: boostTrailAlphaTexture,
+      alphaMap: boostTrailAlphaTexture ?? undefined,
+      side: THREE.DoubleSide,
     })
     material.depthWrite = false
+    material.depthTest = true
     material.alphaTest = 0.001
     material.polygonOffset = true
-    material.polygonOffsetFactor = -1
-    material.polygonOffsetUnits = -1
+    material.polygonOffsetFactor = -2
+    material.polygonOffsetUnits = -2
+    return material
+  }
+
+  const createBoostTrail = (): BoostTrailState => {
+    const material = createBoostTrailMaterial()
     const mesh = new THREE.Mesh(new THREE.BufferGeometry(), material)
     mesh.visible = false
     mesh.renderOrder = 1
@@ -3881,11 +3898,129 @@ const createScene = async (
 
     const curvePoints = points.map((sample) => sample.point.clone())
     const curve = new THREE.CatmullRomCurve3(curvePoints, false, 'centripetal', 0.25)
-    const tubularSegments = Math.max(
+    const curveSegments = Math.max(
       8,
-      Math.min(512, (curvePoints.length - 1) * BOOST_TRAIL_TUBE_SEGMENTS_PER_POINT),
+      Math.min(512, (curvePoints.length - 1) * BOOST_TRAIL_CURVE_SEGMENTS_PER_POINT),
     )
-    const geometry = new THREE.TubeGeometry(curve, tubularSegments, BOOST_TRAIL_RADIUS, 6, false)
+    const linePoints = curve.getPoints(curveSegments)
+    if (linePoints.length < 2) {
+      trail.mesh.visible = false
+      return
+    }
+    const projectedPoints = linePoints.map((point) => {
+      trailReprojectNormalTemp.copy(point)
+      if (trailReprojectNormalTemp.lengthSq() <= 1e-10) {
+        return point.clone()
+      }
+      trailReprojectNormalTemp.normalize()
+      getTrailSurfacePointFromNormal(trailReprojectNormalTemp, trailReprojectPointTemp)
+      return trailReprojectPointTemp.clone()
+    })
+    const centerCount = projectedPoints.length
+    const vertexCount = centerCount * 2
+    if (centerCount < 2) {
+      trail.mesh.visible = false
+      return
+    }
+
+    const positionArray = new Float32Array(vertexCount * 3)
+    const uvArray = new Float32Array(vertexCount * 2)
+    const segmentCount = centerCount - 1
+    const indexArray =
+      vertexCount > 65535
+        ? new Uint32Array(segmentCount * 6)
+        : new Uint16Array(segmentCount * 6)
+    const halfWidth = BOOST_TRAIL_WIDTH * 0.5
+
+    for (let i = 0; i < centerCount; i += 1) {
+      const center = projectedPoints[i]
+      const prev = i > 0 ? projectedPoints[i - 1] : null
+      const next = i < centerCount - 1 ? projectedPoints[i + 1] : null
+      trailReprojectNormalTemp.copy(center)
+      if (trailReprojectNormalTemp.lengthSq() <= 1e-10) {
+        trailReprojectNormalTemp.set(0, 1, 0)
+      } else {
+        trailReprojectNormalTemp.normalize()
+      }
+
+      if (prev && next) {
+        trailTangentTemp.copy(next).sub(prev)
+      } else if (next) {
+        trailTangentTemp.copy(next).sub(center)
+      } else if (prev) {
+        trailTangentTemp.copy(center).sub(prev)
+      } else {
+        trailTangentTemp.set(0, 0, 0)
+      }
+      trailTangentTemp.addScaledVector(
+        trailReprojectNormalTemp,
+        -trailTangentTemp.dot(trailReprojectNormalTemp),
+      )
+      if (trailTangentTemp.lengthSq() <= 1e-10) {
+        buildTangentBasis(trailReprojectNormalTemp, trailTangentTemp, trailSideTemp)
+      } else {
+        trailTangentTemp.normalize()
+        trailSideTemp.crossVectors(trailTangentTemp, trailReprojectNormalTemp)
+        if (trailSideTemp.lengthSq() <= 1e-10) {
+          buildTangentBasis(trailReprojectNormalTemp, trailTangentTemp, trailSideTemp)
+        } else {
+          trailSideTemp.normalize()
+        }
+      }
+
+      const leftVertexIndex = i * 2
+      const rightVertexIndex = leftVertexIndex + 1
+      const u = centerCount > 1 ? i / (centerCount - 1) : 0
+
+      trailOffsetTemp.copy(center).addScaledVector(trailSideTemp, halfWidth)
+      trailReprojectPointTemp.copy(trailOffsetTemp)
+      if (trailReprojectPointTemp.lengthSq() > 1e-10) {
+        trailReprojectPointTemp.normalize()
+      } else {
+        trailReprojectPointTemp.copy(trailReprojectNormalTemp)
+      }
+      getTrailSurfacePointFromNormal(trailReprojectPointTemp, trailOffsetTemp)
+      positionArray[leftVertexIndex * 3] = trailOffsetTemp.x
+      positionArray[leftVertexIndex * 3 + 1] = trailOffsetTemp.y
+      positionArray[leftVertexIndex * 3 + 2] = trailOffsetTemp.z
+      uvArray[leftVertexIndex * 2] = u
+      uvArray[leftVertexIndex * 2 + 1] = 0
+
+      trailOffsetTemp.copy(center).addScaledVector(trailSideTemp, -halfWidth)
+      trailReprojectPointTemp.copy(trailOffsetTemp)
+      if (trailReprojectPointTemp.lengthSq() > 1e-10) {
+        trailReprojectPointTemp.normalize()
+      } else {
+        trailReprojectPointTemp.copy(trailReprojectNormalTemp)
+      }
+      getTrailSurfacePointFromNormal(trailReprojectPointTemp, trailOffsetTemp)
+      positionArray[rightVertexIndex * 3] = trailOffsetTemp.x
+      positionArray[rightVertexIndex * 3 + 1] = trailOffsetTemp.y
+      positionArray[rightVertexIndex * 3 + 2] = trailOffsetTemp.z
+      uvArray[rightVertexIndex * 2] = u
+      uvArray[rightVertexIndex * 2 + 1] = 1
+    }
+
+    let indexOffset = 0
+    for (let i = 0; i < segmentCount; i += 1) {
+      const currentLeft = i * 2
+      const currentRight = currentLeft + 1
+      const nextLeft = currentLeft + 2
+      const nextRight = currentLeft + 3
+      indexArray[indexOffset] = currentLeft
+      indexArray[indexOffset + 1] = nextLeft
+      indexArray[indexOffset + 2] = currentRight
+      indexArray[indexOffset + 3] = currentRight
+      indexArray[indexOffset + 4] = nextLeft
+      indexArray[indexOffset + 5] = nextRight
+      indexOffset += 6
+    }
+
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.BufferAttribute(positionArray, 3))
+    geometry.setAttribute('uv', new THREE.BufferAttribute(uvArray, 2))
+    geometry.setIndex(new THREE.BufferAttribute(indexArray, 1))
+    geometry.computeBoundingSphere()
     trail.mesh.geometry.dispose()
     trail.mesh.geometry = geometry
     trail.mesh.visible = true
