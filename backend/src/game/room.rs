@@ -1,12 +1,14 @@
 use super::constants::{
     BASE_PELLET_COUNT, BASE_SPEED, BOOST_MULTIPLIER, BOT_BOOST_DISTANCE, BOT_COUNT,
-    BOT_MIN_STAMINA_TO_BOOST, COLOR_POOL, MAX_PELLETS, MAX_SPAWN_ATTEMPTS, MIN_SURVIVAL_LENGTH,
-    OXYGEN_DRAIN_PER_SEC, OXYGEN_MAX, PLAYER_TIMEOUT_MS, RESPAWN_COOLDOWN_MS, RESPAWN_RETRY_MS,
-    SMALL_PELLET_ATTRACT_RADIUS, SMALL_PELLET_ATTRACT_SPEED, SMALL_PELLET_CONSUME_ANGLE,
-    SMALL_PELLET_DIGESTION_STRENGTH, SMALL_PELLET_DIGESTION_STRENGTH_MAX,
-    SMALL_PELLET_GROWTH_FRACTION, SMALL_PELLET_LOCK_CONE_ANGLE, SMALL_PELLET_MOUTH_FORWARD,
-    SMALL_PELLET_RING_BATCH_SIZE_CAP, SMALL_PELLET_SHRINK_MIN_RATIO, SMALL_PELLET_SIZE_MAX,
-    SMALL_PELLET_SIZE_MIN, SMALL_PELLET_SPAWN_HEAD_EXCLUSION_ANGLE, SMALL_PELLET_VIEW_MARGIN_MAX,
+    BOT_MIN_STAMINA_TO_BOOST, COLOR_POOL, DEATH_PELLET_SIZE_MAX, DEATH_PELLET_SIZE_MIN,
+    MAX_PELLETS, MAX_SPAWN_ATTEMPTS, MIN_SURVIVAL_LENGTH, OXYGEN_DRAIN_PER_SEC, OXYGEN_MAX,
+    PELLET_SIZE_ENCODE_MAX, PELLET_SIZE_ENCODE_MIN, PLAYER_TIMEOUT_MS, RESPAWN_COOLDOWN_MS,
+    RESPAWN_RETRY_MS, SMALL_PELLET_ATTRACT_RADIUS, SMALL_PELLET_ATTRACT_SPEED,
+    SMALL_PELLET_CONSUME_ANGLE, SMALL_PELLET_DIGESTION_STRENGTH,
+    SMALL_PELLET_DIGESTION_STRENGTH_MAX, SMALL_PELLET_GROWTH_FRACTION,
+    SMALL_PELLET_LOCK_CONE_ANGLE, SMALL_PELLET_MOUTH_FORWARD, SMALL_PELLET_RING_BATCH_SIZE_CAP,
+    SMALL_PELLET_SHRINK_MIN_RATIO, SMALL_PELLET_SIZE_MAX, SMALL_PELLET_SIZE_MIN,
+    SMALL_PELLET_SPAWN_HEAD_EXCLUSION_ANGLE, SMALL_PELLET_VIEW_MARGIN_MAX,
     SMALL_PELLET_VIEW_MARGIN_MIN, SMALL_PELLET_VISIBLE_MAX, SMALL_PELLET_VISIBLE_MIN,
     SMALL_PELLET_ZOOM_MAX_CAMERA_DISTANCE, SMALL_PELLET_ZOOM_MIN_CAMERA_DISTANCE, SPAWN_CONE_ANGLE,
     SPAWN_PLAYER_MIN_DISTANCE, STAMINA_DRAIN_PER_SEC, STAMINA_MAX, STAMINA_RECHARGE_PER_SEC,
@@ -14,8 +16,8 @@ use super::constants::{
 };
 use super::digestion::{add_digestion_with_strength, advance_digestions, get_digestion_progress};
 use super::environment::{
-    sample_lakes, Environment, LAKE_WATER_MASK_THRESHOLD, PLANET_RADIUS, SNAKE_RADIUS,
-    TREE_TRUNK_RADIUS,
+    sample_lakes, Environment, LAKE_EXCLUSION_THRESHOLD, LAKE_WATER_MASK_THRESHOLD, PLANET_RADIUS,
+    SNAKE_RADIUS, TREE_TRUNK_RADIUS,
 };
 use super::input::parse_axis;
 use super::math::{
@@ -30,6 +32,7 @@ use crate::shared::names::sanitize_player_name;
 use rand::Rng;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+use std::f64::consts::PI;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -141,6 +144,9 @@ struct HeadAttractor {
 }
 
 const SMALL_PELLET_COLOR_COUNT: u8 = 12;
+const PELLET_SPAWN_COLLIDER_MARGIN_ANGLE: f64 = 0.0055;
+const PELLET_DEATH_LOCAL_RESPAWN_ATTEMPTS: usize = 14;
+const PELLET_DEATH_GLOBAL_RESPAWN_ATTEMPTS: usize = 40;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -888,10 +894,14 @@ impl RoomState {
         id
     }
 
+    fn random_unit_point(rng: &mut impl Rng) -> Point {
+        let theta = rng.gen::<f64>() * PI * 2.0;
+        let phi = rng.gen::<f64>() * PI;
+        point_from_spherical(theta, phi)
+    }
+
     fn random_small_pellet(&mut self, rng: &mut impl Rng) -> Pellet {
-        let theta = rng.gen::<f64>() * std::f64::consts::PI * 2.0;
-        let phi = rng.gen::<f64>() * std::f64::consts::PI;
-        let normal = point_from_spherical(theta, phi);
+        let normal = Self::random_unit_point(rng);
         let size = rng.gen_range(SMALL_PELLET_SIZE_MIN..=SMALL_PELLET_SIZE_MAX);
         Pellet {
             id: self.next_small_pellet_id(),
@@ -924,11 +934,158 @@ impl RoomState {
         true
     }
 
+    fn tangent_basis(normal: Point) -> (Point, Point) {
+        let up = if normal.y.abs() < 0.9 {
+            Point {
+                x: 0.0,
+                y: 1.0,
+                z: 0.0,
+            }
+        } else {
+            Point {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            }
+        };
+        let tangent = normalize(cross(up, normal));
+        let bitangent = normalize(cross(normal, tangent));
+        (tangent, bitangent)
+    }
+
+    fn sample_outline_radius(outline: &[f64], theta: f64) -> f64 {
+        if outline.is_empty() {
+            return 0.0;
+        }
+        let total = PI * 2.0;
+        let normalized = (theta / total).clamp(0.0, 1.0);
+        let idx = normalized * outline.len() as f64;
+        let i0 = idx.floor() as usize % outline.len();
+        let i1 = (i0 + 1) % outline.len();
+        let t = idx - idx.floor();
+        outline[i0] * (1.0 - t) + outline[i1] * t
+    }
+
+    fn point_inside_tree_or_cactus_collider(&self, point: Point) -> bool {
+        for tree in &self.environment.trees {
+            let trunk_radius = (TREE_TRUNK_RADIUS * tree.width_scale.abs()) / PLANET_RADIUS;
+            let dot_value = clamp(dot(point, tree.normal), -1.0, 1.0);
+            let angle = dot_value.acos();
+            if !angle.is_finite() {
+                continue;
+            }
+            if angle < trunk_radius + PELLET_SPAWN_COLLIDER_MARGIN_ANGLE {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn point_inside_mountain_collider(
+        point: Point,
+        mountain: &super::environment::MountainInstance,
+    ) -> bool {
+        let dot_value = clamp(dot(point, mountain.normal), -1.0, 1.0);
+        let angle = dot_value.acos();
+        if !angle.is_finite() {
+            return false;
+        }
+
+        let (tangent, bitangent) = Self::tangent_basis(mountain.normal);
+        let mut projection = Point {
+            x: point.x - mountain.normal.x * dot_value,
+            y: point.y - mountain.normal.y * dot_value,
+            z: point.z - mountain.normal.z * dot_value,
+        };
+        if length(projection) < 1e-6 {
+            projection = tangent;
+        }
+        let x = dot(projection, tangent);
+        let y = dot(projection, bitangent);
+        let mut theta = y.atan2(x);
+        if theta < 0.0 {
+            theta += PI * 2.0;
+        }
+        let outline_radius = Self::sample_outline_radius(&mountain.outline, theta);
+        angle < outline_radius + PELLET_SPAWN_COLLIDER_MARGIN_ANGLE
+    }
+
+    fn is_invalid_pellet_spawn(&self, point: Point) -> bool {
+        let len = length(point);
+        if !len.is_finite() || len <= 1e-8 {
+            return true;
+        }
+
+        // Keep legacy tests and non-surface diagnostics deterministic by only applying
+        // terrain collider checks to points that are on the sphere surface.
+        if !(0.85..=1.15).contains(&len) {
+            return false;
+        }
+
+        let normal = Point {
+            x: point.x / len,
+            y: point.y / len,
+            z: point.z / len,
+        };
+
+        if sample_lakes(normal, &self.environment.lakes).boundary > LAKE_EXCLUSION_THRESHOLD {
+            return true;
+        }
+
+        if self.point_inside_tree_or_cactus_collider(normal) {
+            return true;
+        }
+
+        self.environment
+            .mountains
+            .iter()
+            .any(|mountain| Self::point_inside_mountain_collider(normal, mountain))
+    }
+
+    fn pick_valid_death_pellet_spawn(&self, origin: Point, rng: &mut impl Rng) -> Option<Point> {
+        let len = length(origin);
+        if !len.is_finite() || len <= 1e-8 {
+            return None;
+        }
+        if !(0.85..=1.15).contains(&len) {
+            return Some(origin);
+        }
+
+        let origin_normal = Point {
+            x: origin.x / len,
+            y: origin.y / len,
+            z: origin.z / len,
+        };
+        if !self.is_invalid_pellet_spawn(origin_normal) {
+            return Some(origin_normal);
+        }
+
+        for _ in 0..PELLET_DEATH_LOCAL_RESPAWN_ATTEMPTS {
+            let target = Self::random_unit_point(rng);
+            let jitter_angle = rng.gen_range(0.025..0.26);
+            let candidate = rotate_toward(origin_normal, target, jitter_angle);
+            if !self.is_invalid_pellet_spawn(candidate) {
+                return Some(candidate);
+            }
+        }
+
+        for _ in 0..PELLET_DEATH_GLOBAL_RESPAWN_ATTEMPTS {
+            let candidate = Self::random_unit_point(rng);
+            if !self.is_invalid_pellet_spawn(candidate) {
+                return Some(candidate);
+            }
+        }
+
+        None
+    }
+
     fn spawn_small_pellet_with_rng(&mut self, rng: &mut impl Rng) -> Option<Pellet> {
         const SPAWN_ATTEMPTS: usize = 20;
         for _ in 0..SPAWN_ATTEMPTS {
             let pellet = self.random_small_pellet(rng);
-            if self.is_far_enough_from_heads(pellet.normal) {
+            if self.is_far_enough_from_heads(pellet.normal)
+                && !self.is_invalid_pellet_spawn(pellet.normal)
+            {
                 return Some(pellet);
             }
         }
@@ -1367,12 +1524,15 @@ impl RoomState {
 
         let mut rng = rand::thread_rng();
         for point in dropped_points {
-            let size = rng.gen_range(SMALL_PELLET_SIZE_MIN..=SMALL_PELLET_SIZE_MAX);
+            let Some(spawn_point) = self.pick_valid_death_pellet_spawn(point, &mut rng) else {
+                continue;
+            };
+            let size = rng.gen_range(DEATH_PELLET_SIZE_MIN..=DEATH_PELLET_SIZE_MAX);
             let color_index = rng.gen_range(0..SMALL_PELLET_COLOR_COUNT);
             let pellet_id = self.next_small_pellet_id();
             self.pellets.push(Pellet {
                 id: pellet_id,
-                normal: point,
+                normal: spawn_point,
                 color_index,
                 base_size: size,
                 current_size: size,
@@ -1576,8 +1736,8 @@ impl RoomState {
     }
 
     fn quantize_pellet_size(size: f32) -> u8 {
-        let range = (SMALL_PELLET_SIZE_MAX - SMALL_PELLET_SIZE_MIN).max(1e-4);
-        let t = ((size - SMALL_PELLET_SIZE_MIN) / range).clamp(0.0, 1.0);
+        let range = (PELLET_SIZE_ENCODE_MAX - PELLET_SIZE_ENCODE_MIN).max(1e-4);
+        let t = ((size - PELLET_SIZE_ENCODE_MIN) / range).clamp(0.0, 1.0);
         (t * u8::MAX as f32).round() as u8
     }
 
@@ -1913,6 +2073,9 @@ mod tests {
     #[test]
     fn death_drops_pellets_for_each_body_node() {
         let mut state = make_state();
+        state.environment.lakes.clear();
+        state.environment.trees.clear();
+        state.environment.mountains.clear();
         let snake = make_snake(6, 0.0);
         let player_id = "player-1".to_string();
         let player = make_player(&player_id, snake.clone());
@@ -1925,12 +2088,17 @@ mod tests {
             assert_eq!(pellet.normal.x, node.x);
             assert_eq!(pellet.normal.y, node.y);
             assert_eq!(pellet.normal.z, node.z);
+            assert!(pellet.base_size >= DEATH_PELLET_SIZE_MIN);
+            assert!(pellet.base_size <= DEATH_PELLET_SIZE_MAX);
         }
     }
 
     #[test]
     fn death_pellets_clamp_to_u16_max() {
         let mut state = make_state();
+        state.environment.lakes.clear();
+        state.environment.trees.clear();
+        state.environment.mountains.clear();
         let base_len = u16::MAX as usize - 2;
         state.pellets = (0..base_len)
             .map(|index| Pellet {
@@ -1960,6 +2128,146 @@ mod tests {
             assert_eq!(pellet.normal.x, node.x);
             assert_eq!(pellet.normal.y, node.y);
             assert_eq!(pellet.normal.z, node.z);
+            assert!(pellet.base_size > SMALL_PELLET_SIZE_MAX);
+        }
+    }
+
+    #[test]
+    fn spawn_small_pellet_rejects_lake_zone() {
+        let mut state = make_full_lake_state();
+        let mut rng = rand::thread_rng();
+        assert!(state.spawn_small_pellet_with_rng(&mut rng).is_none());
+    }
+
+    #[test]
+    fn pellet_spawn_invalid_inside_tree_or_cactus_collider() {
+        use crate::game::environment::TreeInstance;
+        let mut state = make_state();
+        state.environment.lakes.clear();
+        state.environment.mountains.clear();
+        state.environment.trees = vec![
+            TreeInstance {
+                normal: Point {
+                    x: 1.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                width_scale: 1.0,
+                height_scale: 1.0,
+                twist: 0.0,
+            },
+            TreeInstance {
+                normal: Point {
+                    x: -1.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                width_scale: -1.0,
+                height_scale: 1.0,
+                twist: 0.0,
+            },
+        ];
+
+        assert!(state.is_invalid_pellet_spawn(Point {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        }));
+        assert!(state.is_invalid_pellet_spawn(Point {
+            x: -1.0,
+            y: 0.0,
+            z: 0.0,
+        }));
+        assert!(!state.is_invalid_pellet_spawn(Point {
+            x: 0.0,
+            y: 1.0,
+            z: 0.0,
+        }));
+    }
+
+    #[test]
+    fn pellet_spawn_invalid_inside_mountain_collider() {
+        use crate::game::environment::MountainInstance;
+        let mut state = make_state();
+        state.environment.lakes.clear();
+        state.environment.trees.clear();
+        state.environment.mountains = vec![MountainInstance {
+            normal: Point {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            radius: 0.5,
+            height: 0.2,
+            variant: 0,
+            twist: 0.0,
+            outline: vec![0.28; 64],
+        }];
+
+        assert!(state.is_invalid_pellet_spawn(Point {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        }));
+        assert!(!state.is_invalid_pellet_spawn(Point {
+            x: 0.0,
+            y: 1.0,
+            z: 0.0,
+        }));
+    }
+
+    #[test]
+    fn death_drop_repositions_invalid_points_to_valid_spawn() {
+        use crate::game::environment::TreeInstance;
+        let mut state = make_state();
+        state.environment.lakes.clear();
+        state.environment.mountains.clear();
+        state.environment.trees = vec![TreeInstance {
+            normal: Point {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            width_scale: 1.0,
+            height_scale: 1.0,
+            twist: 0.0,
+        }];
+        let player_id = "death-spawn-adjust".to_string();
+        let snake = vec![
+            SnakeNode {
+                x: 0.0,
+                y: 1.0,
+                z: 0.0,
+                pos_queue: VecDeque::new(),
+            },
+            SnakeNode {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+                pos_queue: VecDeque::new(),
+            },
+            SnakeNode {
+                x: 0.0,
+                y: 0.0,
+                z: 1.0,
+                pos_queue: VecDeque::new(),
+            },
+        ];
+        state
+            .players
+            .insert(player_id.clone(), make_player(&player_id, snake));
+
+        state.handle_death(&player_id);
+
+        assert_eq!(state.pellets.len(), 2);
+        assert!(!state
+            .pellets
+            .iter()
+            .any(|pellet| (pellet.normal.x - 1.0).abs() < 1e-6
+                && pellet.normal.y.abs() < 1e-6
+                && pellet.normal.z.abs() < 1e-6));
+        for pellet in &state.pellets {
+            assert!(!state.is_invalid_pellet_spawn(pellet.normal));
         }
     }
 

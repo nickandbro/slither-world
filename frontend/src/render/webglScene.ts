@@ -49,8 +49,12 @@ type DigestionVisual = {
 
 type PelletSpriteBucket = {
   points: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>
+  material: THREE.PointsMaterial
   positionAttribute: THREE.BufferAttribute
   capacity: number
+  baseSize: number
+  colorBucketIndex: number
+  sizeTierIndex: number
 }
 
 const createPelletSpriteTexture = () => {
@@ -62,9 +66,9 @@ const createPelletSpriteTexture = () => {
   if (!ctx) return null
   const center = size * 0.5
   const gradient = ctx.createRadialGradient(center, center, 0, center, center, center)
-  gradient.addColorStop(0, 'rgba(255,255,255,0.96)')
-  gradient.addColorStop(0.2, 'rgba(255,255,255,0.82)')
-  gradient.addColorStop(0.54, 'rgba(255,255,255,0.3)')
+  gradient.addColorStop(0, 'rgba(255,255,255,0.88)')
+  gradient.addColorStop(0.22, 'rgba(255,255,255,0.64)')
+  gradient.addColorStop(0.58, 'rgba(255,255,255,0.22)')
   gradient.addColorStop(1, 'rgba(255,255,255,0)')
   ctx.clearRect(0, 0, size, size)
   ctx.fillStyle = gradient
@@ -352,6 +356,14 @@ const PELLET_COLORS = [
   '#6f8bff',
   '#f9ff6b',
 ]
+const PELLET_SIZE_TIER_MULTIPLIERS = [0.92, 1.18, 1.46]
+const PELLET_SIZE_TIER_MEDIUM_MIN = 1.0
+const PELLET_SIZE_TIER_LARGE_MIN = 1.45
+const PELLET_GLOW_PULSE_SPEED = 0.45
+const PELLET_GLOW_OPACITY_BASE = 0.8
+const PELLET_GLOW_OPACITY_RANGE = 0.1
+const PELLET_GLOW_SIZE_RANGE = 0.08
+const PELLET_GLOW_PHASE_STEP = 0.73
 const TONGUE_MAX_LENGTH = HEAD_RADIUS * 2.8
 const TONGUE_MAX_RANGE = HEAD_RADIUS * 3.1
 const TONGUE_NEAR_RANGE = HEAD_RADIUS * 2.4
@@ -366,14 +378,15 @@ const TONGUE_RETRACT_RATE = 14
 const TONGUE_HIDE_THRESHOLD = HEAD_RADIUS * 0.12
 const TONGUE_GRAB_EPS = HEAD_RADIUS * 0.12
 const TONGUE_PELLET_MATCH = HEAD_RADIUS * 1.6
+const TONGUE_ENABLED = false
 const TAIL_CAP_SEGMENTS = 5
 const TAIL_DIR_MIN_RATIO = 0.35
 const DIGESTION_BULGE_MIN = 0.14
-const DIGESTION_BULGE_MAX = 0.55
+const DIGESTION_BULGE_MAX = 0.38
 const DIGESTION_WIDTH_MIN = 1.5
-const DIGESTION_WIDTH_MAX = 3.2
-const DIGESTION_MAX_BULGE_MIN = 0.8
-const DIGESTION_MAX_BULGE_MAX = 0.85
+const DIGESTION_WIDTH_MAX = 2.4
+const DIGESTION_MAX_BULGE_MIN = 0.42
+const DIGESTION_MAX_BULGE_MAX = 0.62
 const DIGESTION_START_RINGS = 0
 const DIGESTION_START_MAX = 0
 const DIGESTION_TRAVEL_EASE = 1
@@ -1586,7 +1599,8 @@ const createScene = async (
     emissiveIntensity: 0.3,
   })
 
-  const PELLET_BUCKET_COUNT = PELLET_COLORS.length
+  const PELLET_COLOR_BUCKET_COUNT = PELLET_COLORS.length
+  const PELLET_BUCKET_COUNT = PELLET_COLOR_BUCKET_COUNT * PELLET_SIZE_TIER_MULTIPLIERS.length
   const PELLET_POINT_SIZE = PELLET_RADIUS * 7.1
   const pelletSpriteTexture = createPelletSpriteTexture()
   let treeTierGeometries: THREE.BufferGeometry[] = []
@@ -4035,7 +4049,7 @@ const createScene = async (
       const end = Math.min(ringCount - 1, Math.ceil(center + influenceRadius))
       const sigma = Math.max(0.5, influenceRadius * 0.7)
       const tailFade = smoothstep(0, 0.016, 1 - mapped)
-      const headFade = smoothstep(0, 0.012, mapped)
+      const headFade = smoothstep(0.03, 0.16, mapped)
       const travelFade = Math.min(headFade, tailFade)
       if (travelFade <= 0) continue
       for (let ring = start; ring <= end; ring += 1) {
@@ -4062,7 +4076,13 @@ const createScene = async (
         DIGESTION_MAX_BULGE_MAX,
         edgeClamp,
       )
-      bulgeByRing[ring] = Math.min(maxRingBulge, bulgeByRing[ring])
+      const rawBulge = Math.max(0, bulgeByRing[ring])
+      if (rawBulge <= 0) {
+        bulgeByRing[ring] = 0
+        continue
+      }
+      const saturated = maxRingBulge * (1 - Math.exp(-rawBulge / Math.max(maxRingBulge, 1e-4)))
+      bulgeByRing[ring] = Math.min(maxRingBulge, saturated)
     }
 
     const center = new THREE.Vector3()
@@ -4326,6 +4346,12 @@ const createScene = async (
     pellets: PelletSnapshot[] | null,
     deltaSeconds: number,
   ): PelletOverride | null => {
+    if (!TONGUE_ENABLED) {
+      visual.tongue.visible = false
+      tongueStates.delete(playerId)
+      return null
+    }
+
     let state = tongueStates.get(playerId)
     if (!state) {
       state = { length: 0, mode: 'idle', targetPosition: null, carrying: false }
@@ -5322,12 +5348,29 @@ const createScene = async (
   }
 
   const normalizePelletColorIndex = (colorIndex: number) => {
-    if (PELLET_BUCKET_COUNT <= 0) return 0
-    const mod = colorIndex % PELLET_BUCKET_COUNT
-    return mod >= 0 ? mod : mod + PELLET_BUCKET_COUNT
+    if (PELLET_COLOR_BUCKET_COUNT <= 0) return 0
+    const mod = colorIndex % PELLET_COLOR_BUCKET_COUNT
+    return mod >= 0 ? mod : mod + PELLET_COLOR_BUCKET_COUNT
+  }
+
+  const pelletSizeTierIndex = (size: number) => {
+    if (!Number.isFinite(size)) return 0
+    if (size >= PELLET_SIZE_TIER_LARGE_MIN) return 2
+    if (size >= PELLET_SIZE_TIER_MEDIUM_MIN) return 1
+    return 0
+  }
+
+  const pelletBucketIndex = (colorIndex: number, size: number) => {
+    const colorBucketIndex = normalizePelletColorIndex(colorIndex)
+    const tierIndex = pelletSizeTierIndex(size)
+    return tierIndex * PELLET_COLOR_BUCKET_COUNT + colorBucketIndex
   }
 
   const createPelletBucket = (bucketIndex: number, capacity: number): PelletSpriteBucket => {
+    const sizeTierIndex = Math.floor(bucketIndex / PELLET_COLOR_BUCKET_COUNT)
+    const colorBucketIndex = bucketIndex % PELLET_COLOR_BUCKET_COUNT
+    const sizeMultiplier = PELLET_SIZE_TIER_MULTIPLIERS[sizeTierIndex] ?? 1
+    const baseSize = PELLET_POINT_SIZE * sizeMultiplier
     const geometry = new THREE.BufferGeometry()
     const positionArray = new Float32Array(capacity * 3)
     const positionAttribute = new THREE.BufferAttribute(positionArray, 3)
@@ -5336,12 +5379,12 @@ const createScene = async (
     geometry.setDrawRange(0, 0)
 
     const material = new THREE.PointsMaterial({
-      size: PELLET_POINT_SIZE,
+      size: baseSize,
       map: pelletSpriteTexture ?? undefined,
       alphaMap: pelletSpriteTexture ?? undefined,
-      color: PELLET_COLORS[bucketIndex] ?? '#ffd166',
+      color: PELLET_COLORS[colorBucketIndex] ?? '#ffd166',
       transparent: true,
-      opacity: 0.84,
+      opacity: PELLET_GLOW_OPACITY_BASE,
       depthWrite: false,
       depthTest: true,
       blending: THREE.AdditiveBlending,
@@ -5352,7 +5395,15 @@ const createScene = async (
     points.visible = false
     points.frustumCulled = false
     pelletsGroup.add(points)
-    return { points, positionAttribute, capacity }
+    return {
+      points,
+      material,
+      positionAttribute,
+      capacity,
+      baseSize,
+      colorBucketIndex,
+      sizeTierIndex,
+    }
   }
 
   const ensurePelletBucketCapacity = (bucketIndex: number, required: number): PelletSpriteBucket => {
@@ -5398,7 +5449,7 @@ const createScene = async (
 
     for (let i = 0; i < pellets.length; i += 1) {
       const pellet = pellets[i]
-      const bucketIndex = normalizePelletColorIndex(pellet.colorIndex)
+      const bucketIndex = pelletBucketIndex(pellet.colorIndex, pellet.size)
       pelletBucketCounts[bucketIndex] += 1
       pelletIdsSeen.add(pellet.id)
     }
@@ -5422,7 +5473,7 @@ const createScene = async (
 
     for (let i = 0; i < pellets.length; i += 1) {
       const pellet = pellets[i]
-      const bucketIndex = normalizePelletColorIndex(pellet.colorIndex)
+      const bucketIndex = pelletBucketIndex(pellet.colorIndex, pellet.size)
       const positions = bucketPositions[bucketIndex]
       if (!positions) continue
 
@@ -5451,6 +5502,26 @@ const createScene = async (
       if (!pelletIdsSeen.has(id)) {
         pelletGroundCache.delete(id)
       }
+    }
+  }
+
+  const updatePelletGlow = (timeSeconds: number) => {
+    for (let bucketIndex = 0; bucketIndex < PELLET_BUCKET_COUNT; bucketIndex += 1) {
+      const bucket = pelletBuckets[bucketIndex]
+      if (!bucket) continue
+      const phase =
+        timeSeconds * PELLET_GLOW_PULSE_SPEED +
+        bucket.colorBucketIndex * PELLET_GLOW_PHASE_STEP +
+        bucket.sizeTierIndex * 0.91
+      const pulse = 0.5 + 0.5 * Math.sin(phase)
+      const easedPulse = smoothstep(0, 1, pulse)
+      const centered = (easedPulse - 0.5) * 2
+      bucket.material.opacity = clamp(
+        PELLET_GLOW_OPACITY_BASE + centered * PELLET_GLOW_OPACITY_RANGE,
+        0.58,
+        0.98,
+      )
+      bucket.material.size = bucket.baseSize * (1 + centered * PELLET_GLOW_SIZE_RANGE)
     }
   }
 
@@ -5562,6 +5633,7 @@ const createScene = async (
           Math.sin(lakeTimeSeconds * LAKE_WATER_WAVE_SPEED + i * 0.73) * LAKE_WATER_EMISSIVE_PULSE
       }
     }
+    updatePelletGlow(lakeTimeSeconds)
 
     renderer.render(scene, camera)
     return localHeadScreen
