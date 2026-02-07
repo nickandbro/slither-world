@@ -102,6 +102,12 @@ type PelletSpriteBucket = {
   sizeTierIndex: number
 }
 
+type PelletMotionState = {
+  gfrOffset: number
+  gr: number
+  wsp: number
+}
+
 const createPelletRadialTexture = (
   size: number,
   stops: Array<{ offset: number; color: string }>,
@@ -480,6 +486,9 @@ const PELLET_COLORS = [
 const PELLET_SIZE_TIER_MULTIPLIERS = [0.9, 1.45, 2.8]
 const PELLET_SIZE_TIER_MEDIUM_MIN = 1.05
 const PELLET_SIZE_TIER_LARGE_MIN = 1.6
+const PELLET_WOBBLE_DISTANCE = PELLET_RADIUS * 0.45
+const PELLET_WOBBLE_GFR_RATE = 1000 / 8
+const PELLET_WOBBLE_WSP_RANGE = 0.0225
 const PELLET_GLOW_PULSE_SPEED = 9.2
 const PELLET_SHADOW_OPACITY_BASE = 0.9
 const PELLET_SHADOW_OPACITY_RANGE = 0.008
@@ -1753,6 +1762,7 @@ const createScene = async (
   const pelletBucketCounts = new Array<number>(PELLET_BUCKET_COUNT).fill(0)
   const pelletBucketOffsets = new Array<number>(PELLET_BUCKET_COUNT).fill(0)
   const pelletGroundCache = new Map<number, { x: number; y: number; z: number; radius: number }>()
+  const pelletMotionStates = new Map<number, PelletMotionState>()
   const pelletIdsSeen = new Set<number>()
   let viewportWidth = 1
   let viewportHeight = 1
@@ -1777,6 +1787,8 @@ const createScene = async (
   const tempVectorF = new THREE.Vector3()
   const tempVectorG = new THREE.Vector3()
   const tempVectorH = new THREE.Vector3()
+  const pelletWobbleTangentTemp = new THREE.Vector3()
+  const pelletWobbleBitangentTemp = new THREE.Vector3()
   const patchCenterQuat = new THREE.Quaternion()
   const lakeSampleTemp = new THREE.Vector3()
   const tempQuat = new THREE.Quaternion()
@@ -2024,6 +2036,7 @@ const createScene = async (
     visiblePlanetPatchCount = 0
     terrainContactSampler = null
     pelletGroundCache.clear()
+    pelletMotionStates.clear()
     if (planetMesh) {
       world.remove(planetMesh)
       planetMesh.geometry.dispose()
@@ -5208,6 +5221,45 @@ diffuseColor.a *= retireEdge;`,
     return out
   }
 
+  const pelletSeedUnit = (id: number, salt: number) => {
+    let x = (id ^ salt) >>> 0
+    x = Math.imul(x ^ (x >>> 16), 0x7feb352d)
+    x = Math.imul(x ^ (x >>> 15), 0x846ca68b)
+    x ^= x >>> 16
+    return (x >>> 0) / 0xffff_ffff
+  }
+
+  const getPelletMotionState = (pellet: PelletSnapshot) => {
+    let state = pelletMotionStates.get(pellet.id)
+    if (state) return state
+    const size = Number.isFinite(pellet.size) ? pellet.size : 1
+    const clampedSize = clamp(size, PELLET_SIZE_MIN, PELLET_SIZE_MAX)
+    state = {
+      // Mirror slither's per-food random phase, speed, and wobble frequency.
+      gfrOffset: pelletSeedUnit(pellet.id, 0x9e3779b1) * 64,
+      gr: 0.65 + 0.1 * clampedSize,
+      wsp: (pelletSeedUnit(pellet.id, 0x85ebca77) * 2 - 1) * PELLET_WOBBLE_WSP_RANGE,
+    }
+    pelletMotionStates.set(pellet.id, state)
+    return state
+  }
+
+  const applyPelletWobble = (pellet: PelletSnapshot, out: THREE.Vector3, timeSeconds: number) => {
+    if (!Number.isFinite(timeSeconds)) return
+    const state = getPelletMotionState(pellet)
+    const gfr = state.gfrOffset + timeSeconds * PELLET_WOBBLE_GFR_RATE * state.gr
+    const wobbleAngle = state.wsp * gfr
+    const baseRadius = out.length()
+    if (!Number.isFinite(baseRadius) || baseRadius <= 1e-8) return
+    tempVectorE.copy(out).multiplyScalar(1 / baseRadius)
+    buildTangentBasis(tempVectorE, pelletWobbleTangentTemp, pelletWobbleBitangentTemp)
+    out
+      .addScaledVector(pelletWobbleTangentTemp, Math.cos(wobbleAngle) * PELLET_WOBBLE_DISTANCE)
+      .addScaledVector(pelletWobbleBitangentTemp, Math.sin(wobbleAngle) * PELLET_WOBBLE_DISTANCE)
+      .normalize()
+      .multiplyScalar(baseRadius)
+  }
+
   const updateTongue = (
     playerId: string,
     visual: SnakeVisual,
@@ -6180,7 +6232,11 @@ diffuseColor.a *= retireEdge;`,
     return bucket
   }
 
-  const updatePellets = (pellets: PelletSnapshot[], override: PelletOverride | null) => {
+  const updatePellets = (
+    pellets: PelletSnapshot[],
+    override: PelletOverride | null,
+    timeSeconds: number,
+  ) => {
     pelletIdsSeen.clear()
     for (let i = 0; i < PELLET_BUCKET_COUNT; i += 1) {
       pelletBucketCounts[i] = 0
@@ -6227,6 +6283,7 @@ diffuseColor.a *= retireEdge;`,
         tempVector.copy(override.position)
       } else {
         getPelletSurfacePosition(pellet, tempVector)
+        applyPelletWobble(pellet, tempVector, timeSeconds)
       }
 
       const itemIndex = pelletBucketOffsets[bucketIndex]
@@ -6247,6 +6304,11 @@ diffuseColor.a *= retireEdge;`,
     for (const id of pelletGroundCache.keys()) {
       if (!pelletIdsSeen.has(id)) {
         pelletGroundCache.delete(id)
+      }
+    }
+    for (const id of pelletMotionStates.keys()) {
+      if (!pelletIdsSeen.has(id)) {
+        pelletMotionStates.delete(id)
       }
     }
   }
@@ -6376,10 +6438,10 @@ diffuseColor.a *= retireEdge;`,
         snapshot.pellets,
         now,
       )
-      updatePellets(snapshot.pellets, pelletOverride)
+      updatePellets(snapshot.pellets, pelletOverride, now * 0.001)
     } else {
       updateSnakes([], localPlayerId, deltaSeconds, null, now)
-      updatePellets([], null)
+      updatePellets([], null, now * 0.001)
     }
 
     patchCenterQuat.copy(world.quaternion).invert()
@@ -6495,6 +6557,7 @@ diffuseColor.a *= retireEdge;`,
     pelletInnerGlowTexture?.dispose()
     pelletGlowTexture?.dispose()
     pelletGroundCache.clear()
+    pelletMotionStates.clear()
     pelletIdsSeen.clear()
     for (const [id, visual] of snakes) {
       removeSnake(visual, id)
