@@ -106,6 +106,7 @@ const SCORE_RADIAL_FADE_IN_RATE = 10
 const SCORE_RADIAL_FADE_OUT_RATE = 8
 const SCORE_RADIAL_INTERVAL_SMOOTH_RATE = 14
 const SCORE_RADIAL_MIN_CAP_RESERVE = 1e-6
+const SCORE_RADIAL_BLOCKED_FLASH_MS = 320
 const MENU_CAMERA_DISTANCE = 7
 const MENU_CAMERA_VERTICAL_OFFSET = 2.5
 const MENU_TO_GAMEPLAY_BLEND_MS = 900
@@ -152,6 +153,8 @@ type ScoreRadialVisualState = {
   spawnReserve: number | null
   spawnScore: number | null
   displayInterval01: number | null
+  blockedFlashUntilMs: number
+  blockedVisualHold: boolean
   lastIntervalPct: number
   lastDisplayScore: number
   opacity: number
@@ -283,6 +286,8 @@ export default function App() {
     spawnReserve: null,
     spawnScore: null,
     displayInterval01: null,
+    blockedFlashUntilMs: 0,
+    blockedVisualHold: false,
     lastIntervalPct: 100,
     lastDisplayScore: 0,
     opacity: 0,
@@ -670,6 +675,7 @@ export default function App() {
                 } else {
                   scoreRadialState.spawnReserve = null
                   scoreRadialState.spawnScore = null
+                  scoreRadialState.blockedVisualHold = false
                 }
                 const spawnScore = Math.max(
                   0,
@@ -681,7 +687,16 @@ export default function App() {
                   !localSnapshotPlayer.isBoosting &&
                   localSnapshotPlayer.score < minBoostStartScore
                 const attemptingBoost = pointerRef.current.boost
+                if (
+                  scoreRadialState.lastBoosting &&
+                  !scoreRadialActive &&
+                  localSnapshotPlayer.alive &&
+                  attemptingBoost
+                ) {
+                  scoreRadialState.blockedFlashUntilMs = nowMs + SCORE_RADIAL_BLOCKED_FLASH_MS
+                }
                 if (scoreRadialActive) {
+                  scoreRadialState.blockedFlashUntilMs = 0
                   if (!scoreRadialState.lastBoosting || scoreRadialState.capReserve === null) {
                     scoreRadialState.capReserve = Math.max(
                       currentReserve,
@@ -724,7 +739,9 @@ export default function App() {
                   scoreIntervalPct = scoreRadialState.lastIntervalPct
                   scoreDisplay = localSnapshotPlayer.score
                   scoreRadialState.lastDisplayScore = scoreDisplay
-                  scoreRadialBlocked = scoreBlockedByThreshold && attemptingBoost
+                  scoreRadialBlocked =
+                    (scoreBlockedByThreshold && attemptingBoost) ||
+                    nowMs < scoreRadialState.blockedFlashUntilMs
                 }
                 scoreRadialState.lastBoosting = scoreRadialActive
                 scoreRadialState.lastAlive = localSnapshotPlayer.alive
@@ -733,13 +750,25 @@ export default function App() {
                 scoreRadialState.spawnReserve = null
                 scoreRadialState.spawnScore = null
                 scoreRadialState.displayInterval01 = null
+                scoreRadialState.blockedFlashUntilMs = 0
+                scoreRadialState.blockedVisualHold = false
                 scoreIntervalPct = scoreRadialState.lastIntervalPct
                 scoreDisplay = scoreRadialState.lastDisplayScore
                 scoreRadialState.lastBoosting = false
                 scoreRadialState.lastAlive = false
               }
-              const scoreRadialVisible = scoreRadialActive || scoreRadialBlocked
-              const scoreRadialTargetOpacity = scoreRadialVisible ? 1 : 0
+              if (scoreRadialBlocked) {
+                scoreRadialState.blockedVisualHold = true
+              } else if (scoreRadialActive) {
+                scoreRadialState.blockedVisualHold = false
+              }
+              const scoreRadialVisibleTarget = scoreRadialActive || scoreRadialBlocked
+              const scoreRadialRenderBlocked =
+                scoreRadialBlocked ||
+                (!scoreRadialActive &&
+                  scoreRadialState.blockedVisualHold &&
+                  scoreRadialState.opacity > 0.001)
+              const scoreRadialTargetOpacity = scoreRadialVisibleTarget ? 1 : 0
               const scoreRadialRate =
                 scoreRadialTargetOpacity >= scoreRadialState.opacity
                   ? SCORE_RADIAL_FADE_IN_RATE
@@ -749,6 +778,9 @@ export default function App() {
                 (scoreRadialTargetOpacity - scoreRadialState.opacity) * scoreRadialAlpha
               if (Math.abs(scoreRadialTargetOpacity - scoreRadialState.opacity) < 1e-4) {
                 scoreRadialState.opacity = scoreRadialTargetOpacity
+              }
+              if (!scoreRadialVisibleTarget && scoreRadialState.opacity <= 0.001) {
+                scoreRadialState.blockedVisualHold = false
               }
               drawHud(
                 hudCtx,
@@ -766,7 +798,7 @@ export default function App() {
                   active: scoreRadialState.opacity > 0.001,
                   score: scoreDisplay,
                   intervalPct: scoreIntervalPct,
-                  blocked: scoreRadialBlocked,
+                  blocked: scoreRadialRenderBlocked,
                   opacity: scoreRadialState.opacity,
                   anchor: headScreen,
                 },
@@ -845,6 +877,8 @@ export default function App() {
       scoreRadialStateRef.current.spawnReserve = null
       scoreRadialStateRef.current.spawnScore = null
       scoreRadialStateRef.current.displayInterval01 = null
+      scoreRadialStateRef.current.blockedFlashUntilMs = 0
+      scoreRadialStateRef.current.blockedVisualHold = false
       scoreRadialStateRef.current.lastIntervalPct = 100
       scoreRadialStateRef.current.lastDisplayScore = 0
       scoreRadialStateRef.current.opacity = 0

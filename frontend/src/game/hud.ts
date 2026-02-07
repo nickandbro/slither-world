@@ -128,11 +128,6 @@ function drawScoreRadial(
     const coreWidth = Math.max(1, strokeWidth - 0.4)
 
     ctx.beginPath()
-    ctx.arc(centerX, centerY, Math.max(1, ringRadius - strokeWidth * 0.72), 0, Math.PI * 2)
-    ctx.fillStyle = 'rgba(239, 68, 68, 0.16)'
-    ctx.fill()
-
-    ctx.beginPath()
     ctx.arc(centerX, centerY, ringRadius, 0, Math.PI * 2)
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)'
     ctx.lineWidth = edgeWidth
@@ -180,37 +175,35 @@ function drawScoreRadial(
   ctx.save()
   ctx.globalAlpha = Math.max(0, Math.min(1, opacity))
 
-  ctx.beginPath()
-  ctx.arc(centerX, centerY, radius, 0, Math.PI * 2)
-  ctx.strokeStyle = 'rgba(221, 230, 245, 0.44)'
-  ctx.lineWidth = lineWidth
-  ctx.lineCap = 'round'
-  ctx.stroke()
-
-  if (!blocked && clampedInterval > 0) {
+  if (!blocked) {
     ctx.beginPath()
-    ctx.arc(centerX, centerY, radius, startAngle, startAngle + angleSweep, false)
-    ctx.strokeStyle = activeColor
+    ctx.arc(centerX, centerY, radius, 0, Math.PI * 2)
+    ctx.strokeStyle = 'rgba(221, 230, 245, 0.44)'
     ctx.lineWidth = lineWidth
     ctx.lineCap = 'round'
     ctx.stroke()
-  }
 
-  ctx.beginPath()
-  ctx.arc(centerX, centerY, innerRadius, 0, Math.PI * 2)
-  ctx.fillStyle = blocked ? 'rgba(255, 243, 243, 0.93)' : 'rgba(231, 237, 247, 0.97)'
-  ctx.fill()
+    if (clampedInterval > 0) {
+      ctx.beginPath()
+      ctx.arc(centerX, centerY, radius, startAngle, startAngle + angleSweep, false)
+      ctx.strokeStyle = activeColor
+      ctx.lineWidth = lineWidth
+      ctx.lineCap = 'round'
+      ctx.stroke()
+    }
 
-  if (blocked) {
-    drawBlockedOverlay(centerX, centerY, radius, lineWidth)
-  }
+    ctx.beginPath()
+    ctx.arc(centerX, centerY, innerRadius, 0, Math.PI * 2)
+    ctx.fillStyle = 'rgba(231, 237, 247, 0.97)'
+    ctx.fill()
 
-  if (!blocked) {
     ctx.fillStyle = activeColor
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
     ctx.font = `${Math.max(10, Math.min(15, Math.round(radius * 0.62)))}px "Space Mono", monospace`
     ctx.fillText(String(Math.max(0, Math.floor(score))), centerX, centerY)
+  } else {
+    drawBlockedOverlay(centerX, centerY, radius, lineWidth)
   }
 
   ctx.restore()
