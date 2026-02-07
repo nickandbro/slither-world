@@ -1012,7 +1012,18 @@ export default function App() {
           {!isPlaying && (
             <div className='menu-overlay'>
               <div className='menu-hero'>
-                <div className='menu-title'>Slither World</div>
+                <div className='menu-title menu-title--logo-o' aria-label='Slither World'>
+                  <span>Slither W</span>
+                  <img
+                    src='/images/menu-snake-logo.png'
+                    alt=''
+                    aria-hidden='true'
+                    className='menu-title-o-logo'
+                    loading='lazy'
+                    decoding='async'
+                  />
+                  <span>rld</span>
+                </div>
 
                 <div className='menu-input-row'>
                   <input

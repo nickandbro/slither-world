@@ -296,6 +296,26 @@
     0 14px 24px rgb(7 24 21 / 42%);
 }
 
+.menu-title--logo-o {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.012em;
+}
+
+.menu-title-o-logo {
+  width: 0.68em;
+  height: 0.68em;
+  object-fit: contain;
+  margin: 0 0.012em;
+  transform: translateY(0.055em);
+  filter:
+    drop-shadow(0 3px 6px rgb(13 43 34 / 24%))
+    drop-shadow(0 1px 2px rgb(14 38 57 / 18%));
+  pointer-events: none;
+  user-select: none;
+}
+
 .menu-subtitle {
   color: rgb(227 236 255 / 86%);
   font-size: clamp(0.92rem, 2vw, 1.32rem);
@@ -568,6 +588,12 @@ button:active {
 }
 
 @media (max-width: 480px) {
+  .menu-title-o-logo {
+    width: 0.66em;
+    height: 0.66em;
+    transform: translateY(0.045em);
+  }
+
   .menu-title {
     font-size: 1.64rem;
   }
