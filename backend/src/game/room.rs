@@ -1540,8 +1540,19 @@ impl RoomState {
         required.max(2)
     }
 
-    fn can_player_boost(player: &Player) -> bool {
+    fn can_player_continue_boost(player: &Player) -> bool {
         player.snake.len() > player.boost_floor_len.max(1) || player.tail_extension > 1e-6
+    }
+
+    fn min_boost_start_score(player: &Player) -> i64 {
+        player.boost_floor_len.saturating_add(1).min(i64::MAX as usize) as i64
+    }
+
+    fn can_player_boost(player: &Player) -> bool {
+        if !Self::can_player_continue_boost(player) {
+            return false;
+        }
+        player.is_boosting || player.score >= Self::min_boost_start_score(player)
     }
 
     fn player_score_fraction(player: &Player) -> f64 {
@@ -2323,6 +2334,30 @@ mod tests {
         let capped_radius = RoomState::snake_body_angular_radius_for_scale(SNAKE_GIRTH_MAX_SCALE);
         assert_eq!(RoomState::self_collision_start_index(base_radius), 2);
         assert!(RoomState::self_collision_start_index(capped_radius) >= 3);
+    }
+
+    #[test]
+    fn boost_start_requires_next_whole_score_above_floor() {
+        let mut player = make_player("boost-start-threshold", make_snake(STARTING_LENGTH + 1, 0.0));
+        player.boost_floor_len = STARTING_LENGTH;
+        player.score = STARTING_LENGTH as i64;
+        player.pellet_growth_fraction = 0.8;
+        assert!(!RoomState::can_player_boost(&player));
+
+        player.score = STARTING_LENGTH as i64 + 1;
+        assert!(RoomState::can_player_boost(&player));
+    }
+
+    #[test]
+    fn active_boost_can_continue_below_start_threshold_until_floor() {
+        let mut player = make_player("boost-continue-threshold", make_snake(STARTING_LENGTH + 1, 0.0));
+        player.boost_floor_len = STARTING_LENGTH;
+        player.score = STARTING_LENGTH as i64;
+        player.is_boosting = true;
+        assert!(RoomState::can_player_boost(&player));
+
+        player.is_boosting = false;
+        assert!(!RoomState::can_player_boost(&player));
     }
 
     fn insert_session_with_view(

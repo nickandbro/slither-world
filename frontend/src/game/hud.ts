@@ -15,6 +15,7 @@ export type ScoreRadialHudConfig = {
   active: boolean
   score: number | null
   intervalPct: number | null
+  blocked: boolean
   opacity: number
   anchor: { x: number; y: number } | null
 }
@@ -85,10 +86,83 @@ function drawScoreRadial(
   config: RenderConfig,
   score: number,
   intervalPct: number,
+  blocked: boolean,
   opacity: number,
   anchor: { x: number; y: number },
   stackLevel: number,
 ) {
+  const interpolateColor = (
+    from: readonly [number, number, number],
+    to: readonly [number, number, number],
+    t: number,
+  ) => {
+    const blend = Math.max(0, Math.min(1, t))
+    return [
+      Math.round(from[0] + (to[0] - from[0]) * blend),
+      Math.round(from[1] + (to[1] - from[1]) * blend),
+      Math.round(from[2] + (to[2] - from[2]) * blend),
+    ] as const
+  }
+  const radialColor = (pct: number) => {
+    const green: readonly [number, number, number] = [34, 197, 94]
+    const yellow: readonly [number, number, number] = [250, 204, 21]
+    const red: readonly [number, number, number] = [239, 68, 68]
+    const ratio = Math.max(0, Math.min(1, pct / 100))
+    const rgb =
+      ratio >= 0.5
+        ? interpolateColor(yellow, green, (ratio - 0.5) * 2)
+        : interpolateColor(red, yellow, ratio * 2)
+    return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0.98)`
+  }
+  const drawBlockedOverlay = (
+    centerX: number,
+    centerY: number,
+    drawRadius: number,
+    strokeWidth: number,
+  ) => {
+    const ringRadius = Math.max(1, drawRadius - strokeWidth * 0.08)
+    const slashRadius = Math.max(1, ringRadius - strokeWidth * 0.7)
+    const slashDx = Math.cos(Math.PI * 0.25) * slashRadius
+    const slashDy = Math.sin(Math.PI * 0.25) * slashRadius
+    const edgeWidth = Math.max(2, strokeWidth + 1.6)
+    const coreWidth = Math.max(1, strokeWidth - 0.4)
+
+    ctx.beginPath()
+    ctx.arc(centerX, centerY, Math.max(1, ringRadius - strokeWidth * 0.72), 0, Math.PI * 2)
+    ctx.fillStyle = 'rgba(239, 68, 68, 0.16)'
+    ctx.fill()
+
+    ctx.beginPath()
+    ctx.arc(centerX, centerY, ringRadius, 0, Math.PI * 2)
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)'
+    ctx.lineWidth = edgeWidth
+    ctx.lineCap = 'round'
+    ctx.stroke()
+
+    ctx.beginPath()
+    ctx.arc(centerX, centerY, ringRadius, 0, Math.PI * 2)
+    ctx.strokeStyle = 'rgba(239, 68, 68, 0.8)'
+    ctx.lineWidth = coreWidth
+    ctx.lineCap = 'round'
+    ctx.stroke()
+
+    ctx.beginPath()
+    ctx.moveTo(centerX - slashDx, centerY - slashDy)
+    ctx.lineTo(centerX + slashDx, centerY + slashDy)
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.82)'
+    ctx.lineWidth = edgeWidth
+    ctx.lineCap = 'round'
+    ctx.stroke()
+
+    ctx.beginPath()
+    ctx.moveTo(centerX - slashDx, centerY - slashDy)
+    ctx.lineTo(centerX + slashDx, centerY + slashDy)
+    ctx.strokeStyle = 'rgba(239, 68, 68, 0.8)'
+    ctx.lineWidth = coreWidth
+    ctx.lineCap = 'round'
+    ctx.stroke()
+  }
+
   const clampedInterval = Math.max(0, Math.min(100, intervalPct))
   const radius = Math.max(19, Math.min(28, Math.round(config.width * 0.028)))
   const lineWidth = Math.max(4, Math.min(7, Math.round(radius * 0.24)))
@@ -101,6 +175,7 @@ function drawScoreRadial(
   const innerRadius = Math.max(1, radius - lineWidth - 1)
   const startAngle = -Math.PI * 0.5
   const angleSweep = (Math.PI * 2 * clampedInterval) / 100
+  const activeColor = radialColor(clampedInterval)
 
   ctx.save()
   ctx.globalAlpha = Math.max(0, Math.min(1, opacity))
@@ -112,10 +187,10 @@ function drawScoreRadial(
   ctx.lineCap = 'round'
   ctx.stroke()
 
-  if (clampedInterval > 0) {
+  if (!blocked && clampedInterval > 0) {
     ctx.beginPath()
     ctx.arc(centerX, centerY, radius, startAngle, startAngle + angleSweep, false)
-    ctx.strokeStyle = 'rgba(54, 94, 204, 0.98)'
+    ctx.strokeStyle = activeColor
     ctx.lineWidth = lineWidth
     ctx.lineCap = 'round'
     ctx.stroke()
@@ -123,14 +198,20 @@ function drawScoreRadial(
 
   ctx.beginPath()
   ctx.arc(centerX, centerY, innerRadius, 0, Math.PI * 2)
-  ctx.fillStyle = 'rgba(231, 237, 247, 0.97)'
+  ctx.fillStyle = blocked ? 'rgba(255, 243, 243, 0.93)' : 'rgba(231, 237, 247, 0.97)'
   ctx.fill()
 
-  ctx.fillStyle = 'rgba(54, 94, 204, 0.98)'
-  ctx.textAlign = 'center'
-  ctx.textBaseline = 'middle'
-  ctx.font = `${Math.max(10, Math.min(15, Math.round(radius * 0.62)))}px "Space Mono", monospace`
-  ctx.fillText(String(Math.max(0, Math.floor(score))), centerX, centerY)
+  if (blocked) {
+    drawBlockedOverlay(centerX, centerY, radius, lineWidth)
+  }
+
+  if (!blocked) {
+    ctx.fillStyle = activeColor
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.font = `${Math.max(10, Math.min(15, Math.round(radius * 0.62)))}px "Space Mono", monospace`
+    ctx.fillText(String(Math.max(0, Math.floor(score))), centerX, centerY)
+  }
 
   ctx.restore()
 }
@@ -146,7 +227,7 @@ function drawStatusMeters(
     scoreRadial.active &&
     scoreRadial.opacity > 0.001 &&
     scoreRadial.score !== null &&
-    scoreRadial.intervalPct !== null &&
+    (scoreRadial.blocked || scoreRadial.intervalPct !== null) &&
     !!scoreRadial.anchor &&
     Number.isFinite(scoreRadial.anchor.x) &&
     Number.isFinite(scoreRadial.anchor.y)
@@ -168,13 +249,14 @@ function drawStatusMeters(
     scoreActive &&
     scoreRadial.anchor &&
     scoreRadial.score !== null &&
-    scoreRadial.intervalPct !== null
+    (scoreRadial.blocked || scoreRadial.intervalPct !== null)
   ) {
     drawScoreRadial(
       ctx,
       config,
       scoreRadial.score,
-      scoreRadial.intervalPct,
+      scoreRadial.intervalPct ?? 0,
+      scoreRadial.blocked,
       scoreRadial.opacity,
       scoreRadial.anchor,
       oxygenActive ? 1 : 0,

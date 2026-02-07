@@ -104,15 +104,8 @@ const BOOST_EFFECT_PULSE_SPEED = 8.5
 const BOOST_EFFECT_ACTIVE_CLASS_THRESHOLD = 0.01
 const SCORE_RADIAL_FADE_IN_RATE = 10
 const SCORE_RADIAL_FADE_OUT_RATE = 8
-const SCORE_RADIAL_INTERVAL_SMOOTH_RATE = 18
-const SCORE_RADIAL_INTERVAL_BURST_RATE = 32
-const SCORE_RADIAL_INTERVAL_MAX_SPEED = 2.4
-const SCORE_RADIAL_INTERVAL_BURST_MAX_SPEED = 4
-const SCORE_RADIAL_INTERVAL_BURST_THRESHOLD = 0.16
-const SCORE_RADIAL_INTERVAL_BURST_DURATION_MS = 260
-const SCORE_RADIAL_TREND_EPSILON = 1e-4
-const SCORE_RADIAL_SEAM_SOFTEN_SHIFT = 0.012
-const SCORE_RADIAL_SEAM_SOFTEN_BAND = 0.08
+const SCORE_RADIAL_INTERVAL_SMOOTH_RATE = 14
+const SCORE_RADIAL_MIN_CAP_RESERVE = 1e-6
 const MENU_CAMERA_DISTANCE = 7
 const MENU_CAMERA_VERTICAL_OFFSET = 2.5
 const MENU_TO_GAMEPLAY_BLEND_MS = 900
@@ -145,25 +138,6 @@ const computeViewRadius = (cameraDistance: number, aspect: number) => {
   return clamp(base + VIEW_RADIUS_EXTRA_MARGIN, 0.2, 1.4)
 }
 
-const normalizeInterval01 = (value: number) => {
-  if (!Number.isFinite(value)) return 0
-  const wrapped = value - Math.floor(value)
-  return wrapped < 0 ? wrapped + 1 : wrapped
-}
-
-const softenIntervalSeam = (value: number) => {
-  const interval = clamp(value, 0, 1)
-  if (interval <= SCORE_RADIAL_SEAM_SOFTEN_BAND) {
-    const t = interval / SCORE_RADIAL_SEAM_SOFTEN_BAND
-    return clamp(interval + (1 - t) * SCORE_RADIAL_SEAM_SOFTEN_SHIFT, 0, 1)
-  }
-  if (interval >= 1 - SCORE_RADIAL_SEAM_SOFTEN_BAND) {
-    const t = (1 - interval) / SCORE_RADIAL_SEAM_SOFTEN_BAND
-    return clamp(interval - (1 - t) * SCORE_RADIAL_SEAM_SOFTEN_SHIFT, 0, 1)
-  }
-  return interval
-}
-
 type BoostFxState = {
   intensity: number
   pulse: number
@@ -173,9 +147,11 @@ type BoostFxState = {
 
 type ScoreRadialVisualState = {
   lastBoosting: boolean
-  displayIntervalPhase: number | null
-  lastRawReserve: number | null
-  burstBoostUntilMs: number
+  lastAlive: boolean
+  capReserve: number | null
+  spawnReserve: number | null
+  spawnScore: number | null
+  displayInterval01: number | null
   lastIntervalPct: number
   lastDisplayScore: number
   opacity: number
@@ -302,9 +278,11 @@ export default function App() {
   })
   const scoreRadialStateRef = useRef<ScoreRadialVisualState>({
     lastBoosting: false,
-    displayIntervalPhase: null,
-    lastRawReserve: null,
-    burstBoostUntilMs: 0,
+    lastAlive: false,
+    capReserve: null,
+    spawnReserve: null,
+    spawnScore: null,
+    displayInterval01: null,
     lastIntervalPct: 100,
     lastDisplayScore: 0,
     opacity: 0,
@@ -673,12 +651,95 @@ export default function App() {
               const scoreRadialState = scoreRadialStateRef.current
               const scoreRadialActive =
                 !!localSnapshotPlayer && localSnapshotPlayer.alive && localSnapshotPlayer.isBoosting
-              const scoreRadialTargetOpacity = scoreRadialActive ? 1 : 0
               const scoreRadialDeltaSeconds =
                 scoreRadialState.lastFrameMs > 0
                   ? Math.min(0.1, Math.max(0, (nowMs - scoreRadialState.lastFrameMs) / 1000))
                   : 0
               scoreRadialState.lastFrameMs = nowMs
+              let scoreIntervalPct: number | null = null
+              let scoreDisplay: number | null = null
+              let scoreRadialBlocked = false
+              if (localSnapshotPlayer) {
+                const scoreFraction = clamp(localSnapshotPlayer.scoreFraction, 0, 0.999_999)
+                const currentReserve = Math.max(0, localSnapshotPlayer.score + scoreFraction)
+                if (localSnapshotPlayer.alive) {
+                  if (!scoreRadialState.lastAlive || scoreRadialState.spawnReserve === null) {
+                    scoreRadialState.spawnReserve = currentReserve
+                    scoreRadialState.spawnScore = Math.max(0, Math.floor(localSnapshotPlayer.score))
+                  }
+                } else {
+                  scoreRadialState.spawnReserve = null
+                  scoreRadialState.spawnScore = null
+                }
+                const spawnScore = Math.max(
+                  0,
+                  Math.floor(scoreRadialState.spawnScore ?? localSnapshotPlayer.score),
+                )
+                const minBoostStartScore = spawnScore + 1
+                const scoreBlockedByThreshold =
+                  localSnapshotPlayer.alive &&
+                  !localSnapshotPlayer.isBoosting &&
+                  localSnapshotPlayer.score < minBoostStartScore
+                const attemptingBoost = pointerRef.current.boost
+                if (scoreRadialActive) {
+                  if (!scoreRadialState.lastBoosting || scoreRadialState.capReserve === null) {
+                    scoreRadialState.capReserve = Math.max(
+                      currentReserve,
+                      SCORE_RADIAL_MIN_CAP_RESERVE,
+                    )
+                  } else if (currentReserve > scoreRadialState.capReserve) {
+                    scoreRadialState.capReserve = currentReserve
+                  }
+                  const capReserve = Math.max(
+                    scoreRadialState.capReserve ?? SCORE_RADIAL_MIN_CAP_RESERVE,
+                    SCORE_RADIAL_MIN_CAP_RESERVE,
+                  )
+                  const spawnReserve = clamp(scoreRadialState.spawnReserve ?? currentReserve, 0, capReserve)
+                  const spendableReserve = Math.max(
+                    capReserve - spawnReserve,
+                    SCORE_RADIAL_MIN_CAP_RESERVE,
+                  )
+                  const spendableCurrent = Math.max(0, currentReserve - spawnReserve)
+                  const targetInterval01 = clamp(spendableCurrent / spendableReserve, 0, 1)
+                  if (!scoreRadialState.lastBoosting || scoreRadialState.displayInterval01 === null) {
+                    scoreRadialState.displayInterval01 = targetInterval01
+                  } else {
+                    const smoothAlpha =
+                      1 - Math.exp(-SCORE_RADIAL_INTERVAL_SMOOTH_RATE * scoreRadialDeltaSeconds)
+                    scoreRadialState.displayInterval01 +=
+                      (targetInterval01 - scoreRadialState.displayInterval01) * smoothAlpha
+                  }
+                  const interval01 = clamp(
+                    scoreRadialState.displayInterval01 ?? targetInterval01,
+                    0,
+                    1,
+                  )
+                  scoreIntervalPct = interval01 * 100
+                  scoreDisplay = localSnapshotPlayer.score
+                  scoreRadialState.lastIntervalPct = scoreIntervalPct
+                  scoreRadialState.lastDisplayScore = scoreDisplay
+                } else {
+                  scoreRadialState.capReserve = null
+                  scoreRadialState.displayInterval01 = null
+                  scoreIntervalPct = scoreRadialState.lastIntervalPct
+                  scoreDisplay = localSnapshotPlayer.score
+                  scoreRadialState.lastDisplayScore = scoreDisplay
+                  scoreRadialBlocked = scoreBlockedByThreshold && attemptingBoost
+                }
+                scoreRadialState.lastBoosting = scoreRadialActive
+                scoreRadialState.lastAlive = localSnapshotPlayer.alive
+              } else {
+                scoreRadialState.capReserve = null
+                scoreRadialState.spawnReserve = null
+                scoreRadialState.spawnScore = null
+                scoreRadialState.displayInterval01 = null
+                scoreIntervalPct = scoreRadialState.lastIntervalPct
+                scoreDisplay = scoreRadialState.lastDisplayScore
+                scoreRadialState.lastBoosting = false
+                scoreRadialState.lastAlive = false
+              }
+              const scoreRadialVisible = scoreRadialActive || scoreRadialBlocked
+              const scoreRadialTargetOpacity = scoreRadialVisible ? 1 : 0
               const scoreRadialRate =
                 scoreRadialTargetOpacity >= scoreRadialState.opacity
                   ? SCORE_RADIAL_FADE_IN_RATE
@@ -688,90 +749,6 @@ export default function App() {
                 (scoreRadialTargetOpacity - scoreRadialState.opacity) * scoreRadialAlpha
               if (Math.abs(scoreRadialTargetOpacity - scoreRadialState.opacity) < 1e-4) {
                 scoreRadialState.opacity = scoreRadialTargetOpacity
-              }
-              let scoreIntervalPct: number | null = null
-              let scoreDisplay: number | null = null
-              if (localSnapshotPlayer) {
-                if (scoreRadialActive) {
-                  const scoreFraction = clamp(localSnapshotPlayer.scoreFraction, 0, 0.999_999)
-                  const rawReserve = Math.max(0, localSnapshotPlayer.score + scoreFraction)
-                  const targetInterval01 = normalizeInterval01(rawReserve)
-                  if (
-                    scoreRadialState.displayIntervalPhase === null ||
-                    !scoreRadialState.lastBoosting
-                  ) {
-                    scoreRadialState.displayIntervalPhase = targetInterval01
-                    scoreRadialState.lastRawReserve = rawReserve
-                    scoreRadialState.burstBoostUntilMs = 0
-                  } else {
-                    const reserveTrend =
-                      rawReserve - (scoreRadialState.lastRawReserve ?? rawReserve)
-                    if (reserveTrend >= SCORE_RADIAL_INTERVAL_BURST_THRESHOLD) {
-                      scoreRadialState.burstBoostUntilMs =
-                        nowMs + SCORE_RADIAL_INTERVAL_BURST_DURATION_MS
-                    }
-                    const burstActive =
-                      reserveTrend > SCORE_RADIAL_TREND_EPSILON &&
-                      nowMs < scoreRadialState.burstBoostUntilMs
-                    let targetIntervalPhase =
-                      targetInterval01 +
-                      Math.round(scoreRadialState.displayIntervalPhase - targetInterval01)
-                    if (
-                      reserveTrend > SCORE_RADIAL_TREND_EPSILON &&
-                      targetIntervalPhase <
-                        scoreRadialState.displayIntervalPhase - SCORE_RADIAL_TREND_EPSILON
-                    ) {
-                      targetIntervalPhase += 1
-                    } else if (
-                      reserveTrend < -SCORE_RADIAL_TREND_EPSILON &&
-                      targetIntervalPhase >
-                        scoreRadialState.displayIntervalPhase + SCORE_RADIAL_TREND_EPSILON
-                    ) {
-                      targetIntervalPhase -= 1
-                    }
-                    const intervalDelta =
-                      targetIntervalPhase - scoreRadialState.displayIntervalPhase
-                    if (Math.abs(intervalDelta) > 1e-6) {
-                      const smoothRate = burstActive
-                        ? SCORE_RADIAL_INTERVAL_BURST_RATE
-                        : SCORE_RADIAL_INTERVAL_SMOOTH_RATE
-                      const smoothAlpha = 1 - Math.exp(-smoothRate * scoreRadialDeltaSeconds)
-                      let smoothStep = intervalDelta * smoothAlpha
-                      const maxStep =
-                        (burstActive
-                          ? SCORE_RADIAL_INTERVAL_BURST_MAX_SPEED
-                          : SCORE_RADIAL_INTERVAL_MAX_SPEED) * scoreRadialDeltaSeconds
-                      if (maxStep > 0 && Math.abs(smoothStep) > maxStep) {
-                        smoothStep = Math.sign(smoothStep) * maxStep
-                      }
-                      scoreRadialState.displayIntervalPhase += smoothStep
-                    }
-                    scoreRadialState.lastRawReserve = rawReserve
-                  }
-                  const displayIntervalPhase =
-                    scoreRadialState.displayIntervalPhase ?? targetInterval01
-                  const renderedInterval01 = softenIntervalSeam(
-                    normalizeInterval01(displayIntervalPhase),
-                  )
-                  scoreIntervalPct = clamp(renderedInterval01 * 100, 0, 99.999)
-                  scoreDisplay = localSnapshotPlayer.score
-                  scoreRadialState.lastIntervalPct = scoreIntervalPct
-                  scoreRadialState.lastDisplayScore = scoreDisplay
-                } else {
-                  scoreRadialState.displayIntervalPhase = null
-                  scoreRadialState.lastRawReserve = null
-                  scoreRadialState.burstBoostUntilMs = 0
-                  scoreIntervalPct = scoreRadialState.lastIntervalPct
-                  scoreDisplay = scoreRadialState.lastDisplayScore
-                }
-                scoreRadialState.lastBoosting = scoreRadialActive
-              } else {
-                scoreRadialState.displayIntervalPhase = null
-                scoreRadialState.lastRawReserve = null
-                scoreRadialState.burstBoostUntilMs = 0
-                scoreIntervalPct = scoreRadialState.lastIntervalPct
-                scoreDisplay = scoreRadialState.lastDisplayScore
-                scoreRadialState.lastBoosting = false
               }
               drawHud(
                 hudCtx,
@@ -789,6 +766,7 @@ export default function App() {
                   active: scoreRadialState.opacity > 0.001,
                   score: scoreDisplay,
                   intervalPct: scoreIntervalPct,
+                  blocked: scoreRadialBlocked,
                   opacity: scoreRadialState.opacity,
                   anchor: headScreen,
                 },
@@ -862,9 +840,11 @@ export default function App() {
       tickIntervalRef.current = 50
       playerMetaRef.current = new Map()
       scoreRadialStateRef.current.lastBoosting = false
-      scoreRadialStateRef.current.displayIntervalPhase = null
-      scoreRadialStateRef.current.lastRawReserve = null
-      scoreRadialStateRef.current.burstBoostUntilMs = 0
+      scoreRadialStateRef.current.lastAlive = false
+      scoreRadialStateRef.current.capReserve = null
+      scoreRadialStateRef.current.spawnReserve = null
+      scoreRadialStateRef.current.spawnScore = null
+      scoreRadialStateRef.current.displayInterval01 = null
       scoreRadialStateRef.current.lastIntervalPct = 100
       scoreRadialStateRef.current.lastDisplayScore = 0
       scoreRadialStateRef.current.opacity = 0
