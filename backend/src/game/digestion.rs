@@ -1,7 +1,17 @@
-use super::constants::{DIGESTION_TAIL_SETTLE_STEPS, DIGESTION_TRAVEL_SPEED_MULT, NODE_QUEUE_SIZE};
+use super::constants::{
+    DIGESTION_TAIL_SETTLE_STEPS, DIGESTION_TRAVEL_SPEED_MULT, MIN_SURVIVAL_LENGTH, NODE_QUEUE_SIZE,
+};
 use super::math::clamp;
-use super::snake::add_snake_node;
+use super::snake::{add_snake_node, remove_snake_tail_node};
 use super::types::{Digestion, Player};
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BoostDrainConfig {
+    pub active: bool,
+    pub min_length: usize,
+    pub score_per_step: f64,
+    pub node_per_step: f64,
+}
 
 pub fn add_digestion(player: &mut Player) {
     add_digestion_with_strength(player, 1.0, 1.0);
@@ -32,7 +42,50 @@ pub fn add_digestion_with_strength(player: &mut Player, strength: f32, growth_am
 }
 
 pub fn advance_digestions(player: &mut Player, steps: i32) {
+    let _ = advance_digestions_with_boost(player, steps, BoostDrainConfig::default());
+}
+
+fn can_continue_boost(player: &Player, min_length: usize) -> bool {
+    player.snake.len() > min_length.max(1) || player.tail_extension > 1e-6
+}
+
+fn apply_score_drain(player: &mut Player, score_drain: f64) {
+    let drain = score_drain.max(0.0);
+    if drain <= 0.0 {
+        return;
+    }
+
+    player.pellet_growth_fraction -= drain;
+    while player.pellet_growth_fraction < 0.0 && player.score > 0 {
+        player.score -= 1;
+        player.pellet_growth_fraction += 1.0;
+    }
+    if player.score <= 0 && player.pellet_growth_fraction < 0.0 {
+        player.score = 0;
+        player.pellet_growth_fraction = 0.0;
+    }
+    if player.pellet_growth_fraction >= 1.0 {
+        let whole_score = player.pellet_growth_fraction.floor() as i64;
+        if whole_score > 0 {
+            player.score += whole_score;
+            player.pellet_growth_fraction -= whole_score as f64;
+        }
+    }
+    player.pellet_growth_fraction = clamp(player.pellet_growth_fraction, 0.0, 0.999_999);
+}
+
+pub fn advance_digestions_with_boost(
+    player: &mut Player,
+    steps: i32,
+    boost_drain: BoostDrainConfig,
+) -> bool {
     let step_count = steps.max(1) as i32;
+    let min_length = if boost_drain.min_length > 0 {
+        boost_drain.min_length
+    } else {
+        MIN_SURVIVAL_LENGTH
+    };
+    let mut boost_active = boost_drain.active && can_continue_boost(player, min_length);
 
     for _ in 0..step_count {
         let mut i = 0;
@@ -54,14 +107,32 @@ pub fn advance_digestions(player: &mut Player, steps: i32) {
             i += 1;
         }
 
+        if boost_active {
+            apply_score_drain(player, boost_drain.score_per_step);
+            let node_drain = clamp(boost_drain.node_per_step, 0.0, 0.999_999);
+            if node_drain > 0.0 {
+                player.tail_extension -= node_drain;
+            }
+        }
+
         if player.tail_extension >= 1.0 {
             add_snake_node(&mut player.snake, player.axis);
             player.tail_extension -= 1.0;
         }
         if player.tail_extension < 0.0 {
-            player.tail_extension = 0.0;
+            if remove_snake_tail_node(&mut player.snake, min_length) {
+                player.tail_extension += 1.0;
+            } else {
+                player.tail_extension = 0.0;
+                boost_active = false;
+            }
+        }
+        if boost_active && !can_continue_boost(player, min_length) {
+            boost_active = false;
         }
     }
+
+    boost_active
 }
 
 pub fn get_digestion_progress(digestion: &Digestion) -> f64 {
@@ -120,7 +191,6 @@ mod tests {
             },
             boost: false,
             is_boosting: false,
-            stamina: 1.0,
             oxygen: 1.0,
             oxygen_damage_accumulator: 0.0,
             score: 0,
@@ -128,6 +198,7 @@ mod tests {
             connected: true,
             last_seen: 0,
             respawn_at: None,
+            boost_floor_len: 4,
             snake: make_snake(4),
             pellet_growth_fraction: 0.0,
             tail_extension: 0.0,
@@ -295,5 +366,53 @@ mod tests {
         let finished_progress = get_digestion_progress(&finished);
         assert!((at_tail_progress - 1.0).abs() < 1e-6);
         assert!((finished_progress - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn boost_drain_ticks_score_interval_and_tail_extension_together() {
+        let mut player = make_player();
+        player.score = 2;
+        player.pellet_growth_fraction = 0.2;
+        player.tail_extension = 0.6;
+
+        let boost_active = advance_digestions_with_boost(
+            &mut player,
+            1,
+            BoostDrainConfig {
+                active: true,
+            score_per_step: 0.35,
+            node_per_step: 0.35,
+            min_length: MIN_SURVIVAL_LENGTH,
+        },
+        );
+
+        assert!(boost_active);
+        assert_eq!(player.score, 1);
+        assert!((player.pellet_growth_fraction - 0.85).abs() < 1e-6);
+        assert!((player.tail_extension - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn boost_drain_auto_stops_at_min_length_floor() {
+        let mut player = make_player();
+        player.snake = make_snake(MIN_SURVIVAL_LENGTH);
+        player.tail_extension = 0.02;
+
+        let boost_active = advance_digestions_with_boost(
+            &mut player,
+            2,
+            BoostDrainConfig {
+                active: true,
+            score_per_step: 1.0,
+            node_per_step: 0.05,
+            min_length: MIN_SURVIVAL_LENGTH,
+        },
+        );
+
+        assert!(!boost_active);
+        assert_eq!(player.snake.len(), MIN_SURVIVAL_LENGTH);
+        assert!(player.tail_extension.abs() < 1e-6);
+        assert_eq!(player.score, 0);
+        assert!(player.pellet_growth_fraction.abs() < 1e-6);
     }
 }

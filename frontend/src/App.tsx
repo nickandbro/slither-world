@@ -98,11 +98,12 @@ const POINTER_MAX_RANGE_RATIO = 0.25
 const CAMERA_FOV_DEGREES = 40
 const PLANET_RADIUS = 3
 const VIEW_RADIUS_EXTRA_MARGIN = 0.08
-const BOOST_EFFECT_STAMINA_EPS = 0.02
 const BOOST_EFFECT_FADE_IN_RATE = 9
 const BOOST_EFFECT_FADE_OUT_RATE = 12
 const BOOST_EFFECT_PULSE_SPEED = 8.5
 const BOOST_EFFECT_ACTIVE_CLASS_THRESHOLD = 0.01
+const SCORE_RADIAL_FADE_IN_RATE = 10
+const SCORE_RADIAL_FADE_OUT_RATE = 8
 const MENU_CAMERA_DISTANCE = 7
 const MENU_CAMERA_VERTICAL_OFFSET = 2.5
 const MENU_TO_GAMEPLAY_BLEND_MS = 900
@@ -140,6 +141,16 @@ type BoostFxState = {
   pulse: number
   lastFrameMs: number
   activeClassApplied: boolean
+}
+
+type ScoreRadialVisualState = {
+  lastScore: number | null
+  lastBoosting: boolean
+  forceFullFrames: number
+  lastIntervalPct: number
+  lastDisplayScore: number
+  opacity: number
+  lastFrameMs: number
 }
 
 type MenuPhase = 'preplay' | 'spawning' | 'playing'
@@ -259,6 +270,15 @@ export default function App() {
     pulse: 0,
     lastFrameMs: 0,
     activeClassApplied: false,
+  })
+  const scoreRadialStateRef = useRef<ScoreRadialVisualState>({
+    lastScore: null,
+    lastBoosting: false,
+    forceFullFrames: 0,
+    lastIntervalPct: 100,
+    lastDisplayScore: 0,
+    opacity: 0,
+    lastFrameMs: 0,
   })
 
   const [gameState, setGameState] = useState<GameStateSnapshot | null>(null)
@@ -603,10 +623,9 @@ export default function App() {
             localHeadRef.current = hasSpawnedSnake && localHead ? normalize(localHead) : MENU_CAMERA_TARGET
             boostActive =
               inputEnabledRef.current &&
-              pointerRef.current.boost &&
               !!localSnapshotPlayer &&
               localSnapshotPlayer.alive &&
-              localSnapshotPlayer.stamina > BOOST_EFFECT_STAMINA_EPS
+              localSnapshotPlayer.isBoosting
 
             const headScreen = webgl.render(
               snapshot,
@@ -621,9 +640,58 @@ export default function App() {
               const oxygenPct = localSnapshotPlayer
                 ? clamp(localSnapshotPlayer.oxygen, 0, 1) * 100
                 : null
-              const staminaPct = localSnapshotPlayer
-                ? clamp(localSnapshotPlayer.stamina, 0, 1) * 100
-                : null
+              const scoreRadialState = scoreRadialStateRef.current
+              const scoreRadialActive =
+                !!localSnapshotPlayer && localSnapshotPlayer.alive && localSnapshotPlayer.isBoosting
+              const scoreRadialTargetOpacity = scoreRadialActive ? 1 : 0
+              const scoreRadialDeltaSeconds =
+                scoreRadialState.lastFrameMs > 0
+                  ? Math.min(0.1, Math.max(0, (nowMs - scoreRadialState.lastFrameMs) / 1000))
+                  : 0
+              scoreRadialState.lastFrameMs = nowMs
+              const scoreRadialRate =
+                scoreRadialTargetOpacity >= scoreRadialState.opacity
+                  ? SCORE_RADIAL_FADE_IN_RATE
+                  : SCORE_RADIAL_FADE_OUT_RATE
+              const scoreRadialAlpha = 1 - Math.exp(-scoreRadialRate * scoreRadialDeltaSeconds)
+              scoreRadialState.opacity +=
+                (scoreRadialTargetOpacity - scoreRadialState.opacity) * scoreRadialAlpha
+              if (Math.abs(scoreRadialTargetOpacity - scoreRadialState.opacity) < 1e-4) {
+                scoreRadialState.opacity = scoreRadialTargetOpacity
+              }
+              let scoreIntervalPct: number | null = null
+              let scoreDisplay: number | null = null
+              if (localSnapshotPlayer) {
+                if (scoreRadialActive) {
+                  const intervalPct = clamp(localSnapshotPlayer.scoreFraction, 0, 0.999_999) * 100
+                  if (
+                    !scoreRadialState.lastBoosting ||
+                    (scoreRadialState.lastScore !== null &&
+                      localSnapshotPlayer.score < scoreRadialState.lastScore)
+                  ) {
+                    scoreRadialState.forceFullFrames = 1
+                  }
+                  scoreIntervalPct = scoreRadialState.forceFullFrames > 0 ? 100 : intervalPct
+                  if (scoreRadialState.forceFullFrames > 0) {
+                    scoreRadialState.forceFullFrames -= 1
+                  }
+                  scoreDisplay = localSnapshotPlayer.score
+                  scoreRadialState.lastIntervalPct = scoreIntervalPct
+                  scoreRadialState.lastDisplayScore = scoreDisplay
+                } else {
+                  scoreRadialState.forceFullFrames = 0
+                  scoreIntervalPct = scoreRadialState.lastIntervalPct
+                  scoreDisplay = scoreRadialState.lastDisplayScore
+                }
+                scoreRadialState.lastScore = localSnapshotPlayer.score
+                scoreRadialState.lastBoosting = scoreRadialActive
+              } else {
+                scoreIntervalPct = scoreRadialState.lastIntervalPct
+                scoreDisplay = scoreRadialState.lastDisplayScore
+                scoreRadialState.lastScore = null
+                scoreRadialState.lastBoosting = false
+                scoreRadialState.forceFullFrames = 0
+              }
               drawHud(
                 hudCtx,
                 config,
@@ -637,7 +705,10 @@ export default function App() {
                   anchor: headScreen,
                 },
                 {
-                  pct: staminaPct,
+                  active: scoreRadialState.opacity > 0.001,
+                  score: scoreDisplay,
+                  intervalPct: scoreIntervalPct,
+                  opacity: scoreRadialState.opacity,
                   anchor: headScreen,
                 },
               )
@@ -709,6 +780,13 @@ export default function App() {
       lastSnapshotTimeRef.current = null
       tickIntervalRef.current = 50
       playerMetaRef.current = new Map()
+      scoreRadialStateRef.current.lastScore = null
+      scoreRadialStateRef.current.lastBoosting = false
+      scoreRadialStateRef.current.forceFullFrames = 0
+      scoreRadialStateRef.current.lastIntervalPct = 100
+      scoreRadialStateRef.current.lastDisplayScore = 0
+      scoreRadialStateRef.current.opacity = 0
+      scoreRadialStateRef.current.lastFrameMs = 0
       localHeadRef.current = MENU_CAMERA_TARGET
       renderCameraDistanceRef.current = MENU_CAMERA_DISTANCE
       renderCameraVerticalOffsetRef.current = MENU_CAMERA_VERTICAL_OFFSET

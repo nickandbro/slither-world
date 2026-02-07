@@ -131,6 +131,14 @@ pub fn add_snake_node(snake: &mut Vec<SnakeNode>, axis: Point) {
   snake.push(snake_node);
 }
 
+pub fn remove_snake_tail_node(snake: &mut Vec<SnakeNode>, min_length: usize) -> bool {
+  if snake.len() <= min_length {
+    return false;
+  }
+  snake.pop();
+  true
+}
+
 pub fn apply_snake_rotation_step(snake: &mut [SnakeNode], axis: Point, velocity: f64) {
   let mut next_position: Option<Point> = None;
 

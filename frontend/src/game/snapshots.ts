@@ -100,6 +100,23 @@ function canBlendSnakeWindow(a: PlayerSnapshot, b: PlayerSnapshot) {
   return true
 }
 
+function blendScoreFraction(a: PlayerSnapshot, b: PlayerSnapshot, t: number) {
+  const fracA = clamp(a.scoreFraction, 0, 0.999_999)
+  const fracB = clamp(b.scoreFraction, 0, 0.999_999)
+  const scoreDelta = b.score - a.score
+
+  if (scoreDelta === -1 && fracB > fracA) {
+    const blended = lerp(fracA, fracB - 1, t)
+    return blended < 0 ? blended + 1 : blended
+  }
+  if (scoreDelta === 1 && fracB < fracA) {
+    const blended = lerp(fracA, fracB + 1, t)
+    return blended >= 1 ? blended - 1 : blended
+  }
+
+  return clamp(lerp(fracA, fracB, t), 0, 0.999_999)
+}
+
 function blendPlayers(a: PlayerSnapshot, b: PlayerSnapshot, t: number): PlayerSnapshot {
   if (a.alive !== b.alive) {
     return b
@@ -132,7 +149,7 @@ function blendPlayers(a: PlayerSnapshot, b: PlayerSnapshot, t: number): PlayerSn
     name: b.name,
     color: b.color,
     score: b.score,
-    stamina: lerp(a.stamina, b.stamina, t),
+    scoreFraction: blendScoreFraction(a, b, t),
     oxygen: lerp(a.oxygen, b.oxygen, t),
     isBoosting: b.isBoosting,
     girthScale: lerp(a.girthScale, b.girthScale, t),

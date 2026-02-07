@@ -24,7 +24,7 @@ export type PlayerSnapshot = {
   name: string
   color: string
   score: number
-  stamina: number
+  scoreFraction: number
   oxygen: number
   isBoosting: boolean
   girthScale: number

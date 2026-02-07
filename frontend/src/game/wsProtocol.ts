@@ -12,7 +12,7 @@ export type PlayerMeta = {
   color: string
 }
 
-const VERSION = 10
+const VERSION = 11
 
 const TYPE_JOIN = 0x01
 const TYPE_INPUT = 0x02
@@ -235,7 +235,7 @@ function readPlayerStates(reader: Reader, meta: Map<string, PlayerMeta>): Player
     const id = reader.readUuid()
     const aliveRaw = reader.readU8()
     const score = reader.readI32()
-    const stamina = reader.readF32()
+    const scoreFraction = reader.readF32()
     const oxygen = reader.readF32()
     const isBoostingRaw = reader.readU8()
     const girthScale = reader.readF32()
@@ -246,7 +246,7 @@ function readPlayerStates(reader: Reader, meta: Map<string, PlayerMeta>): Player
       id === null ||
       aliveRaw === null ||
       score === null ||
-      stamina === null ||
+      scoreFraction === null ||
       oxygen === null ||
       isBoostingRaw === null ||
       girthScale === null ||
@@ -305,7 +305,7 @@ function readPlayerStates(reader: Reader, meta: Map<string, PlayerMeta>): Player
       name: metaEntry?.name ?? 'Player',
       color: metaEntry?.color ?? '#ffffff',
       score,
-      stamina,
+      scoreFraction,
       oxygen,
       isBoosting: isBoostingRaw === 1,
       girthScale,

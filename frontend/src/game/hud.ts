@@ -11,8 +11,11 @@ export type OxygenHudConfig = {
   anchor: { x: number; y: number } | null
 }
 
-export type StaminaHudConfig = {
-  pct: number | null
+export type ScoreRadialHudConfig = {
+  active: boolean
+  score: number | null
+  intervalPct: number | null
+  opacity: number
   anchor: { x: number; y: number } | null
 }
 
@@ -77,15 +80,85 @@ function drawCompactMeter(
   ctx.restore()
 }
 
+function drawScoreRadial(
+  ctx: CanvasRenderingContext2D,
+  config: RenderConfig,
+  score: number,
+  intervalPct: number,
+  opacity: number,
+  anchor: { x: number; y: number },
+  stackLevel: number,
+) {
+  const clampedInterval = Math.max(0, Math.min(100, intervalPct))
+  const radius = Math.max(19, Math.min(28, Math.round(config.width * 0.028)))
+  const lineWidth = Math.max(4, Math.min(7, Math.round(radius * 0.24)))
+  const margin = 8
+  const yOffset = Math.max(22, radius + 10) + stackLevel * (radius * 2 + 8)
+  let centerX = anchor.x
+  let centerY = anchor.y - yOffset
+  centerX = Math.min(config.width - radius - margin, Math.max(radius + margin, centerX))
+  centerY = Math.min(config.height - radius - margin, Math.max(radius + margin, centerY))
+  const innerRadius = Math.max(1, radius - lineWidth - 1)
+  const startAngle = -Math.PI * 0.5
+  const angleSweep = (Math.PI * 2 * clampedInterval) / 100
+
+  ctx.save()
+  ctx.globalAlpha = Math.max(0, Math.min(1, opacity))
+
+  ctx.beginPath()
+  ctx.arc(centerX, centerY, radius, 0, Math.PI * 2)
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.96)'
+  ctx.lineWidth = lineWidth
+  ctx.lineCap = 'round'
+  ctx.stroke()
+
+  if (clampedInterval >= 99.999) {
+    ctx.beginPath()
+    ctx.arc(centerX, centerY, radius, 0, Math.PI * 2)
+    ctx.strokeStyle = 'rgba(54, 94, 204, 0.98)'
+    ctx.lineWidth = lineWidth
+    ctx.lineCap = 'round'
+    ctx.stroke()
+  } else if (clampedInterval > 0) {
+    ctx.beginPath()
+    ctx.arc(centerX, centerY, radius, startAngle, startAngle - angleSweep, true)
+    ctx.strokeStyle = 'rgba(54, 94, 204, 0.98)'
+    ctx.lineWidth = lineWidth
+    ctx.lineCap = 'round'
+    ctx.stroke()
+  }
+
+  ctx.beginPath()
+  ctx.arc(centerX, centerY, innerRadius, 0, Math.PI * 2)
+  ctx.fillStyle = 'rgba(231, 237, 247, 0.97)'
+  ctx.fill()
+
+  ctx.fillStyle = 'rgba(54, 94, 204, 0.98)'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.font = `${Math.max(10, Math.min(15, Math.round(radius * 0.62)))}px "Space Mono", monospace`
+  ctx.fillText(String(Math.max(0, Math.floor(score))), centerX, centerY)
+
+  ctx.restore()
+}
+
 function drawStatusMeters(
   ctx: CanvasRenderingContext2D,
   config: RenderConfig,
   oxygen: OxygenHudConfig,
-  stamina: StaminaHudConfig,
+  scoreRadial: ScoreRadialHudConfig,
 ) {
   const oxygenActive = isMeterActive(oxygen.pct, oxygen.anchor)
-  const staminaActive = isMeterActive(stamina.pct, stamina.anchor)
-  if (!oxygenActive && !staminaActive) return
+  const scoreActive =
+    scoreRadial.active &&
+    scoreRadial.opacity > 0.001 &&
+    scoreRadial.score !== null &&
+    scoreRadial.intervalPct !== null &&
+    !!scoreRadial.anchor &&
+    Number.isFinite(scoreRadial.anchor.x) &&
+    Number.isFinite(scoreRadial.anchor.y)
+
+  if (!oxygenActive && !scoreActive) return
 
   if (oxygenActive && oxygen.anchor && oxygen.pct !== null) {
     drawCompactMeter(
@@ -98,13 +171,19 @@ function drawStatusMeters(
     )
   }
 
-  if (staminaActive && stamina.anchor && stamina.pct !== null) {
-    drawCompactMeter(
+  if (
+    scoreActive &&
+    scoreRadial.anchor &&
+    scoreRadial.score !== null &&
+    scoreRadial.intervalPct !== null
+  ) {
+    drawScoreRadial(
       ctx,
       config,
-      stamina.pct,
-      stamina.anchor,
-      'rgba(17, 92, 57, 0.98)',
+      scoreRadial.score,
+      scoreRadial.intervalPct,
+      scoreRadial.opacity,
+      scoreRadial.anchor,
       oxygenActive ? 1 : 0,
     )
   }
@@ -118,7 +197,7 @@ export function drawHud(
   pointerDistance: number | null,
   maxRange: number | null,
   oxygen: OxygenHudConfig,
-  stamina: StaminaHudConfig,
+  scoreRadial: ScoreRadialHudConfig,
 ) {
   ctx.clearRect(0, 0, config.width, config.height)
   if (pointerAngle !== null && pointerDistance !== null && maxRange !== null) {
@@ -143,5 +222,5 @@ export function drawHud(
       ctx.fill()
     }
   }
-  drawStatusMeters(ctx, config, oxygen, stamina)
+  drawStatusMeters(ctx, config, oxygen, scoreRadial)
 }

@@ -1,21 +1,24 @@
 use super::constants::{
     BASE_PELLET_COUNT, BASE_SPEED, BIG_PELLET_GROWTH_FRACTION, BOOST_MULTIPLIER,
-    BOT_BOOST_DISTANCE, BOT_COUNT, BOT_MIN_STAMINA_TO_BOOST, COLOR_POOL, DEATH_PELLET_SIZE_MAX,
-    DEATH_PELLET_SIZE_MIN, MAX_PELLETS, MAX_SPAWN_ATTEMPTS, MIN_SURVIVAL_LENGTH, NODE_QUEUE_SIZE,
-    OXYGEN_DRAIN_PER_SEC, OXYGEN_MAX, PELLET_SIZE_ENCODE_MAX, PELLET_SIZE_ENCODE_MIN,
-    PLAYER_TIMEOUT_MS, RESPAWN_COOLDOWN_MS, RESPAWN_RETRY_MS, SMALL_PELLET_ATTRACT_RADIUS,
-    SMALL_PELLET_ATTRACT_SPEED, SMALL_PELLET_ATTRACT_STEP_MAX_RATIO, SMALL_PELLET_CONSUME_ANGLE,
-    SMALL_PELLET_DIGESTION_STRENGTH, SMALL_PELLET_DIGESTION_STRENGTH_MAX,
-    SMALL_PELLET_GROWTH_FRACTION,
+    BOOST_NODE_DRAIN_PER_SEC, BOOST_SCORE_DRAIN_PER_SEC, BOT_BOOST_DISTANCE, BOT_COUNT, COLOR_POOL,
+    DEATH_PELLET_SIZE_MAX, DEATH_PELLET_SIZE_MIN, MAX_PELLETS, MAX_SPAWN_ATTEMPTS,
+    MIN_SURVIVAL_LENGTH, NODE_QUEUE_SIZE, OXYGEN_DRAIN_PER_SEC, OXYGEN_MAX, PELLET_SIZE_ENCODE_MAX,
+    PELLET_SIZE_ENCODE_MIN, PLAYER_TIMEOUT_MS, RESPAWN_COOLDOWN_MS, RESPAWN_RETRY_MS,
+    SMALL_PELLET_ATTRACT_RADIUS, SMALL_PELLET_ATTRACT_SPEED, SMALL_PELLET_ATTRACT_STEP_MAX_RATIO,
+    SMALL_PELLET_CONSUME_ANGLE, SMALL_PELLET_DIGESTION_STRENGTH,
+    SMALL_PELLET_DIGESTION_STRENGTH_MAX, SMALL_PELLET_GROWTH_FRACTION,
     SMALL_PELLET_LOCK_CONE_ANGLE, SMALL_PELLET_MOUTH_FORWARD, SMALL_PELLET_SHRINK_MIN_RATIO,
     SMALL_PELLET_SIZE_MAX, SMALL_PELLET_SIZE_MIN, SMALL_PELLET_SPAWN_HEAD_EXCLUSION_ANGLE,
     SMALL_PELLET_VIEW_MARGIN_MAX, SMALL_PELLET_VIEW_MARGIN_MIN, SMALL_PELLET_VISIBLE_MAX,
     SMALL_PELLET_VISIBLE_MIN, SMALL_PELLET_ZOOM_MAX_CAMERA_DISTANCE,
     SMALL_PELLET_ZOOM_MIN_CAMERA_DISTANCE, SNAKE_GIRTH_MAX_SCALE, SNAKE_GIRTH_NODES_PER_STEP,
-    SNAKE_GIRTH_STEP_PERCENT, SPAWN_CONE_ANGLE, SPAWN_PLAYER_MIN_DISTANCE, STAMINA_DRAIN_PER_SEC,
-    STAMINA_MAX, STAMINA_RECHARGE_PER_SEC, STARTING_LENGTH, TICK_MS, TURN_RATE,
+    SNAKE_GIRTH_STEP_PERCENT, SPAWN_CONE_ANGLE, SPAWN_PLAYER_MIN_DISTANCE, STARTING_LENGTH,
+    TICK_MS, TURN_RATE,
 };
-use super::digestion::{add_digestion_with_strength, advance_digestions, get_digestion_progress};
+use super::digestion::{
+    add_digestion_with_strength, advance_digestions_with_boost, get_digestion_progress,
+    BoostDrainConfig,
+};
 use super::environment::{
     sample_lakes, Environment, LAKE_EXCLUSION_THRESHOLD, LAKE_WATER_MASK_THRESHOLD, PLANET_RADIUS,
     SNAKE_RADIUS, TREE_TRUNK_RADIUS,
@@ -408,12 +411,12 @@ impl RoomState {
     fn prepare_player_for_manual_spawn(player: &mut Player) {
         player.boost = false;
         player.is_boosting = false;
-        player.stamina = STAMINA_MAX;
         player.oxygen = OXYGEN_MAX;
         player.oxygen_damage_accumulator = 0.0;
         player.score = 0;
         player.alive = false;
         player.respawn_at = None;
+        player.boost_floor_len = STARTING_LENGTH;
         player.snake.clear();
         player.pellet_growth_fraction = 0.0;
         player.tail_extension = 0.0;
@@ -786,8 +789,7 @@ impl RoomState {
                     normalize(axis_raw)
                 };
                 player.target_axis = axis;
-                player.boost =
-                    dist > BOT_BOOST_DISTANCE && player.stamina > BOT_MIN_STAMINA_TO_BOOST;
+                player.boost = dist > BOT_BOOST_DISTANCE && Self::can_player_boost(player);
             } else {
                 player.target_axis = random_axis();
                 player.boost = false;
@@ -843,14 +845,14 @@ impl RoomState {
             target_axis: axis,
             boost: false,
             is_boosting: false,
-            stamina: STAMINA_MAX,
             oxygen: OXYGEN_MAX,
             oxygen_damage_accumulator: 0.0,
-            score: 0,
+            score: snake.len() as i64,
             alive,
             connected: true,
             last_seen: Self::now_millis(),
             respawn_at,
+            boost_floor_len: snake.len().max(STARTING_LENGTH),
             snake,
             pellet_growth_fraction: 0.0,
             tail_extension: 0.0,
@@ -1538,6 +1540,14 @@ impl RoomState {
         required.max(2)
     }
 
+    fn can_player_boost(player: &Player) -> bool {
+        player.snake.len() > player.boost_floor_len.max(1) || player.tail_extension > 1e-6
+    }
+
+    fn player_score_fraction(player: &Player) -> f64 {
+        clamp(player.pellet_growth_fraction, 0.0, 0.999_999)
+    }
+
     fn tick(&mut self) {
         let now = Self::now_millis();
         let dt_seconds = TICK_MS as f64 / 1000.0;
@@ -1566,15 +1576,8 @@ impl RoomState {
             }
             player.axis = rotate_toward(player.axis, player.target_axis, TURN_RATE);
             let wants_boost = player.boost;
-            let has_stamina = player.stamina > 0.0;
-            let is_boosting = wants_boost && has_stamina;
+            let is_boosting = wants_boost && Self::can_player_boost(player);
             player.is_boosting = is_boosting;
-            if is_boosting {
-                player.stamina = (player.stamina - STAMINA_DRAIN_PER_SEC * dt_seconds).max(0.0);
-            } else if !wants_boost {
-                player.stamina =
-                    (player.stamina + STAMINA_RECHARGE_PER_SEC * dt_seconds).min(STAMINA_MAX);
-            }
             let speed_factor = if is_boosting { BOOST_MULTIPLIER } else { 1.0 };
             let step_count = (speed_factor.round() as i32).max(1);
             let step_velocity = (BASE_SPEED * speed_factor) / step_count as f64;
@@ -1739,7 +1742,19 @@ impl RoomState {
                 continue;
             }
             let steps = *move_steps.get(&player.id).unwrap_or(&1);
-            advance_digestions(player, steps);
+            let step_count = steps.max(1) as f64;
+            let boost_drain = if player.is_boosting {
+                BoostDrainConfig {
+                    active: true,
+                    min_length: player.boost_floor_len.max(MIN_SURVIVAL_LENGTH),
+                    score_per_step: (BOOST_SCORE_DRAIN_PER_SEC * dt_seconds) / step_count,
+                    node_per_step: (BOOST_NODE_DRAIN_PER_SEC * dt_seconds) / step_count,
+                }
+            } else {
+                BoostDrainConfig::default()
+            };
+            let boost_active_after = advance_digestions_with_boost(player, steps, boost_drain);
+            player.is_boosting = player.boost && boost_active_after;
         }
 
         // Advance existing digestions before applying newly swallowed pellets so new bulges
@@ -1818,15 +1833,15 @@ impl RoomState {
         };
         player.axis = spawned.axis;
         player.target_axis = spawned.axis;
-        player.score = 0;
         player.alive = true;
         player.boost = false;
         player.is_boosting = false;
-        player.stamina = STAMINA_MAX;
         player.oxygen = OXYGEN_MAX;
         player.oxygen_damage_accumulator = 0.0;
         player.respawn_at = None;
         player.snake = spawned.snake;
+        player.score = player.snake.len() as i64;
+        player.boost_floor_len = player.snake.len().max(STARTING_LENGTH);
         player.pellet_growth_fraction = 0.0;
         player.tail_extension = 0.0;
         player.digestions.clear();
@@ -2025,7 +2040,7 @@ impl RoomState {
         encoder.write_uuid(&player.id_bytes);
         encoder.write_u8(if player.alive { 1 } else { 0 });
         encoder.write_i32(player.score as i32);
-        encoder.write_f32(player.stamina as f32);
+        encoder.write_f32(Self::player_score_fraction(player) as f32);
         encoder.write_f32(player.oxygen as f32);
         encoder.write_u8(if player.is_boosting { 1 } else { 0 });
         let girth_scale = Self::player_girth_scale_from_len(player.snake.len());
@@ -2157,7 +2172,6 @@ mod tests {
             },
             boost: false,
             is_boosting: false,
-            stamina: STAMINA_MAX,
             oxygen: OXYGEN_MAX,
             oxygen_damage_accumulator: 0.0,
             score: 0,
@@ -2165,6 +2179,7 @@ mod tests {
             connected: true,
             last_seen: 0,
             respawn_at: None,
+            boost_floor_len: snake.len().max(STARTING_LENGTH),
             snake,
             pellet_growth_fraction: 0.0,
             tail_extension: 0.0,
@@ -2222,7 +2237,7 @@ mod tests {
         *offset += 16; // player id
         *offset += 1; // alive
         *offset += 4; // score
-        *offset += 4; // stamina
+        *offset += 4; // score fraction
         *offset += 4; // oxygen
         *offset += 1; // is_boosting
         *offset += 4; // girth scale
@@ -2574,6 +2589,7 @@ mod tests {
     fn write_player_state_encodes_digestion_id_and_progress() {
         let state = make_state();
         let mut player = make_player("player-3", make_snake(2, 0.0));
+        player.pellet_growth_fraction = 0.375;
         player.digestions.push(Digestion {
             id: 42,
             remaining: 2,
@@ -2588,7 +2604,12 @@ mod tests {
         state.write_player_state(&mut encoder, &player);
         let payload = encoder.into_vec();
 
-        let mut offset = 16 + 1 + 4 + 4 + 4;
+        let mut offset = 16 + 1 + 4;
+        let encoded_score_fraction =
+            f32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
+        assert!((encoded_score_fraction - 0.375).abs() < 1e-6);
+        offset += 4;
+        offset += 4; // oxygen
         let encoded_is_boosting = payload[offset];
         assert_eq!(encoded_is_boosting, 0);
         offset += 1;
@@ -2641,7 +2662,7 @@ mod tests {
         state.write_player_state(&mut encoder, &player);
         let payload = encoder.into_vec();
 
-        let mut offset = 16 + 1 + 4 + 4 + 4; // id, alive, score, stamina, oxygen
+        let mut offset = 16 + 1 + 4 + 4 + 4; // id, alive, score, score fraction, oxygen
         let encoded_is_boosting = payload[offset];
         assert_eq!(encoded_is_boosting, 1);
         offset += 1;
@@ -2670,7 +2691,7 @@ mod tests {
         state.write_player_state(&mut encoder, &player);
         let payload = encoder.into_vec();
 
-        let mut offset = 16 + 1 + 4 + 4 + 4 + 1 + 4 + 4; // id, alive, score, stamina, oxygen, is_boosting, girth, tail_extension
+        let mut offset = 16 + 1 + 4 + 4 + 4 + 1 + 4 + 4; // id, alive, score, score fraction, oxygen, is_boosting, girth, tail_extension
         let detail = payload[offset];
         assert_eq!(detail, protocol::SNAKE_DETAIL_FULL);
         offset += 1;
@@ -2885,13 +2906,10 @@ mod tests {
         let player_after = state.players.get(&player_id).expect("player");
         assert_eq!(player_after.score, 1);
         assert!(player_after.pellet_growth_fraction.abs() < 0.01);
-        assert!(player_after
-            .digestions
-            .iter()
-            .any(|digestion| {
-                digestion.growth_amount >= BIG_PELLET_GROWTH_FRACTION - 1e-6
-                    && digestion.growth_amount <= BIG_PELLET_GROWTH_FRACTION + 1e-6
-            }));
+        assert!(player_after.digestions.iter().any(|digestion| {
+            digestion.growth_amount >= BIG_PELLET_GROWTH_FRACTION - 1e-6
+                && digestion.growth_amount <= BIG_PELLET_GROWTH_FRACTION + 1e-6
+        }));
     }
 
     #[test]
