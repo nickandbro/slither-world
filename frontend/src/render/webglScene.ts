@@ -3689,14 +3689,17 @@ const createScene = async (
   buildEnvironment(null)
 
   const createBoostDraftMaterial = () => {
-    const material = new THREE.MeshBasicMaterial({
+    const materialParams: THREE.MeshBasicMaterialParameters = {
       color: BOOST_DRAFT_COLOR_A,
       transparent: true,
       opacity: 0,
-      alphaMap: webglShaderHooksEnabled ? undefined : (boostDraftTexture ?? undefined),
       side: THREE.FrontSide,
       blending: THREE.NormalBlending,
-    })
+    }
+    if (!webglShaderHooksEnabled && boostDraftTexture) {
+      materialParams.alphaMap = boostDraftTexture
+    }
+    const material = new THREE.MeshBasicMaterial(materialParams)
     material.depthWrite = false
     material.depthTest = true
     material.alphaTest = 0
@@ -4031,13 +4034,16 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
   const boostTrailAlphaTexture = createBoostTrailAlphaTexture()
 
   const createBoostTrailMaterial = () => {
-    const material = new THREE.MeshBasicMaterial({
+    const materialParams: THREE.MeshBasicMaterialParameters = {
       color: BOOST_TRAIL_COLOR,
       transparent: true,
       opacity: BOOST_TRAIL_OPACITY,
-      alphaMap: boostTrailAlphaTexture ?? undefined,
       side: THREE.DoubleSide,
-    })
+    }
+    if (boostTrailAlphaTexture) {
+      materialParams.alphaMap = boostTrailAlphaTexture
+    }
+    const material = new THREE.MeshBasicMaterial(materialParams)
     material.depthWrite = false
     material.depthTest = true
     material.alphaTest = 0.001

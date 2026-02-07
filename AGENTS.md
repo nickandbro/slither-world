@@ -96,7 +96,7 @@ Backend (run inside `backend/`):
 - Snake visual grounding is mesh-aware: segment/head/tail placement samples the deformed terrain mesh (with analytic fallback) and applies a tiny positive contact clearance to reduce slope clipping and z-fighting.
 - Boost draft visuals are rendered as a front-anchored hemispherical shell near the snake head (low-opacity blue/white wisp tint, shader-based edge fade to full transparency at boundaries) and are only visible while that snake is actively boosting.
 - Digestion bulges are applied in tube-ring space with identity-tracked progress, and the visual start is anchored by a fixed node index near the neck (default: one node behind the head) instead of a percentage-based body offset. Bulge intensity scales down as snake girth increases so larger snakes show subtler swallow bumps.
-- Pellet visuals are glow sprites rendered in color buckets (`THREE.Points`) for high pellet counts; keep updates allocation-light and preserve per-pellet terrain grounding so sprites stay on top of elevated/sunken terrain.
+- Pellet visuals use a slither-style multi-layer sprite stack in color buckets (`THREE.Points`) for high counts: dark under-shadow + bright core + near/far additive glow layers with seeded per-pellet orbital wobble; keep updates allocation-light and preserve per-pellet terrain grounding so sprites stay on top of elevated/sunken terrain.
 - Shoreline fill and shoreline line meshes are generated from the full deformed planet geometry in both patch and fallback paths to keep lake edges coherent.
 - Fallback terrain path (when patch mode is disabled) renders a full deformed icosphere mesh (`createIcosphereGeometry` + `applyLakeDepressions`).
 - Lakes are rendered with backend-specific paths:
