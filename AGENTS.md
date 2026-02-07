@@ -8,9 +8,10 @@ Spherical Snake is a multiplayer, slither-style snake game where players steer g
 ## Project Structure & Module Organization
 - `frontend/` — Vite + React client and Cloudflare Worker for static asset serving.
 - `frontend/src/` — React UI source (`App.tsx`, `main.tsx`, CSS, and `assets/`).
+- `frontend/src/app/` — app-level UI decomposition (`components/`) and shared app runtime helpers (`core/`).
 - `frontend/src/game/` — client gameplay helpers (math, camera, snapshots, HUD, storage).
 - `frontend/src/game/wsProtocol.ts` — binary WebSocket codec (ArrayBuffer/DataView).
-- `frontend/src/render/` — Three.js scene + renderer backend selection (`webglScene.ts`).
+- `frontend/src/render/` — Three.js renderer entrypoint (`webglScene.ts`) plus runtime internals (`render/core/sceneRuntime.ts`).
 - `frontend/src/services/` — client API wrappers (leaderboard + backend URL helpers).
 - `frontend/worker/` — minimal Cloudflare Worker entry (`worker/index.ts`) that serves `dist/`.
 - `frontend/public/` — static assets copied as-is.
@@ -99,5 +100,5 @@ Repo root (recommended for full stack):
   - WebGPU: generated lake surface geometry fallback for near visual parity.
 - To prevent shoreline seams, terrain depth is clamped to at least the lake surface depth, lake surfaces are slightly overdrawn/expanded, and lake materials use polygon offset to win depth testing.
 - Fishbowl crack visuals are exact in WebGL (`onBeforeCompile`) and approximated in WebGPU for parity without WebGL-only shader hooks.
-- Implementation lives in `frontend/src/render/webglScene.ts` (`buildPlanetPatchAtlas`, `updatePlanetPatchVisibility`, `updateEnvironmentVisibility`, `updateLakeVisibility`, `createLakes`, `sampleLakes`, `applyLakeDepressions`, `createLakeMaskMaterial`, `createLakeSurfaceGeometry`).
+- Renderer bootstrap/fallback selection lives in `frontend/src/render/webglScene.ts`; scene/runtime implementation lives in `frontend/src/render/core/sceneRuntime.ts` (`buildPlanetPatchAtlas`, `updatePlanetPatchVisibility`, `updateEnvironmentVisibility`, `updateLakeVisibility`, `createLakes`, `sampleLakes`, `applyLakeDepressions`, `createLakeMaskMaterial`, `createLakeSurfaceGeometry`).
 - Mountain collider outlines are generated on the backend (smoothed radial samples) and visualized on the client via the debug overlay; lake and tree collider rings are rendered as line loops when debug is enabled.
