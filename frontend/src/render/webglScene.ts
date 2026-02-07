@@ -401,6 +401,7 @@ export type RenderScene = {
     cameraVerticalOffset?: number,
   ) => { x: number; y: number } | null
   setEnvironment: (environment: Environment) => void
+  setBootReady: (ready: boolean) => void
   setDebugFlags: (flags: {
     mountainOutline?: boolean
     lakeCollider?: boolean
@@ -703,6 +704,11 @@ const DAY_NIGHT_STAR_EDGE_START = 0.08
 const DAY_NIGHT_STAR_EDGE_END = 0.46
 const DAY_NIGHT_EXPOSURE_DAY = 1.07
 const DAY_NIGHT_EXPOSURE_NIGHT = 0.9
+const BOOT_REVEAL_MS = 900
+const BOOT_PRELOAD_DAY_FACTOR = 0.68
+const BOOT_PLACEHOLDER_COLOR = '#9eb8ad'
+const BOOT_PLACEHOLDER_ROUGHNESS = 0.9
+const BOOT_PLACEHOLDER_METALNESS = 0.02
 const SKY_DAY_TOP_COLOR = new THREE.Color('#4caef2')
 const SKY_DAY_HORIZON_COLOR = new THREE.Color('#93dbff')
 const SKY_DAY_BOTTOM_COLOR = new THREE.Color('#d4f2ff')
@@ -1732,6 +1738,20 @@ const createScene = async (
   const world = new THREE.Group()
   scene.add(world)
 
+  const bootPlaceholderGeometry = new THREE.SphereGeometry(PLANET_RADIUS, 64, 48)
+  const bootPlaceholderMaterial = new THREE.MeshStandardMaterial({
+    color: BOOT_PLACEHOLDER_COLOR,
+    roughness: BOOT_PLACEHOLDER_ROUGHNESS,
+    metalness: BOOT_PLACEHOLDER_METALNESS,
+    transparent: true,
+    opacity: 1,
+  })
+  bootPlaceholderMaterial.depthWrite = false
+  bootPlaceholderMaterial.depthTest = true
+  const bootPlaceholderMesh = new THREE.Mesh(bootPlaceholderGeometry, bootPlaceholderMaterial)
+  bootPlaceholderMesh.scale.setScalar(1.001)
+  world.add(bootPlaceholderMesh)
+
   const ambient = new THREE.AmbientLight(0xffffff, 0.65)
   const keyLight = new THREE.DirectionalLight(0xffffff, 0.9)
   keyLight.position.set(2, 3, 4)
@@ -1746,6 +1766,10 @@ const createScene = async (
   let dayNightFactor = 1
   let dayNightCycleMs = DAY_NIGHT_CYCLE_MS
   let dayNightSourceNowMs: number | null = null
+  let bootReady = false
+  let bootRevealStartedAtMs: number | null = null
+  let bootRevealProgress = 0
+  let environmentLoaded = false
   let lastSkyGradientFactor = Number.NaN
   const skyTopTemp = new THREE.Color()
   const skyHorizonTemp = new THREE.Color()
@@ -4001,8 +4025,6 @@ const createScene = async (
     rebuildLakeDebug()
     rebuildTreeDebug()
   }
-
-  buildEnvironment(null)
 
   const createBoostDraftMaterial = () => {
     const materialParams: THREE.MeshBasicMaterialParameters = {
@@ -6688,6 +6710,27 @@ diffuseColor.a *= retireEdge;`,
     }
   }
 
+  const updateBootRevealState = (nowMs: number) => {
+    if (bootReady && environmentLoaded && bootRevealStartedAtMs === null) {
+      bootRevealStartedAtMs = nowMs
+    }
+    if (bootRevealStartedAtMs === null) {
+      bootRevealProgress = 0
+      bootPlaceholderMesh.visible = true
+      bootPlaceholderMaterial.opacity = 1
+      return
+    }
+    const elapsed = Math.max(0, nowMs - bootRevealStartedAtMs)
+    bootRevealProgress = clamp(elapsed / BOOT_REVEAL_MS, 0, 1)
+    if (bootRevealProgress >= 1) {
+      bootPlaceholderMesh.visible = false
+      bootPlaceholderMaterial.opacity = 0
+      return
+    }
+    bootPlaceholderMesh.visible = true
+    bootPlaceholderMaterial.opacity = 1 - bootRevealProgress
+  }
+
   const resolveDayFactor = (sourceNowMs: number) => {
     dayNightCycleMs =
       dayNightDebugMode === 'accelerated'
@@ -6697,7 +6740,12 @@ diffuseColor.a *= retireEdge;`,
       ((sourceNowMs % dayNightCycleMs) + dayNightCycleMs) % dayNightCycleMs
     dayNightPhase = wrapped / dayNightCycleMs
     const daylightWave = Math.sin(dayNightPhase * DAY_NIGHT_TAU - Math.PI * 0.5) * 0.5 + 0.5
-    dayNightFactor = smoothstep(DAY_NIGHT_DAY_EDGE_START, DAY_NIGHT_DAY_EDGE_END, daylightWave)
+    return smoothstep(DAY_NIGHT_DAY_EDGE_START, DAY_NIGHT_DAY_EDGE_END, daylightWave)
+  }
+
+  const resolveEffectiveDayFactor = (sourceNowMs: number) => {
+    const liveDayFactor = resolveDayFactor(sourceNowMs)
+    dayNightFactor = lerp(BOOT_PRELOAD_DAY_FACTOR, liveDayFactor, bootRevealProgress)
     return dayNightFactor
   }
 
@@ -6784,7 +6832,7 @@ diffuseColor.a *= retireEdge;`,
 
   const updateDayNightVisuals = (sourceNowMs: number) => {
     dayNightSourceNowMs = sourceNowMs
-    const dayFactor = resolveDayFactor(sourceNowMs)
+    const dayFactor = resolveEffectiveDayFactor(sourceNowMs)
     const nightFactor = 1 - dayFactor
     const starFactor = smoothstep(
       DAY_NIGHT_STAR_EDGE_START,
@@ -6911,6 +6959,8 @@ diffuseColor.a *= retireEdge;`,
     const now = performance.now()
     const deltaSeconds = Math.min(0.1, Math.max(0, (now - lastFrameTime) / 1000))
     lastFrameTime = now
+    updateBootRevealState(now)
+    const showActors = bootRevealStartedAtMs !== null
 
     if (cameraState.active) {
       world.quaternion.set(cameraState.q.x, cameraState.q.y, cameraState.q.z, cameraState.q.w)
@@ -6930,7 +6980,7 @@ diffuseColor.a *= retireEdge;`,
 
     let localHeadScreen: { x: number; y: number } | null = null
 
-    if (snapshot && localPlayerId) {
+    if (showActors && snapshot && localPlayerId) {
       const localPlayer = snapshot.players.find((player) => player.id === localPlayerId)
       const head = localPlayer?.snakeDetail !== 'stub' ? localPlayer?.snake[0] : undefined
       if (head) {
@@ -6997,7 +7047,7 @@ diffuseColor.a *= retireEdge;`,
     const aspect = viewportHeight > 0 ? viewportWidth / viewportHeight : 1
     const viewAngle = computeVisibleSurfaceAngle(cameraLocalDistance, aspect)
 
-    if (snapshot) {
+    if (showActors && snapshot) {
       const pelletOverride = updateSnakes(
         snapshot.players,
         localPlayerId,
@@ -7037,6 +7087,18 @@ diffuseColor.a *= retireEdge;`,
 
   const setEnvironment = (environment: Environment) => {
     buildEnvironment(environment)
+    environmentLoaded = true
+  }
+
+  const setBootReady = (ready: boolean) => {
+    bootReady = ready
+    if (!bootReady) {
+      environmentLoaded = false
+      bootRevealStartedAtMs = null
+      bootRevealProgress = 0
+      bootPlaceholderMaterial.opacity = 1
+      bootPlaceholderMesh.visible = true
+    }
   }
 
   const setDebugFlags = (flags: {
@@ -7096,6 +7158,9 @@ diffuseColor.a *= retireEdge;`,
   const dispose = () => {
     renderer.dispose()
     disposeEnvironment()
+    world.remove(bootPlaceholderMesh)
+    bootPlaceholderGeometry.dispose()
+    bootPlaceholderMaterial.dispose()
     camera.remove(skyGroup)
     skyDomeGeometry.dispose()
     skyDomeMaterial.dispose()
@@ -7171,6 +7236,7 @@ diffuseColor.a *= retireEdge;`,
     resize,
     render,
     setEnvironment,
+    setBootReady,
     setDebugFlags,
     setDayNightDebugMode,
     dispose,

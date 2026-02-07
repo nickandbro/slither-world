@@ -285,6 +285,18 @@
   gap: 0.55rem;
 }
 
+@keyframes menu-drop-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, -18px, 0) scale(0.985);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
 .menu-title {
   font-size: clamp(2rem, 5.2vw, 3.45rem);
   line-height: 0.98;
@@ -294,6 +306,10 @@
   text-shadow:
     0 3px 0 rgb(38 90 65 / 55%),
     0 14px 24px rgb(7 24 21 / 42%);
+  opacity: 0;
+  transform: translate3d(0, -18px, 0) scale(0.985);
+  animation: menu-drop-in 420ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation-delay: 0ms;
 }
 
 .menu-title--logo-o {
@@ -327,6 +343,10 @@
   flex-direction: column;
   align-items: center;
   gap: 0.3rem;
+  opacity: 0;
+  transform: translate3d(0, -18px, 0) scale(0.985);
+  animation: menu-drop-in 420ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation-delay: 70ms;
 }
 
 .menu-input-row .control-label {
@@ -366,6 +386,10 @@
   box-shadow:
     0 10px 22px rgb(9 50 34 / 36%),
     inset 0 1px 0 rgb(216 255 226 / 40%);
+  opacity: 0;
+  transform: translate3d(0, -18px, 0) scale(0.985);
+  animation: menu-drop-in 420ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation-delay: 140ms;
 }
 
 .menu-play-button:disabled {
@@ -541,6 +565,16 @@ button:active {
   background: rgba(11, 19, 32, 0.04);
   border-radius: 10px;
   font-family: 'Space Mono', monospace;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .menu-title,
+  .menu-input-row,
+  .menu-play-button {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
 }
 
 @media (max-width: 720px) {
