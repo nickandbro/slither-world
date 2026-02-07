@@ -267,9 +267,6 @@ export default function App() {
   const inputEnabledRef = useRef(false)
   const cameraBlendRef = useRef(0)
   const cameraBlendStartMsRef = useRef<number | null>(null)
-  const initReceivedRef = useRef(false)
-  const renderedSnapshotAfterInitRef = useRef(false)
-  const bootReadySentRef = useRef(false)
   const menuDebugInfoRef = useRef<MenuFlowDebugInfo>({
     phase: 'preplay',
     hasSpawned: false,
@@ -550,7 +547,6 @@ export default function App() {
         webglRef.current = webgl
         setActiveRenderer(created.activeBackend)
         setRendererFallbackReason(created.fallbackReason)
-        webgl.setBootReady(false)
 
         if (environmentRef.current) {
           webgl.setEnvironment?.(environmentRef.current)
@@ -586,14 +582,6 @@ export default function App() {
           let boostActive = false
           if (config && webgl) {
             const snapshot = getRenderSnapshot()
-            if (initReceivedRef.current && snapshot) {
-              if (!renderedSnapshotAfterInitRef.current) {
-                renderedSnapshotAfterInitRef.current = true
-              } else if (!bootReadySentRef.current) {
-                webgl.setBootReady(true)
-                bootReadySentRef.current = true
-              }
-            }
             const localId = playerIdRef.current
             const localSnapshotPlayer =
               snapshot?.players.find((player) => player.id === localId) ?? null
@@ -900,12 +888,8 @@ export default function App() {
       renderCameraVerticalOffsetRef.current = MENU_CAMERA_VERTICAL_OFFSET
       cameraBlendRef.current = 0
       cameraBlendStartMsRef.current = null
-      initReceivedRef.current = false
-      renderedSnapshotAfterInitRef.current = false
-      bootReadySentRef.current = false
       pointerRef.current.active = false
       pointerRef.current.boost = false
-      webglRef.current?.setBootReady(false)
       setConnectionStatus('Connecting')
       setGameState(null)
       setEnvironment(null)
@@ -922,9 +906,6 @@ export default function App() {
         const decoded = decodeServerMessage(event.data, playerMetaRef.current)
         if (!decoded) return
         if (decoded.type === 'init') {
-          initReceivedRef.current = true
-          renderedSnapshotAfterInitRef.current = false
-          bootReadySentRef.current = false
           setPlayerId(decoded.playerId)
           storePlayerId(decoded.playerId)
           setEnvironment(decoded.environment)

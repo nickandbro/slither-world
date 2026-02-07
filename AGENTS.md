@@ -48,6 +48,7 @@ Repo root (recommended for full stack):
 - Changing renderer mode from the control panel performs a full page reload (required because canvas context type cannot be switched in-place).
 - Startup flow is a pre-spawn hero menu over the live world: before gameplay starts, the menu shows only a pilot-name input and a `Play` button.
 - Pre-spawn hero copy is intentionally minimal: title text is `Slither World` with no subtitle or pilot-name label.
+- Pre-spawn menu controls use an immediate, clean drop-in CSS entrance (title/input/button short stagger) with reduced-motion fallback.
 - Pre-spawn menu overlay does not dim the scene; the live world remains fully visible behind the controls.
 - The client always boots into room `main` for the pre-spawn menu view (with live bots/world already running beneath the menu); room switching remains available from the in-game control panel after spawn.
 - Menu framing uses an elevated pre-spawn camera offset so the planet rim sits around mid-screen, then blends smoothly into snake-follow gameplay camera after clicking `Play`.
