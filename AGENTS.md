@@ -47,8 +47,10 @@ Repo root (recommended for full stack):
 - Default renderer mode is `auto`: it attempts WebGPU first and falls back to WebGL with a status note if WebGPU is unavailable or init fails.
 - Changing renderer mode from the control panel performs a full page reload (required because canvas context type cannot be switched in-place).
 - Startup flow is a pre-spawn hero menu over the live world: before gameplay starts, the menu shows only a pilot-name input and a `Play` button.
+- Pre-spawn hero copy is intentionally minimal: title text is `Slither World` with no subtitle or pilot-name label.
+- Pre-spawn menu overlay does not dim the scene; the live world remains fully visible behind the controls.
 - The client always boots into room `main` for the pre-spawn menu view (with live bots/world already running beneath the menu); room switching remains available from the in-game control panel after spawn.
-- Clicking `Play` sends a deferred join update plus respawn request, then blends camera smoothly from menu framing into snake-follow gameplay camera.
+- Menu framing uses an elevated pre-spawn camera offset so the planet rim sits around mid-screen, then blends smoothly into snake-follow gameplay camera after clicking `Play`.
 - During pre-spawn, gameplay HUD/panels (scorebar, control panel, leaderboard, info panel) remain hidden and are restored after entering gameplay.
 - Renderer initialization is async; when touching render bootstrapping, ensure the latest server `Environment` and debug flags are applied immediately after scene creation to avoid visual collider desync from backend-authoritative collisions.
 - Debug collider toggles (mountain outlines, lake collider boundary, cactus collider rings) are surfaced in the control panel in dev/e2e only and persist to localStorage keys `spherical_snake_mountain_debug`, `spherical_snake_lake_debug`, `spherical_snake_tree_debug` (legacy `treeCollider`/key naming is still used internally for cactus collider debug state).
