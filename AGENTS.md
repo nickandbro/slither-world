@@ -3,7 +3,7 @@
 This repo is split into a Vite + React + TypeScript frontend and a Rust (Tokio) backend. Cloudflare Workers now only serve the static frontend build; multiplayer and leaderboard traffic goes to the Rust server.
 
 ## Project Gist
-Spherical Snake is a multiplayer, slither-style snake game where players steer glowing snakes across a tiny planet. The React/Three.js client renders a static planet patch atlas (fixed topology) with camera/view-based patch + environment culling and an HUD (including compact head-anchored oxygen depletion meters plus a radial score interval gauge) with selectable WebGL/WebGPU backends. A Rust server (Tokio + Axum) runs the authoritative game loop and sends per-session, view-scoped snapshots over WebSockets. The leaderboard is stored in SQLite on the backend.
+Spherical Snake is a multiplayer, slither-style snake game where players steer glowing snakes across a tiny planet. The React/Three.js client renders a static planet patch atlas (fixed topology) with camera/view-based patch + environment culling and an HUD (including compact head-anchored oxygen depletion meters plus a radial score interval gauge) with selectable WebGL/WebGPU backends. A Rust server (Tokio + Axum) runs the authoritative game loop and sends per-session, view-scoped snapshots over WebSockets. The in-game leaderboard panel is a realtime room scorecard driven by snapshot player data (top 5 alive snakes). Persisted leaderboard entries are still stored in SQLite on the backend via API routes.
 
 ## Project Structure & Module Organization
 - `frontend/` — Vite + React client and Cloudflare Worker for static asset serving.
@@ -53,6 +53,7 @@ Repo root (recommended for full stack):
 - The client always boots into room `main` for the pre-spawn menu view (with live bots/world already running beneath the menu); room switching remains available from the in-game control panel after spawn.
 - Menu framing uses an elevated pre-spawn camera offset so the planet rim sits around mid-screen, then blends smoothly into snake-follow gameplay camera after clicking `Play`.
 - During pre-spawn, gameplay HUD/panels (scorebar, control panel, leaderboard, info panel) remain hidden and are restored after entering gameplay.
+- The in-game right-side leaderboard is a realtime overlay (not a card UI): it ranks the top 5 alive snakes in the active room by live score (`score + scoreFraction`) and shows a crown icon beside `#1`.
 - Renderer initialization is async; when touching render bootstrapping, ensure the latest server `Environment` and debug flags are applied immediately after scene creation to avoid visual collider desync from backend-authoritative collisions.
 - Debug collider toggles (mountain outlines, lake collider boundary, cactus collider rings) are surfaced in the control panel in dev/e2e only and persist to localStorage keys `spherical_snake_mountain_debug`, `spherical_snake_lake_debug`, `spherical_snake_tree_debug` (legacy `treeCollider`/key naming is still used internally for cactus collider debug state).
 - Terrain wireframe toggle is surfaced in dev/e2e and persists to `spherical_snake_terrain_wireframe_debug` (legacy read fallback: `spherical_snake_terrain_tessellation_debug`).
