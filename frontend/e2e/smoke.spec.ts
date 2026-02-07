@@ -29,24 +29,24 @@ test('connects to the multiplayer server', async ({ page }) => {
     .toBeGreaterThanOrEqual(3)
 })
 
-test('submits a leaderboard entry', async ({ page }) => {
-  const rawName = `E2E Tester ${Date.now()}`
-  const sanitizedName = rawName.trim().replace(/\s+/g, ' ').slice(0, 20)
-
+test('shows a realtime leaderboard while playing', async ({ page }) => {
   await page.addInitScript(({ keys, name }) => {
     localStorage.setItem(keys.name, name)
-    localStorage.setItem(keys.best, '999999')
+    localStorage.setItem(keys.best, '0')
     localStorage.setItem(keys.room, 'main')
-  }, { keys: STORAGE_KEYS, name: rawName })
+  }, { keys: STORAGE_KEYS, name: 'Realtime Board' })
 
   await page.goto('/')
   await enterGame(page)
 
-  await page.getByRole('button', { name: 'Submit best' }).click()
-  await expect(page.locator('.leaderboard-status')).toContainText('Saved to leaderboard')
+  const leaderboard = page.locator('.leaderboard')
+  await expect(leaderboard).toBeVisible()
+  await expect(leaderboard.getByRole('heading', { name: 'Leaderboard' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Submit best' })).toHaveCount(0)
 
-  const entry = page.locator('.leaderboard li', { hasText: sanitizedName })
-  await expect(entry).toHaveCount(1)
+  const rows = leaderboard.locator('.leaderboard-row')
+  await expect.poll(async () => rows.count()).toBeGreaterThan(0)
+  await expect(rows.first().locator('.leaderboard-rank')).toContainText('#1')
 })
 
 test('can join a custom room', async ({ page }) => {

@@ -27,11 +27,6 @@ import {
   storeRendererPreference,
 } from './game/storage'
 import { decodeServerMessage, encodeInput, encodeJoin, encodeRespawn, type PlayerMeta } from './game/wsProtocol'
-import {
-  fetchLeaderboard as fetchLeaderboardRequest,
-  submitBestScore as submitBestScoreRequest,
-  type LeaderboardEntry,
-} from './services/leaderboard'
 import { resolveWebSocketUrl } from './services/backend'
 
 const MAX_SNAPSHOT_BUFFER = 20
@@ -110,6 +105,7 @@ const SCORE_RADIAL_BLOCKED_FLASH_MS = 320
 const MENU_CAMERA_DISTANCE = 7
 const MENU_CAMERA_VERTICAL_OFFSET = 2.5
 const MENU_TO_GAMEPLAY_BLEND_MS = 900
+const REALTIME_LEADERBOARD_LIMIT = 5
 const formatRendererError = (error: unknown) => {
   if (error instanceof Error && error.message.trim()) {
     return error.message.trim()
@@ -302,9 +298,7 @@ export default function App() {
   const [roomInput, setRoomInput] = useState(DEFAULT_ROOM)
   const [rendererPreference] = useState<RendererPreference>(getInitialRendererPreference)
   const [bestScore, setBestScore] = useState(getStoredBestScore)
-  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([])
   const [connectionStatus, setConnectionStatus] = useState('Connecting')
-  const [leaderboardStatus, setLeaderboardStatus] = useState('')
   const [activeRenderer, setActiveRenderer] = useState<RendererBackend | null>(null)
   const [rendererFallbackReason, setRendererFallbackReason] = useState<string | null>(null)
   const [menuPhase, setMenuPhase] = useState<MenuPhase>('preplay')
@@ -335,6 +329,31 @@ export default function App() {
 
   const score = localPlayer?.score ?? 0
   const playersOnline = gameState?.totalPlayers ?? 0
+  const realtimeLeaderboard = useMemo(() => {
+    const players = gameState?.players ?? []
+    return players
+      .filter((player) => player.alive)
+      .map((player) => ({
+        id: player.id,
+        name: player.name.trim() || 'Unknown',
+        score: player.score,
+        liveScore: player.score + clamp(player.scoreFraction, 0, 0.999_999),
+      }))
+      .sort((a, b) => {
+        const liveScoreDelta = b.liveScore - a.liveScore
+        if (Math.abs(liveScoreDelta) > 1e-5) return liveScoreDelta
+
+        const scoreDelta = b.score - a.score
+        if (scoreDelta !== 0) return scoreDelta
+
+        const nameDelta = a.name.localeCompare(b.name)
+        if (nameDelta !== 0) return nameDelta
+
+        return a.id.localeCompare(b.id)
+      })
+      .slice(0, REALTIME_LEADERBOARD_LIMIT)
+  }, [gameState])
+
   useEffect(() => {
     if (menuPhase !== 'preplay') return
     if (!localPlayer || !localPlayer.alive || localPlayer.snake.length === 0) return
@@ -965,14 +984,6 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    void refreshLeaderboard()
-    const interval = window.setInterval(() => {
-      void refreshLeaderboard()
-    }, 15000)
-    return () => window.clearInterval(interval)
-  }, [])
-
-  useEffect(() => {
     return () => {
       if (sendIntervalRef.current !== null) {
         window.clearInterval(sendIntervalRef.current)
@@ -1128,31 +1139,6 @@ export default function App() {
     const url = new URL(window.location.href)
     url.searchParams.set('renderer', mode)
     window.location.replace(url.toString())
-  }
-
-  const handleSubmitBestScore = async () => {
-    if (!bestScore) return
-    setLeaderboardStatus('Submitting...')
-    try {
-      const result = await submitBestScoreRequest(playerName, bestScore)
-      if (!result.ok) {
-        setLeaderboardStatus(result.error ?? 'Submission failed')
-        return
-      }
-      setLeaderboardStatus('Saved to leaderboard')
-      void refreshLeaderboard()
-    } catch {
-      setLeaderboardStatus('Submission failed')
-    }
-  }
-
-  async function refreshLeaderboard() {
-    try {
-      const scores = await fetchLeaderboardRequest()
-      setLeaderboard(scores)
-    } catch {
-      setLeaderboard([])
-    }
   }
 
   return (
@@ -1354,22 +1340,34 @@ export default function App() {
       </div>
 
       {isPlaying && (
-        <aside className='leaderboard'>
-          <div className='leaderboard-header'>
-            <h2>Global leaderboard</h2>
-            <button type='button' onClick={handleSubmitBestScore}>
-              Submit best
-            </button>
-          </div>
-          {leaderboardStatus && <div className='leaderboard-status'>{leaderboardStatus}</div>}
+        <aside className='leaderboard' aria-label='Realtime leaderboard'>
+          <h2>Leaderboard</h2>
           <ol>
-            {leaderboard.length === 0 && <li className='muted'>No scores yet.</li>}
-            {leaderboard.map((entry, index) => (
-              <li key={`${entry.name}-${entry.created_at}-${index}`}>
-                <span>{entry.name}</span>
-                <span>{entry.score}</span>
-              </li>
-            ))}
+            {realtimeLeaderboard.length === 0 && (
+              <li className='leaderboard-empty'>No active snakes</li>
+            )}
+            {realtimeLeaderboard.map((entry, index) => {
+              const rank = index + 1
+              return (
+                <li
+                  key={entry.id}
+                  className={`leaderboard-row ${rank <= 3 ? `leaderboard-row--top-${rank}` : ''}`}
+                >
+                  <span className='leaderboard-rank'>
+                    #{rank}
+                    {rank === 1 && (
+                      <span className='leaderboard-crown' aria-hidden='true'>
+                        <svg viewBox='0 0 24 24' focusable='false'>
+                          <path d='M3 18h18l-1.6-9.4-4.8 3.7-2.6-6.1-2.6 6.1-4.8-3.7L3 18z' />
+                        </svg>
+                      </span>
+                    )}
+                  </span>
+                  <span className='leaderboard-name'>{entry.name}</span>
+                  <span className='leaderboard-score'>{entry.score}</span>
+                </li>
+              )
+            })}
           </ol>
         </aside>
       )}
