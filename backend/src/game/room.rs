@@ -4,8 +4,9 @@ use super::constants::{
     DEATH_PELLET_SIZE_MIN, MAX_PELLETS, MAX_SPAWN_ATTEMPTS, MIN_SURVIVAL_LENGTH, NODE_QUEUE_SIZE,
     OXYGEN_DRAIN_PER_SEC, OXYGEN_MAX, PELLET_SIZE_ENCODE_MAX, PELLET_SIZE_ENCODE_MIN,
     PLAYER_TIMEOUT_MS, RESPAWN_COOLDOWN_MS, RESPAWN_RETRY_MS, SMALL_PELLET_ATTRACT_RADIUS,
-    SMALL_PELLET_ATTRACT_SPEED, SMALL_PELLET_CONSUME_ANGLE, SMALL_PELLET_DIGESTION_STRENGTH,
-    SMALL_PELLET_DIGESTION_STRENGTH_MAX, SMALL_PELLET_GROWTH_FRACTION,
+    SMALL_PELLET_ATTRACT_SPEED, SMALL_PELLET_ATTRACT_STEP_MAX_RATIO, SMALL_PELLET_CONSUME_ANGLE,
+    SMALL_PELLET_DIGESTION_STRENGTH, SMALL_PELLET_DIGESTION_STRENGTH_MAX,
+    SMALL_PELLET_GROWTH_FRACTION,
     SMALL_PELLET_LOCK_CONE_ANGLE, SMALL_PELLET_MOUTH_FORWARD, SMALL_PELLET_SHRINK_MIN_RATIO,
     SMALL_PELLET_SIZE_MAX, SMALL_PELLET_SIZE_MIN, SMALL_PELLET_SPAWN_HEAD_EXCLUSION_ANGLE,
     SMALL_PELLET_VIEW_MARGIN_MAX, SMALL_PELLET_VIEW_MARGIN_MIN, SMALL_PELLET_VISIBLE_MAX,
@@ -1306,7 +1307,10 @@ impl RoomState {
         }
         let attractors = self.build_head_attractors();
         let consume_cos = SMALL_PELLET_CONSUME_ANGLE.cos();
-        let step = SMALL_PELLET_ATTRACT_SPEED * dt_seconds;
+        // Cap angular travel per tick so attracted pellets visibly move/shrink toward the mouth
+        // instead of snapping directly into the consume angle in one update.
+        let step = (SMALL_PELLET_ATTRACT_SPEED * dt_seconds)
+            .min(SMALL_PELLET_ATTRACT_RADIUS * SMALL_PELLET_ATTRACT_STEP_MAX_RATIO);
         let mut consumed_by: HashMap<String, (usize, f64)> = HashMap::new();
         let mut i = 0usize;
         while i < self.pellets.len() {
@@ -2670,12 +2674,12 @@ mod tests {
             7,
             normalize(Point {
                 x: 1.0,
-                y: 0.18,
+                y: 0.03,
                 z: 0.0,
             }),
         ));
 
-        state.update_small_pellets(TICK_MS as f64 / 1000.0);
+        state.update_small_pellets(0.005);
 
         assert_eq!(state.pellets.len(), 1);
         let pellet = &state.pellets[0];
@@ -2684,6 +2688,56 @@ mod tests {
                 assert_eq!(target_player_id, &player_id);
             }
             PelletState::Idle => panic!("pellet should lock to a nearby head"),
+        }
+        assert!(pellet.current_size < pellet.base_size);
+    }
+
+    #[test]
+    fn small_pellet_near_attract_edge_moves_and_shrinks_before_consume() {
+        let mut state = make_state();
+        let player_id = "pellet-edge-player".to_string();
+        let snake = vec![
+            SnakeNode {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+                pos_queue: VecDeque::new(),
+            },
+            SnakeNode {
+                x: 0.9805806756909201,
+                y: -0.19611613513818402,
+                z: 0.0,
+                pos_queue: VecDeque::new(),
+            },
+        ];
+        state
+            .players
+            .insert(player_id.clone(), make_player(&player_id, snake));
+
+        let pellet_start = normalize(Point {
+            x: 1.0,
+            y: SMALL_PELLET_ATTRACT_RADIUS * 0.95,
+            z: 0.0,
+        });
+        let mouth = normalize(Point {
+            x: 1.0,
+            y: SMALL_PELLET_MOUTH_FORWARD,
+            z: 0.0,
+        });
+        let before_dot = dot(pellet_start, mouth);
+        state.pellets.push(make_pellet(17, pellet_start));
+
+        state.update_small_pellets(TICK_MS as f64 / 1000.0);
+
+        assert_eq!(state.pellets.len(), 1);
+        let pellet = &state.pellets[0];
+        let after_dot = dot(pellet.normal, mouth);
+        assert!(after_dot > before_dot);
+        match &pellet.state {
+            PelletState::Attracting { target_player_id } => {
+                assert_eq!(target_player_id, &player_id);
+            }
+            PelletState::Idle => panic!("pellet should remain locked while approaching"),
         }
         assert!(pellet.current_size < pellet.base_size);
     }
