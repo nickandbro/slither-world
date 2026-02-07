@@ -13,10 +13,10 @@ import { buildInterpolatedSnapshot, type TimedSnapshot } from './game/snapshots'
 import { drawHud, type RenderConfig } from './game/hud'
 import {
   createRandomPlayerName,
+  DEFAULT_ROOM,
   getInitialName,
   getStoredBestScore,
   getStoredPlayerId,
-  getInitialRoom,
   getInitialRendererPreference,
   sanitizeRoomName,
   storeBestScore,
@@ -91,7 +91,7 @@ const BOOST_EFFECT_FADE_IN_RATE = 9
 const BOOST_EFFECT_FADE_OUT_RATE = 12
 const BOOST_EFFECT_PULSE_SPEED = 8.5
 const BOOST_EFFECT_ACTIVE_CLASS_THRESHOLD = 0.01
-const MENU_CAMERA_DISTANCE = 6.6
+const MENU_CAMERA_DISTANCE = 6.15
 const MENU_TO_GAMEPLAY_BLEND_MS = 900
 const formatRendererError = (error: unknown) => {
   if (error instanceof Error && error.message.trim()) {
@@ -138,7 +138,7 @@ type MenuFlowDebugInfo = {
   cameraDistance: number
 }
 
-const MENU_CAMERA_TARGET = normalize({ x: 0.34, y: 0.9, z: 0.28 })
+const MENU_CAMERA_TARGET = normalize({ x: 0.04, y: 0.995, z: 0.08 })
 const createMenuCamera = () => {
   const upRef = { current: { x: 0, y: 1, z: 0 } }
   const camera = updateCamera(MENU_CAMERA_TARGET, upRef)
@@ -251,8 +251,8 @@ export default function App() {
   const [environment, setEnvironment] = useState<Environment | null>(null)
   const [playerId, setPlayerId] = useState<string | null>(getStoredPlayerId())
   const [playerName, setPlayerName] = useState(getInitialName)
-  const [roomName, setRoomName] = useState(getInitialRoom)
-  const [roomInput, setRoomInput] = useState(getInitialRoom)
+  const [roomName, setRoomName] = useState(DEFAULT_ROOM)
+  const [roomInput, setRoomInput] = useState(DEFAULT_ROOM)
   const [rendererPreference] = useState<RendererPreference>(getInitialRendererPreference)
   const [bestScore, setBestScore] = useState(getStoredBestScore)
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([])
@@ -969,14 +969,11 @@ export default function App() {
           </div>
           {!isPlaying && (
             <div className='menu-overlay'>
-              <div className='menu-card'>
+              <div className='menu-hero'>
                 <div className='menu-title'>Welcome to Spherical Snake</div>
                 <div className='menu-subtitle'>Steer across a tiny living world.</div>
-                <div className='menu-status status'>
-                  Room {roomName} · {connectionStatus} · {playersOnline} online
-                </div>
 
-                <div className='menu-row'>
+                <div className='menu-input-row'>
                   <label className='control-label' htmlFor='player-name'>
                     Pilot name
                   </label>
@@ -1000,54 +997,8 @@ export default function App() {
                   disabled={connectionStatus !== 'Connected' || menuPhase === 'spawning'}
                   onClick={handlePlay}
                 >
-                  {menuPhase === 'spawning' ? 'Spawning...' : 'Play'}
+                  Play
                 </button>
-
-                <div className='menu-note'>Press play to spawn. Empty names are randomized.</div>
-
-                <div className='menu-divider' />
-
-                <div className='menu-row menu-row-inline'>
-                  <label className='control-label' htmlFor='room-name'>
-                    Room
-                  </label>
-                  <input
-                    id='room-name'
-                    value={roomInput}
-                    onChange={(event) => setRoomInput(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') {
-                        event.preventDefault()
-                        handleJoinRoom()
-                      }
-                    }}
-                  />
-                  <button type='button' onClick={handleJoinRoom}>
-                    Join
-                  </button>
-                </div>
-
-                <div className='menu-row'>
-                  <label className='control-label' htmlFor='renderer-mode'>
-                    Renderer
-                  </label>
-                  <select
-                    id='renderer-mode'
-                    value={rendererPreference}
-                    onChange={(event) => handleRendererModeChange(event.target.value)}
-                  >
-                    <option value='auto'>Auto</option>
-                    <option value='webgpu'>WebGPU</option>
-                    <option value='webgl'>WebGL</option>
-                  </select>
-                </div>
-
-                <div className='renderer-status menu-renderer-status' aria-live='polite'>
-                  <div>{rendererStatus}</div>
-                  {rendererFallbackReason && (
-                    <div className='renderer-fallback'>{rendererFallbackReason}</div>
-                  )}
-                </div>
               </div>
             </div>
           )}

@@ -10,7 +10,6 @@ type RendererInfo = {
 test.describe('renderer mode controls @webgpu', () => {
   test('resolves webgpu preference with explicit runtime info', async ({ page }) => {
     await page.goto('/?renderer=webgpu')
-    await expect(page.locator('.status')).toContainText('Connected')
     await enterGame(page)
 
     await page.waitForFunction(() => {
@@ -45,7 +44,6 @@ test.describe('renderer mode controls @webgpu', () => {
 
   test('persists manual renderer selection and syncs query param', async ({ page }) => {
     await page.goto('/')
-    await expect(page.locator('.status')).toContainText('Connected')
     await enterGame(page)
 
     const rendererInput = page.locator('#renderer-mode')

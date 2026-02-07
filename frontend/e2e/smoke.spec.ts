@@ -15,6 +15,7 @@ test('connects to the multiplayer server', async ({ page }) => {
   }, { keys: STORAGE_KEYS })
 
   await page.goto('/')
+  await enterGame(page)
 
   const status = page.locator('.status')
   await expect(status).toContainText('Connected')
@@ -56,10 +57,13 @@ test('can join a custom room', async ({ page }) => {
   }, { keys: STORAGE_KEYS })
 
   await page.goto('/')
+  await enterGame(page)
 
   const roomInput = page.getByLabel('Room')
   await roomInput.fill('e2e-room')
   await page.getByRole('button', { name: 'Join' }).click()
+  await expect(page.locator('.menu-overlay')).toBeVisible()
+  await enterGame(page)
 
   const status = page.locator('.status')
   await expect(status).toContainText('Room e2e-room')

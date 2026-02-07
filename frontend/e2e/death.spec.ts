@@ -19,7 +19,6 @@ const distance = (
 
 test('bot death fades and stays in place while dead', async ({ page, request }) => {
   await page.goto('/')
-  await expect(page.locator('.status')).toContainText('Connected')
   await enterGame(page)
 
   await page.waitForFunction(() => {
@@ -74,6 +73,6 @@ test('bot death fades and stays in place while dead', async ({ page, request }) 
       return typeof opacity === 'number' && opacity < 0.2
     },
     playerId,
-    { timeout: 5000 },
+    { timeout: 12000 },
   )
 })

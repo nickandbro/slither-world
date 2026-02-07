@@ -13,7 +13,6 @@ const readBoostIntensity = async (page: Page) => {
 
 test('boost effect ramps up and down with local boost', async ({ page }) => {
   await page.goto('/')
-  await expect(page.locator('.status')).toContainText('Connected')
   await enterGame(page)
   await expect(page.locator('.boost-fx')).toHaveCount(1)
 

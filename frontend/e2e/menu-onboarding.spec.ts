@@ -18,7 +18,6 @@ test('menu onboarding gates spawn and transitions camera smoothly', async ({ pag
 
   await page.goto('/')
   await expect(page.locator('.menu-overlay')).toBeVisible()
-  await expect(page.locator('.status')).toContainText('Connected')
   await expect(page.locator('.scorebar')).toHaveCount(0)
   await expect(page.locator('.leaderboard')).toHaveCount(0)
 
