@@ -83,7 +83,7 @@ const getDayNightDebugMode = (): DayNightDebugMode => {
   if (typeof window === 'undefined') return 'auto'
   try {
     const value = window.localStorage.getItem(DAY_NIGHT_DEBUG_MODE_KEY)
-    if (value === 'day' || value === 'night' || value === 'auto') return value
+    if (value === 'auto' || value === 'accelerated') return value
   } catch {
     // ignore persistence errors
   }
@@ -1141,7 +1141,7 @@ export default function App() {
                     Terrain wireframe
                   </label>
                   <div className='debug-option debug-option--select'>
-                    <label htmlFor='day-night-mode'>Day/Night</label>
+                    <label htmlFor='day-night-mode'>Cycle speed</label>
                     <select
                       id='day-night-mode'
                       className='debug-select'
@@ -1150,9 +1150,8 @@ export default function App() {
                         setDayNightDebugMode(event.target.value as DayNightDebugMode)
                       }
                     >
-                      <option value='auto'>Auto</option>
-                      <option value='day'>Force day</option>
-                      <option value='night'>Force night</option>
+                      <option value='auto'>Normal (8 min)</option>
+                      <option value='accelerated'>Accelerated (30s)</option>
                     </select>
                   </div>
                 </div>

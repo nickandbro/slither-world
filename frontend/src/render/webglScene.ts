@@ -389,7 +389,7 @@ type SnakeGroundingInfo = {
 
 export type RendererPreference = 'auto' | 'webgl' | 'webgpu'
 export type RendererBackend = 'webgl' | 'webgpu'
-export type DayNightDebugMode = 'auto' | 'day' | 'night'
+export type DayNightDebugMode = 'auto' | 'accelerated'
 
 export type RenderScene = {
   resize: (width: number, height: number, dpr: number) => void
@@ -674,6 +674,7 @@ const PEBBLE_RADIUS_MAX = BASE_PLANET_RADIUS * 0.014
 const PEBBLE_OFFSET = 0.0015
 const PEBBLE_RADIUS_VARIANCE = 0.8
 const DAY_NIGHT_CYCLE_MS = 8 * 60 * 1000
+const DAY_NIGHT_CYCLE_ACCELERATED_MS = 30 * 1000
 const DAY_NIGHT_SKY_TEXTURE_SIZE = 256
 const DAY_NIGHT_SKY_RADIUS = 18
 const DAY_NIGHT_CELESTIAL_ORBIT_X = 3.7
@@ -1742,6 +1743,7 @@ const createScene = async (
   let dayNightDebugMode: DayNightDebugMode = 'auto'
   let dayNightPhase = 0
   let dayNightFactor = 1
+  let dayNightCycleMs = DAY_NIGHT_CYCLE_MS
   let dayNightSourceNowMs: number | null = null
   let lastSkyGradientFactor = Number.NaN
   const skyTopTemp = new THREE.Color()
@@ -2300,7 +2302,7 @@ const createScene = async (
         mode: dayNightDebugMode,
         phase: dayNightPhase,
         dayFactor: dayNightFactor,
-        cycleMs: DAY_NIGHT_CYCLE_MS,
+        cycleMs: dayNightCycleMs,
         sourceNowMs: dayNightSourceNowMs,
       }),
     }
@@ -6656,17 +6658,13 @@ diffuseColor.a *= retireEdge;`,
   }
 
   const resolveDayFactor = (sourceNowMs: number) => {
+    dayNightCycleMs =
+      dayNightDebugMode === 'accelerated'
+        ? DAY_NIGHT_CYCLE_ACCELERATED_MS
+        : DAY_NIGHT_CYCLE_MS
     const wrapped =
-      ((sourceNowMs % DAY_NIGHT_CYCLE_MS) + DAY_NIGHT_CYCLE_MS) % DAY_NIGHT_CYCLE_MS
-    dayNightPhase = wrapped / DAY_NIGHT_CYCLE_MS
-    if (dayNightDebugMode === 'day') {
-      dayNightFactor = 1
-      return dayNightFactor
-    }
-    if (dayNightDebugMode === 'night') {
-      dayNightFactor = 0
-      return dayNightFactor
-    }
+      ((sourceNowMs % dayNightCycleMs) + dayNightCycleMs) % dayNightCycleMs
+    dayNightPhase = wrapped / dayNightCycleMs
     const daylightWave = Math.sin(dayNightPhase * DAY_NIGHT_TAU - Math.PI * 0.5) * 0.5 + 0.5
     dayNightFactor = smoothstep(DAY_NIGHT_DAY_EDGE_START, DAY_NIGHT_DAY_EDGE_END, daylightWave)
     return dayNightFactor
@@ -7042,7 +7040,7 @@ diffuseColor.a *= retireEdge;`,
   }
 
   const setDayNightDebugMode = (mode: DayNightDebugMode) => {
-    if (mode === 'day' || mode === 'night' || mode === 'auto') {
+    if (mode === 'accelerated' || mode === 'auto') {
       dayNightDebugMode = mode
       return
     }
