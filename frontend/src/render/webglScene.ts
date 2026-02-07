@@ -560,6 +560,7 @@ const PELLET_GLOW_OPACITY_BASE = 0.01
 const PELLET_GLOW_OPACITY_RANGE = 0.034
 const PELLET_GLOW_SIZE_RANGE = 0.065
 const PELLET_GLOW_PHASE_STEP = 0.73
+const PELLET_GLOW_HORIZON_MARGIN = 0.1
 const TONGUE_MAX_LENGTH = HEAD_RADIUS * 2.8
 const TONGUE_MAX_RANGE = HEAD_RADIUS * 3.1
 const TONGUE_NEAR_RANGE = HEAD_RADIUS * 2.4
@@ -2042,6 +2043,7 @@ const createScene = async (
   const pelletGroundCache = new Map<number, { x: number; y: number; z: number; radius: number }>()
   const pelletMotionStates = new Map<number, PelletMotionState>()
   const pelletIdsSeen = new Set<number>()
+  const pelletVisibleIds = new Set<number>()
   let viewportWidth = 1
   let viewportHeight = 1
   let lastFrameTime = performance.now()
@@ -2755,6 +2757,21 @@ const createScene = async (
       viewAngle + angularRadius + margin + (wasVisible ? hideExtra : 0),
     )
     return directionDot >= Math.cos(limit)
+  }
+
+  const isPelletNearSide = (
+    pellet: PelletSnapshot,
+    cameraLocalDir: THREE.Vector3,
+    minDirectionDot: number,
+  ) => {
+    const lengthSq = pellet.x * pellet.x + pellet.y * pellet.y + pellet.z * pellet.z
+    if (!Number.isFinite(lengthSq) || lengthSq <= 1e-8) return true
+    const invLength = 1 / Math.sqrt(lengthSq)
+    const directionDot =
+      pellet.x * invLength * cameraLocalDir.x +
+      pellet.y * invLength * cameraLocalDir.y +
+      pellet.z * invLength * cameraLocalDir.z
+    return directionDot >= minDirectionDot
   }
 
   const isOccludedByPlanet = (point: THREE.Vector3, cameraLocalPos: THREE.Vector3) => {
@@ -6441,7 +6458,7 @@ diffuseColor.a *= retireEdge;`,
       transparent: true,
       opacity: PELLET_INNER_GLOW_OPACITY_BASE,
       depthWrite: false,
-      depthTest: true,
+      depthTest: false,
       blending: THREE.AdditiveBlending,
       sizeAttenuation: true,
       toneMapped: false,
@@ -6454,7 +6471,7 @@ diffuseColor.a *= retireEdge;`,
       transparent: true,
       opacity: PELLET_GLOW_OPACITY_BASE,
       depthWrite: false,
-      depthTest: true,
+      depthTest: false,
       blending: THREE.AdditiveBlending,
       sizeAttenuation: true,
       toneMapped: false,
@@ -6541,18 +6558,31 @@ diffuseColor.a *= retireEdge;`,
     pellets: PelletSnapshot[],
     override: PelletOverride | null,
     timeSeconds: number,
+    cameraLocalDir: THREE.Vector3,
+    viewAngle: number,
   ) => {
     pelletIdsSeen.clear()
+    pelletVisibleIds.clear()
     for (let i = 0; i < PELLET_BUCKET_COUNT; i += 1) {
       pelletBucketCounts[i] = 0
       pelletBucketOffsets[i] = 0
     }
 
+    // Keep large glow sprites stable near the horizon while culling the far hemisphere.
+    const visibleLimit = Math.min(Math.PI - 1e-4, viewAngle + PELLET_GLOW_HORIZON_MARGIN)
+    const minDirectionDot = Math.cos(visibleLimit)
+    const forcedVisiblePelletId = override?.id ?? null
+
     for (let i = 0; i < pellets.length; i += 1) {
       const pellet = pellets[i]
+      pelletIdsSeen.add(pellet.id)
+      const forceVisible = forcedVisiblePelletId !== null && pellet.id === forcedVisiblePelletId
+      if (!forceVisible && !isPelletNearSide(pellet, cameraLocalDir, minDirectionDot)) {
+        continue
+      }
       const bucketIndex = pelletBucketIndex(pellet.colorIndex, pellet.size)
       pelletBucketCounts[bucketIndex] += 1
-      pelletIdsSeen.add(pellet.id)
+      pelletVisibleIds.add(pellet.id)
     }
 
     const bucketPositions: Array<Float32Array | null> = new Array(PELLET_BUCKET_COUNT).fill(null)
@@ -6580,6 +6610,7 @@ diffuseColor.a *= retireEdge;`,
 
     for (let i = 0; i < pellets.length; i += 1) {
       const pellet = pellets[i]
+      if (!pelletVisibleIds.has(pellet.id)) continue
       const bucketIndex = pelletBucketIndex(pellet.colorIndex, pellet.size)
       const positions = bucketPositions[bucketIndex]
       if (!positions) continue
@@ -6955,6 +6986,17 @@ diffuseColor.a *= retireEdge;`,
       }
     }
 
+    patchCenterQuat.copy(world.quaternion).invert()
+    cameraLocalPosTemp.copy(camera.position).applyQuaternion(patchCenterQuat)
+    const cameraLocalDistance = cameraLocalPosTemp.length()
+    if (!Number.isFinite(cameraLocalDistance) || cameraLocalDistance <= 1e-8) {
+      cameraLocalDirTemp.set(0, 0, 1)
+    } else {
+      cameraLocalDirTemp.copy(cameraLocalPosTemp).multiplyScalar(1 / cameraLocalDistance)
+    }
+    const aspect = viewportHeight > 0 ? viewportWidth / viewportHeight : 1
+    const viewAngle = computeVisibleSurfaceAngle(cameraLocalDistance, aspect)
+
     if (snapshot) {
       const pelletOverride = updateSnakes(
         snapshot.players,
@@ -6963,17 +7005,12 @@ diffuseColor.a *= retireEdge;`,
         snapshot.pellets,
         now,
       )
-      updatePellets(snapshot.pellets, pelletOverride, now * 0.001)
+      updatePellets(snapshot.pellets, pelletOverride, now * 0.001, cameraLocalDirTemp, viewAngle)
     } else {
       updateSnakes([], localPlayerId, deltaSeconds, null, now)
-      updatePellets([], null, now * 0.001)
+      updatePellets([], null, now * 0.001, cameraLocalDirTemp, viewAngle)
     }
 
-    patchCenterQuat.copy(world.quaternion).invert()
-    cameraLocalPosTemp.copy(camera.position).applyQuaternion(patchCenterQuat)
-    cameraLocalDirTemp.copy(cameraLocalPosTemp).normalize()
-    const aspect = viewportHeight > 0 ? viewportWidth / viewportHeight : 1
-    const viewAngle = computeVisibleSurfaceAngle(cameraLocalPosTemp.length(), aspect)
     if (PLANET_PATCH_ENABLED) {
       updatePlanetPatchVisibility(cameraLocalDirTemp, viewAngle)
     }
@@ -7109,6 +7146,7 @@ diffuseColor.a *= retireEdge;`,
     pelletGroundCache.clear()
     pelletMotionStates.clear()
     pelletIdsSeen.clear()
+    pelletVisibleIds.clear()
     for (const [id, visual] of snakes) {
       removeSnake(visual, id)
     }
