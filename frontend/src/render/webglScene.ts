@@ -84,59 +84,65 @@ type BoostDraftMaterialUserData = {
 }
 
 type PelletSpriteBucket = {
+  shadowPoints: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>
   corePoints: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>
+  innerGlowPoints: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>
   glowPoints: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>
+  shadowMaterial: THREE.PointsMaterial
   coreMaterial: THREE.PointsMaterial
+  innerGlowMaterial: THREE.PointsMaterial
   glowMaterial: THREE.PointsMaterial
   positionAttribute: THREE.BufferAttribute
   capacity: number
+  baseShadowSize: number
   baseCoreSize: number
+  baseInnerGlowSize: number
   baseGlowSize: number
   colorBucketIndex: number
   sizeTierIndex: number
 }
 
-const createPelletCoreTexture = () => {
-  const size = 128
+const createPelletRadialTexture = (
+  size: number,
+  stops: Array<{ offset: number; color: string }>,
+) => {
   const canvas = document.createElement('canvas')
   canvas.width = size
   canvas.height = size
   const ctx = canvas.getContext('2d')
   if (!ctx) return null
-
   const center = size * 0.5
-  const radius = size * 0.38
+  const gradient = ctx.createRadialGradient(center, center, 0, center, center, center)
+  for (const stop of stops) {
+    gradient.addColorStop(stop.offset, stop.color)
+  }
+  ctx.clearRect(0, 0, size, size)
+  ctx.fillStyle = gradient
+  ctx.fillRect(0, 0, size, size)
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.colorSpace = THREE.SRGBColorSpace
+  texture.needsUpdate = true
+  return texture
+}
+
+const createPelletShadowTexture = () => {
+  const size = 96
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+  const center = size * 0.5
+  const radius = size * 0.23
+
   ctx.clearRect(0, 0, size, size)
   ctx.save()
+  ctx.shadowBlur = size * 0.14
+  ctx.shadowOffsetY = size * 0.06
+  ctx.shadowColor = 'rgba(255,255,255,0.98)'
+  ctx.fillStyle = 'rgba(255,255,255,0.92)'
   ctx.beginPath()
-  ctx.arc(center, center, radius, 0, Math.PI * 2)
-  ctx.closePath()
-  ctx.clip()
-
-  const shadeGradient = ctx.createRadialGradient(
-    center - radius * 0.38,
-    center - radius * 0.46,
-    radius * 0.12,
-    center,
-    center,
-    radius * 1.02,
-  )
-  shadeGradient.addColorStop(0, 'rgba(255,255,255,1)')
-  shadeGradient.addColorStop(0.44, 'rgba(244,244,244,0.98)')
-  shadeGradient.addColorStop(0.78, 'rgba(176,176,176,0.96)')
-  shadeGradient.addColorStop(1, 'rgba(96,96,96,0.94)')
-  ctx.fillStyle = shadeGradient
-  ctx.fillRect(0, 0, size, size)
-
-  ctx.strokeStyle = 'rgba(255,255,255,0.56)'
-  ctx.lineWidth = radius * 0.17
-  ctx.beginPath()
-  ctx.arc(center, center, radius * 0.92, Math.PI * 1.08, Math.PI * 1.8)
-  ctx.stroke()
-
-  ctx.fillStyle = 'rgba(255,255,255,0.78)'
-  ctx.beginPath()
-  ctx.arc(center - radius * 0.34, center - radius * 0.34, radius * 0.24, 0, Math.PI * 2)
+  ctx.arc(center, center - size * 0.04, radius, 0, Math.PI * 2)
   ctx.fill()
   ctx.restore()
 
@@ -146,26 +152,26 @@ const createPelletCoreTexture = () => {
   return texture
 }
 
+const createPelletCoreTexture = () => {
+  return createPelletRadialTexture(96, [
+    { offset: 0, color: 'rgba(255,255,255,1)' },
+    { offset: 0.99, color: 'rgba(255,255,255,0.2)' },
+    { offset: 1, color: 'rgba(255,255,255,0)' },
+  ])
+}
+
+const createPelletInnerGlowTexture = () => {
+  return createPelletRadialTexture(96, [
+    { offset: 0, color: 'rgba(255,255,255,1)' },
+    { offset: 1, color: 'rgba(255,255,255,0)' },
+  ])
+}
+
 const createPelletGlowTexture = () => {
-  const size = 64
-  const canvas = document.createElement('canvas')
-  canvas.width = size
-  canvas.height = size
-  const ctx = canvas.getContext('2d')
-  if (!ctx) return null
-  const center = size * 0.5
-  const gradient = ctx.createRadialGradient(center, center, 0, center, center, center)
-  gradient.addColorStop(0, 'rgba(255,255,255,0.88)')
-  gradient.addColorStop(0.22, 'rgba(255,255,255,0.64)')
-  gradient.addColorStop(0.58, 'rgba(255,255,255,0.22)')
-  gradient.addColorStop(1, 'rgba(255,255,255,0)')
-  ctx.clearRect(0, 0, size, size)
-  ctx.fillStyle = gradient
-  ctx.fillRect(0, 0, size, size)
-  const texture = new THREE.CanvasTexture(canvas)
-  texture.colorSpace = THREE.SRGBColorSpace
-  texture.needsUpdate = true
-  return texture
+  return createPelletRadialTexture(128, [
+    { offset: 0, color: 'rgba(255,255,255,1)' },
+    { offset: 1, color: 'rgba(255,255,255,0)' },
+  ])
 }
 
 const createBoostDraftTexture = () => {
@@ -474,13 +480,18 @@ const PELLET_COLORS = [
 const PELLET_SIZE_TIER_MULTIPLIERS = [0.9, 1.45, 2.8]
 const PELLET_SIZE_TIER_MEDIUM_MIN = 1.05
 const PELLET_SIZE_TIER_LARGE_MIN = 1.6
-const PELLET_GLOW_PULSE_SPEED = 0.45
-const PELLET_CORE_OPACITY_BASE = 0.98
-const PELLET_CORE_OPACITY_RANGE = 0.03
-const PELLET_CORE_SIZE_RANGE = 0.03
-const PELLET_GLOW_OPACITY_BASE = 0.74
-const PELLET_GLOW_OPACITY_RANGE = 0.16
-const PELLET_GLOW_SIZE_RANGE = 0.1
+const PELLET_GLOW_PULSE_SPEED = 4.6
+const PELLET_SHADOW_OPACITY_BASE = 0.62
+const PELLET_SHADOW_OPACITY_RANGE = 0.03
+const PELLET_CORE_OPACITY_BASE = 0.62
+const PELLET_CORE_OPACITY_RANGE = 0.38
+const PELLET_CORE_SIZE_RANGE = 0.01
+const PELLET_INNER_GLOW_OPACITY_BASE = 0.05
+const PELLET_INNER_GLOW_OPACITY_RANGE = 0.08
+const PELLET_INNER_GLOW_SIZE_RANGE = 0.03
+const PELLET_GLOW_OPACITY_BASE = 0.08
+const PELLET_GLOW_OPACITY_RANGE = 0.1
+const PELLET_GLOW_SIZE_RANGE = 0.06
 const PELLET_GLOW_PHASE_STEP = 0.73
 const TONGUE_MAX_LENGTH = HEAD_RADIUS * 2.8
 const TONGUE_MAX_RANGE = HEAD_RADIUS * 3.1
@@ -1687,9 +1698,13 @@ const createScene = async (
 
   const PELLET_COLOR_BUCKET_COUNT = PELLET_COLORS.length
   const PELLET_BUCKET_COUNT = PELLET_COLOR_BUCKET_COUNT * PELLET_SIZE_TIER_MULTIPLIERS.length
-  const PELLET_CORE_POINT_SIZE = PELLET_RADIUS * 5
-  const PELLET_GLOW_POINT_SIZE = PELLET_RADIUS * 8.4
+  const PELLET_SHADOW_POINT_SIZE = PELLET_RADIUS * 6.8
+  const PELLET_CORE_POINT_SIZE = PELLET_RADIUS * 5.2
+  const PELLET_INNER_GLOW_POINT_SIZE = PELLET_RADIUS * 11
+  const PELLET_GLOW_POINT_SIZE = PELLET_RADIUS * 16
+  const pelletShadowTexture = createPelletShadowTexture()
   const pelletCoreTexture = createPelletCoreTexture()
+  const pelletInnerGlowTexture = createPelletInnerGlowTexture()
   const pelletGlowTexture = createPelletGlowTexture()
   let treeTierGeometries: THREE.BufferGeometry[] = []
   let treeTierMeshes: THREE.InstancedMesh[] = []
@@ -6024,7 +6039,9 @@ diffuseColor.a *= retireEdge;`,
     const sizeTierIndex = Math.floor(bucketIndex / PELLET_COLOR_BUCKET_COUNT)
     const colorBucketIndex = bucketIndex % PELLET_COLOR_BUCKET_COUNT
     const sizeMultiplier = PELLET_SIZE_TIER_MULTIPLIERS[sizeTierIndex] ?? 1
+    const baseShadowSize = PELLET_SHADOW_POINT_SIZE * sizeMultiplier
     const baseCoreSize = PELLET_CORE_POINT_SIZE * sizeMultiplier
+    const baseInnerGlowSize = PELLET_INNER_GLOW_POINT_SIZE * sizeMultiplier
     const baseGlowSize = PELLET_GLOW_POINT_SIZE * sizeMultiplier
     const geometry = new THREE.BufferGeometry()
     const positionArray = new Float32Array(capacity * 3)
@@ -6033,6 +6050,19 @@ diffuseColor.a *= retireEdge;`,
     geometry.setAttribute('position', positionAttribute)
     geometry.setDrawRange(0, 0)
 
+    const shadowMaterial = new THREE.PointsMaterial({
+      size: baseShadowSize,
+      map: pelletShadowTexture ?? undefined,
+      alphaMap: pelletShadowTexture ?? undefined,
+      color: '#000000',
+      transparent: true,
+      opacity: PELLET_SHADOW_OPACITY_BASE,
+      depthWrite: false,
+      depthTest: true,
+      blending: THREE.NormalBlending,
+      sizeAttenuation: true,
+      toneMapped: false,
+    })
     const coreMaterial = new THREE.PointsMaterial({
       size: baseCoreSize,
       map: pelletCoreTexture ?? undefined,
@@ -6040,10 +6070,22 @@ diffuseColor.a *= retireEdge;`,
       color: PELLET_COLORS[colorBucketIndex] ?? '#ffd166',
       transparent: true,
       opacity: PELLET_CORE_OPACITY_BASE,
-      alphaTest: 0.36,
       depthWrite: false,
       depthTest: true,
-      blending: THREE.NormalBlending,
+      blending: THREE.AdditiveBlending,
+      sizeAttenuation: true,
+      toneMapped: false,
+    })
+    const innerGlowMaterial = new THREE.PointsMaterial({
+      size: baseInnerGlowSize,
+      map: pelletInnerGlowTexture ?? undefined,
+      alphaMap: pelletInnerGlowTexture ?? undefined,
+      color: PELLET_COLORS[colorBucketIndex] ?? '#ffd166',
+      transparent: true,
+      opacity: PELLET_INNER_GLOW_OPACITY_BASE,
+      depthWrite: false,
+      depthTest: true,
+      blending: THREE.AdditiveBlending,
       sizeAttenuation: true,
       toneMapped: false,
     })
@@ -6060,24 +6102,40 @@ diffuseColor.a *= retireEdge;`,
       sizeAttenuation: true,
       toneMapped: false,
     })
+    const shadowPoints = new THREE.Points(geometry, shadowMaterial)
     const glowPoints = new THREE.Points(geometry, glowMaterial)
+    const innerGlowPoints = new THREE.Points(geometry, innerGlowMaterial)
     const corePoints = new THREE.Points(geometry, coreMaterial)
+    shadowPoints.visible = false
     glowPoints.visible = false
+    innerGlowPoints.visible = false
     corePoints.visible = false
+    shadowPoints.frustumCulled = false
     glowPoints.frustumCulled = false
+    innerGlowPoints.frustumCulled = false
     corePoints.frustumCulled = false
-    glowPoints.renderOrder = 5
+    shadowPoints.renderOrder = 3
+    glowPoints.renderOrder = 4
+    innerGlowPoints.renderOrder = 5
     corePoints.renderOrder = 6
+    pelletsGroup.add(shadowPoints)
     pelletsGroup.add(glowPoints)
+    pelletsGroup.add(innerGlowPoints)
     pelletsGroup.add(corePoints)
     return {
+      shadowPoints,
       corePoints,
+      innerGlowPoints,
       glowPoints,
+      shadowMaterial,
       coreMaterial,
+      innerGlowMaterial,
       glowMaterial,
       positionAttribute,
       capacity,
+      baseShadowSize,
       baseCoreSize,
+      baseInnerGlowSize,
       baseGlowSize,
       colorBucketIndex,
       sizeTierIndex,
@@ -6112,7 +6170,9 @@ diffuseColor.a *= retireEdge;`,
     geometry.setDrawRange(0, 0)
 
     const previousGeometry = bucket.corePoints.geometry
+    bucket.shadowPoints.geometry = geometry
     bucket.corePoints.geometry = geometry
+    bucket.innerGlowPoints.geometry = geometry
     bucket.glowPoints.geometry = geometry
     previousGeometry.dispose()
     bucket.positionAttribute = positionAttribute
@@ -6140,14 +6200,18 @@ diffuseColor.a *= retireEdge;`,
       const bucket = pelletBuckets[bucketIndex]
       if (required <= 0) {
         if (bucket) {
+          bucket.shadowPoints.visible = false
           bucket.corePoints.visible = false
+          bucket.innerGlowPoints.visible = false
           bucket.glowPoints.visible = false
           bucket.corePoints.geometry.setDrawRange(0, 0)
         }
         continue
       }
       const nextBucket = ensurePelletBucketCapacity(bucketIndex, required)
+      nextBucket.shadowPoints.visible = true
       nextBucket.corePoints.visible = true
+      nextBucket.innerGlowPoints.visible = true
       nextBucket.glowPoints.visible = true
       nextBucket.corePoints.geometry.setDrawRange(0, required)
       bucketPositions[bucketIndex] = nextBucket.positionAttribute.array as Float32Array
@@ -6195,20 +6259,32 @@ diffuseColor.a *= retireEdge;`,
         timeSeconds * PELLET_GLOW_PULSE_SPEED +
         bucket.colorBucketIndex * PELLET_GLOW_PHASE_STEP +
         bucket.sizeTierIndex * 0.91
-      const pulse = 0.5 + 0.5 * Math.sin(phase)
-      const easedPulse = smoothstep(0, 1, pulse)
-      const centered = (easedPulse - 0.5) * 2
-      const centeredCore = centered * 0.55
+      const pulse = 0.5 + 0.5 * Math.cos(phase)
+      const centered = (pulse - 0.5) * 2
+      const shadowPulse = 0.5 + 0.5 * Math.cos(phase * 0.6 + 1.1)
+      bucket.shadowMaterial.opacity = clamp(
+        PELLET_SHADOW_OPACITY_BASE + shadowPulse * PELLET_SHADOW_OPACITY_RANGE,
+        0.45,
+        0.75,
+      )
+      bucket.shadowMaterial.size = bucket.baseShadowSize
       bucket.coreMaterial.opacity = clamp(
-        PELLET_CORE_OPACITY_BASE + centeredCore * PELLET_CORE_OPACITY_RANGE,
-        0.9,
+        PELLET_CORE_OPACITY_BASE + pulse * PELLET_CORE_OPACITY_RANGE,
+        0.5,
         1,
       )
-      bucket.coreMaterial.size = bucket.baseCoreSize * (1 + centeredCore * PELLET_CORE_SIZE_RANGE)
+      bucket.coreMaterial.size = bucket.baseCoreSize * (1 + centered * PELLET_CORE_SIZE_RANGE)
+      bucket.innerGlowMaterial.opacity = clamp(
+        PELLET_INNER_GLOW_OPACITY_BASE + pulse * PELLET_INNER_GLOW_OPACITY_RANGE,
+        0.03,
+        0.22,
+      )
+      bucket.innerGlowMaterial.size =
+        bucket.baseInnerGlowSize * (1 + centered * PELLET_INNER_GLOW_SIZE_RANGE)
       bucket.glowMaterial.opacity = clamp(
-        PELLET_GLOW_OPACITY_BASE + centered * PELLET_GLOW_OPACITY_RANGE,
-        0.44,
-        0.96,
+        PELLET_GLOW_OPACITY_BASE + pulse * PELLET_GLOW_OPACITY_RANGE,
+        0.05,
+        0.25,
       )
       bucket.glowMaterial.size = bucket.baseGlowSize * (1 + centered * PELLET_GLOW_SIZE_RANGE)
     }
@@ -6403,14 +6479,20 @@ diffuseColor.a *= retireEdge;`,
     for (let i = 0; i < pelletBuckets.length; i += 1) {
       const bucket = pelletBuckets[i]
       if (!bucket) continue
+      pelletsGroup.remove(bucket.shadowPoints)
       pelletsGroup.remove(bucket.glowPoints)
+      pelletsGroup.remove(bucket.innerGlowPoints)
       pelletsGroup.remove(bucket.corePoints)
       bucket.corePoints.geometry.dispose()
+      bucket.shadowMaterial.dispose()
       bucket.coreMaterial.dispose()
+      bucket.innerGlowMaterial.dispose()
       bucket.glowMaterial.dispose()
       pelletBuckets[i] = null
     }
+    pelletShadowTexture?.dispose()
     pelletCoreTexture?.dispose()
+    pelletInnerGlowTexture?.dispose()
     pelletGlowTexture?.dispose()
     pelletGroundCache.clear()
     pelletIdsSeen.clear()
