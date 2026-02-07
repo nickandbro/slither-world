@@ -167,6 +167,8 @@ enum JsonClientMessage {
         name: Option<String>,
         #[serde(rename = "playerId")]
         player_id: Option<String>,
+        #[serde(rename = "deferSpawn")]
+        defer_spawn: Option<bool>,
     },
     #[serde(rename = "respawn")]
     Respawn,
@@ -223,9 +225,17 @@ impl Room {
             return;
         };
         let message = match message {
-            JsonClientMessage::Join { name, player_id } => {
+            JsonClientMessage::Join {
+                name,
+                player_id,
+                defer_spawn,
+            } => {
                 let player_id = player_id.and_then(|value| Uuid::parse_str(&value).ok());
-                protocol::ClientMessage::Join { name, player_id }
+                protocol::ClientMessage::Join {
+                    name,
+                    player_id,
+                    defer_spawn: defer_spawn.unwrap_or(false),
+                }
             }
             JsonClientMessage::Respawn => protocol::ClientMessage::Respawn,
             JsonClientMessage::Input {
@@ -259,8 +269,12 @@ impl Room {
     ) {
         let mut state = self.state.lock().await;
         match message {
-            protocol::ClientMessage::Join { name, player_id } => {
-                state.handle_join(session_id, name, player_id);
+            protocol::ClientMessage::Join {
+                name,
+                player_id,
+                defer_spawn,
+            } => {
+                state.handle_join(session_id, name, player_id, defer_spawn);
                 drop(state);
                 self.ensure_loop();
             }
@@ -339,7 +353,13 @@ impl RoomState {
         }
     }
 
-    fn handle_join(&mut self, session_id: &str, name: Option<String>, player_id: Option<Uuid>) {
+    fn handle_join(
+        &mut self,
+        session_id: &str,
+        name: Option<String>,
+        player_id: Option<Uuid>,
+        defer_spawn: bool,
+    ) {
         let raw_name = name.unwrap_or_else(|| "Player".to_string());
         let sanitized_name = sanitize_player_name(&raw_name, "Player");
 
@@ -349,16 +369,25 @@ impl RoomState {
                 player.name = sanitized_name.clone();
                 player.connected = true;
                 player.last_seen = Self::now_millis();
+                if defer_spawn && !player.is_bot {
+                    Self::prepare_player_for_manual_spawn(player);
+                }
                 id_string
             } else {
-                let new_player = self.create_player(id, sanitized_name.clone(), false);
+                let mut new_player = self.create_player(id, sanitized_name.clone(), false);
+                if defer_spawn {
+                    Self::prepare_player_for_manual_spawn(&mut new_player);
+                }
                 self.players.insert(id_string.clone(), new_player);
                 id_string
             }
         } else {
             let id = Uuid::new_v4();
             let id_string = id.to_string();
-            let new_player = self.create_player(id, sanitized_name.clone(), false);
+            let mut new_player = self.create_player(id, sanitized_name.clone(), false);
+            if defer_spawn {
+                Self::prepare_player_for_manual_spawn(&mut new_player);
+            }
             self.players.insert(id_string.clone(), new_player);
             id_string
         };
@@ -374,6 +403,22 @@ impl RoomState {
             let _ = sender.send(payload);
         }
         self.broadcast_player_meta(&[player_id]);
+    }
+
+    fn prepare_player_for_manual_spawn(player: &mut Player) {
+        player.boost = false;
+        player.is_boosting = false;
+        player.stamina = STAMINA_MAX;
+        player.oxygen = OXYGEN_MAX;
+        player.oxygen_damage_accumulator = 0.0;
+        player.score = 0;
+        player.alive = false;
+        player.respawn_at = None;
+        player.snake.clear();
+        player.pellet_growth_fraction = 0.0;
+        player.tail_extension = 0.0;
+        player.next_digestion_id = 0;
+        player.digestions.clear();
     }
 
     fn handle_respawn(&mut self, session_id: &str) {

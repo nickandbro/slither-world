@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import { enterGame } from './helpers'
 
 type SnakeGroundingInfo = {
   minClearance: number
@@ -23,6 +24,7 @@ const readSnakeGroundingInfo = async (page: Page) => {
 test('keeps local snake segments grounded against terrain facets', async ({ page }) => {
   await page.goto('/?renderer=webgl')
   await expect(page.locator('.status')).toContainText('Connected')
+  await enterGame(page)
 
   const viewport = page.viewportSize()
   if (viewport) {

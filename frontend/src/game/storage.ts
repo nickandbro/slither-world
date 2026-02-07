@@ -8,6 +8,10 @@ export const DEFAULT_ROOM = 'main'
 export const DEFAULT_RENDERER = 'auto'
 export type RendererPreference = 'auto' | 'webgl' | 'webgpu'
 
+export function createRandomPlayerName() {
+  return `Player-${Math.floor(Math.random() * 999) + 1}`
+}
+
 export function sanitizeRendererPreference(value: string | null | undefined): RendererPreference {
   if (value === 'webgl' || value === 'webgpu' || value === 'auto') {
     return value
@@ -18,7 +22,7 @@ export function sanitizeRendererPreference(value: string | null | undefined): Re
 export function getInitialName() {
   const stored = localStorage.getItem(LOCAL_STORAGE_NAME)
   if (stored) return stored
-  const fallback = `Player-${Math.floor(Math.random() * 999) + 1}`
+  const fallback = createRandomPlayerName()
   localStorage.setItem(LOCAL_STORAGE_NAME, fallback)
   return fallback
 }

@@ -8,10 +8,11 @@ import {
 } from './render/webglScene'
 import type { Camera, Environment, GameStateSnapshot, Point } from './game/types'
 import { axisFromPointer, updateCamera } from './game/camera'
-import { IDENTITY_QUAT, clamp, normalize } from './game/math'
+import { IDENTITY_QUAT, clamp, normalize, normalizeQuat } from './game/math'
 import { buildInterpolatedSnapshot, type TimedSnapshot } from './game/snapshots'
 import { drawHud, type RenderConfig } from './game/hud'
 import {
+  createRandomPlayerName,
   getInitialName,
   getStoredBestScore,
   getStoredPlayerId,
@@ -90,6 +91,8 @@ const BOOST_EFFECT_FADE_IN_RATE = 9
 const BOOST_EFFECT_FADE_OUT_RATE = 12
 const BOOST_EFFECT_PULSE_SPEED = 8.5
 const BOOST_EFFECT_ACTIVE_CLASS_THRESHOLD = 0.01
+const MENU_CAMERA_DISTANCE = 6.6
+const MENU_TO_GAMEPLAY_BLEND_MS = 900
 const formatRendererError = (error: unknown) => {
   if (error instanceof Error && error.message.trim()) {
     return error.message.trim()
@@ -126,6 +129,79 @@ type BoostFxState = {
   activeClassApplied: boolean
 }
 
+type MenuPhase = 'preplay' | 'spawning' | 'playing'
+
+type MenuFlowDebugInfo = {
+  phase: MenuPhase
+  hasSpawned: boolean
+  cameraBlend: number
+  cameraDistance: number
+}
+
+const MENU_CAMERA_TARGET = normalize({ x: 0.34, y: 0.9, z: 0.28 })
+const createMenuCamera = () => {
+  const upRef = { current: { x: 0, y: 1, z: 0 } }
+  const camera = updateCamera(MENU_CAMERA_TARGET, upRef)
+  if (camera.active) return camera
+  return { q: { ...IDENTITY_QUAT }, active: true }
+}
+const MENU_CAMERA = createMenuCamera()
+
+const easeInOutCubic = (t: number) => {
+  if (t <= 0) return 0
+  if (t >= 1) return 1
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
+}
+
+const slerpQuaternion = (a: Camera['q'], b: Camera['q'], t: number): Camera['q'] => {
+  const clampedT = clamp(t, 0, 1)
+  if (clampedT <= 0) return a
+  if (clampedT >= 1) return b
+
+  let bx = b.x
+  let by = b.y
+  let bz = b.z
+  let bw = b.w
+  let cosHalfTheta = a.x * bx + a.y * by + a.z * bz + a.w * bw
+
+  if (cosHalfTheta < 0) {
+    cosHalfTheta = -cosHalfTheta
+    bx = -bx
+    by = -by
+    bz = -bz
+    bw = -bw
+  }
+
+  if (cosHalfTheta > 0.9995) {
+    return normalizeQuat({
+      x: a.x + (bx - a.x) * clampedT,
+      y: a.y + (by - a.y) * clampedT,
+      z: a.z + (bz - a.z) * clampedT,
+      w: a.w + (bw - a.w) * clampedT,
+    })
+  }
+
+  const halfTheta = Math.acos(clamp(cosHalfTheta, -1, 1))
+  const sinHalfTheta = Math.sqrt(1 - cosHalfTheta * cosHalfTheta)
+  if (!Number.isFinite(sinHalfTheta) || sinHalfTheta < 1e-6) {
+    return normalizeQuat({
+      x: a.x + (bx - a.x) * clampedT,
+      y: a.y + (by - a.y) * clampedT,
+      z: a.z + (bz - a.z) * clampedT,
+      w: a.w + (bw - a.w) * clampedT,
+    })
+  }
+
+  const ratioA = Math.sin((1 - clampedT) * halfTheta) / sinHalfTheta
+  const ratioB = Math.sin(clampedT * halfTheta) / sinHalfTheta
+  return {
+    x: a.x * ratioA + bx * ratioB,
+    y: a.y * ratioA + by * ratioB,
+    z: a.z * ratioA + bz * ratioB,
+    w: a.w * ratioA + bw * ratioB,
+  }
+}
+
 export default function App() {
   const glCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const hudCanvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -150,9 +226,20 @@ export default function App() {
   const cameraRef = useRef<Camera>({ q: { ...IDENTITY_QUAT }, active: false })
   const cameraUpRef = useRef<Point>({ x: 0, y: 1, z: 0 })
   const cameraDistanceRef = useRef(CAMERA_DISTANCE_DEFAULT)
-  const localHeadRef = useRef<Point | null>(null)
+  const renderCameraDistanceRef = useRef(MENU_CAMERA_DISTANCE)
+  const localHeadRef = useRef<Point | null>(MENU_CAMERA_TARGET)
   const headScreenRef = useRef<{ x: number; y: number } | null>(null)
   const playerMetaRef = useRef<Map<string, PlayerMeta>>(new Map())
+  const menuPhaseRef = useRef<MenuPhase>('preplay')
+  const inputEnabledRef = useRef(false)
+  const cameraBlendRef = useRef(0)
+  const cameraBlendStartMsRef = useRef<number | null>(null)
+  const menuDebugInfoRef = useRef<MenuFlowDebugInfo>({
+    phase: 'preplay',
+    hasSpawned: false,
+    cameraBlend: 0,
+    cameraDistance: MENU_CAMERA_DISTANCE,
+  })
   const boostFxStateRef = useRef<BoostFxState>({
     intensity: 0,
     pulse: 0,
@@ -173,6 +260,7 @@ export default function App() {
   const [leaderboardStatus, setLeaderboardStatus] = useState('')
   const [activeRenderer, setActiveRenderer] = useState<RendererBackend | null>(null)
   const [rendererFallbackReason, setRendererFallbackReason] = useState<string | null>(null)
+  const [menuPhase, setMenuPhase] = useState<MenuPhase>('preplay')
   const [mountainDebug, setMountainDebug] = useState(getMountainDebug)
   const [lakeDebug, setLakeDebug] = useState(getLakeDebug)
   const [treeDebug, setTreeDebug] = useState(getTreeDebug)
@@ -188,6 +276,7 @@ export default function App() {
   })
   const playerIdRef = useRef<string | null>(playerId)
   const playerNameRef = useRef(playerName)
+  const isPlaying = menuPhase === 'playing'
 
   const localPlayer = useMemo(() => {
     return gameState?.players.find((player) => player.id === playerId) ?? null
@@ -195,6 +284,14 @@ export default function App() {
 
   const score = localPlayer?.score ?? 0
   const playersOnline = gameState?.totalPlayers ?? 0
+  useEffect(() => {
+    if (menuPhase !== 'preplay') return
+    if (!localPlayer || !localPlayer.alive || localPlayer.snake.length === 0) return
+    cameraBlendRef.current = 1
+    cameraBlendStartMsRef.current = null
+    setMenuPhase('playing')
+  }, [localPlayer, menuPhase])
+
   const rendererStatus = useMemo(() => {
     if (!activeRenderer) return 'Renderer: Initializing...'
     if (rendererFallbackReason) {
@@ -297,6 +394,15 @@ export default function App() {
   useEffect(() => {
     playerNameRef.current = playerName
   }, [playerName])
+
+  useEffect(() => {
+    menuPhaseRef.current = menuPhase
+    inputEnabledRef.current = menuPhase === 'playing'
+    if (menuPhase !== 'playing') {
+      pointerRef.current.active = false
+      pointerRef.current.boost = false
+    }
+  }, [menuPhase])
 
   useEffect(() => {
     const webgl = webglRef.current
@@ -417,45 +523,105 @@ export default function App() {
             const localId = playerIdRef.current
             const localSnapshotPlayer =
               snapshot?.players.find((player) => player.id === localId) ?? null
+            const localHead = localSnapshotPlayer?.snake[0] ?? null
+            const hasSpawnedSnake =
+              !!localSnapshotPlayer && localSnapshotPlayer.alive && localSnapshotPlayer.snake.length > 0
+            const gameplayCamera = updateCamera(localHead, cameraUpRef)
+            const phase = menuPhaseRef.current
+            const nowMs = performance.now()
+
+            let blend = cameraBlendRef.current
+            if (phase === 'preplay') {
+              blend = 0
+              cameraBlendStartMsRef.current = null
+            } else if (hasSpawnedSnake && gameplayCamera.active) {
+              if (cameraBlendStartMsRef.current === null) {
+                cameraBlendStartMsRef.current = nowMs
+              }
+              const elapsed = nowMs - cameraBlendStartMsRef.current
+              blend = clamp(elapsed / MENU_TO_GAMEPLAY_BLEND_MS, 0, 1)
+            } else {
+              blend = 0
+              cameraBlendStartMsRef.current = null
+            }
+            cameraBlendRef.current = blend
+            const easedBlend = easeInOutCubic(blend)
+
+            let renderCamera = MENU_CAMERA
+            let renderDistance = MENU_CAMERA_DISTANCE
+            if (phase === 'playing') {
+              renderCamera = gameplayCamera.active ? gameplayCamera : MENU_CAMERA
+              renderDistance = cameraDistanceRef.current
+              cameraBlendRef.current = 1
+            } else if (phase === 'spawning' && gameplayCamera.active) {
+              renderCamera = {
+                active: true,
+                q: slerpQuaternion(MENU_CAMERA.q, gameplayCamera.q, easedBlend),
+              }
+              renderDistance =
+                MENU_CAMERA_DISTANCE + (cameraDistanceRef.current - MENU_CAMERA_DISTANCE) * easedBlend
+              if (blend >= 0.999 && hasSpawnedSnake) {
+                setMenuPhase('playing')
+              }
+            }
+
+            cameraRef.current = renderCamera
+            renderCameraDistanceRef.current = renderDistance
+            localHeadRef.current = hasSpawnedSnake && localHead ? normalize(localHead) : MENU_CAMERA_TARGET
             boostActive =
+              inputEnabledRef.current &&
               pointerRef.current.boost &&
               !!localSnapshotPlayer &&
               localSnapshotPlayer.alive &&
               localSnapshotPlayer.stamina > BOOST_EFFECT_STAMINA_EPS
-            const localHead = localSnapshotPlayer?.snake[0] ?? null
-            localHeadRef.current = localHead ? normalize(localHead) : null
-            const camera = updateCamera(localHead, cameraUpRef)
-            cameraRef.current = camera
-            const headScreen = webgl.render(
-              snapshot,
-              camera,
-              localId,
-              cameraDistanceRef.current,
-            )
+
+            const headScreen = webgl.render(snapshot, renderCamera, localId, renderDistance)
             headScreenRef.current = headScreen
-            const oxygenPct = localSnapshotPlayer
-              ? clamp(localSnapshotPlayer.oxygen, 0, 1) * 100
-              : null
-            const staminaPct = localSnapshotPlayer
-              ? clamp(localSnapshotPlayer.stamina, 0, 1) * 100
-              : null
-            drawHud(
-              hudCtx,
-              config,
-              pointerRef.current.active ? pointerRef.current.angle : null,
-              headScreen,
-              pointerRef.current.active ? pointerRef.current.distance : null,
-              pointerRef.current.active ? pointerRef.current.maxRange : null,
-              {
-                pct: oxygenPct,
-                low: oxygenPct !== null && oxygenPct <= 35,
-                anchor: headScreen,
-              },
-              {
-                pct: staminaPct,
-                anchor: headScreen,
-              },
-            )
+
+            if (inputEnabledRef.current) {
+              const oxygenPct = localSnapshotPlayer
+                ? clamp(localSnapshotPlayer.oxygen, 0, 1) * 100
+                : null
+              const staminaPct = localSnapshotPlayer
+                ? clamp(localSnapshotPlayer.stamina, 0, 1) * 100
+                : null
+              drawHud(
+                hudCtx,
+                config,
+                pointerRef.current.active ? pointerRef.current.angle : null,
+                headScreen,
+                pointerRef.current.active ? pointerRef.current.distance : null,
+                pointerRef.current.active ? pointerRef.current.maxRange : null,
+                {
+                  pct: oxygenPct,
+                  low: oxygenPct !== null && oxygenPct <= 35,
+                  anchor: headScreen,
+                },
+                {
+                  pct: staminaPct,
+                  anchor: headScreen,
+                },
+              )
+            } else {
+              hudCtx.clearRect(0, 0, config.width, config.height)
+            }
+
+            menuDebugInfoRef.current = {
+              phase,
+              hasSpawned: hasSpawnedSnake,
+              cameraBlend: phase === 'playing' ? 1 : blend,
+              cameraDistance: renderDistance,
+            }
+            if (DEBUG_UI_ENABLED && typeof window !== 'undefined') {
+              const debugApi = (
+                window as Window & { __SNAKE_DEBUG__?: Record<string, unknown> }
+              ).__SNAKE_DEBUG__
+              if (debugApi && typeof debugApi === 'object') {
+                ;(debugApi as { getMenuFlowInfo?: () => MenuFlowDebugInfo }).getMenuFlowInfo = () => ({
+                  ...menuDebugInfoRef.current,
+                })
+              }
+            }
           }
           updateBoostFx(boostActive)
           frameId = window.requestAnimationFrame(renderLoop)
@@ -504,13 +670,20 @@ export default function App() {
       lastSnapshotTimeRef.current = null
       tickIntervalRef.current = 50
       playerMetaRef.current = new Map()
+      localHeadRef.current = MENU_CAMERA_TARGET
+      renderCameraDistanceRef.current = MENU_CAMERA_DISTANCE
+      cameraBlendRef.current = 0
+      cameraBlendStartMsRef.current = null
+      pointerRef.current.active = false
+      pointerRef.current.boost = false
       setConnectionStatus('Connecting')
       setGameState(null)
       setEnvironment(null)
+      setMenuPhase('preplay')
 
       socket.addEventListener('open', () => {
         setConnectionStatus('Connected')
-        sendJoin(socket)
+        sendJoin(socket, true)
         startInputLoop()
       })
 
@@ -555,7 +728,7 @@ export default function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.code === 'Space') {
+      if (event.code === 'Space' && inputEnabledRef.current) {
         event.preventDefault()
         pointerRef.current.boost = true
       }
@@ -595,6 +768,10 @@ export default function App() {
   }, [])
 
   const updatePointer = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!inputEnabledRef.current) {
+      pointerRef.current.active = false
+      return
+    }
     const canvas = glCanvasRef.current
     if (!canvas) return
     const rect = canvas.getBoundingClientRect()
@@ -628,27 +805,28 @@ export default function App() {
     sendIntervalRef.current = window.setInterval(() => {
       const socket = socketRef.current
       if (!socket || socket.readyState !== WebSocket.OPEN) return
-      const axis = pointerRef.current.active
+      const axis = inputEnabledRef.current && pointerRef.current.active
         ? axisFromPointer(pointerRef.current.angle, cameraRef.current)
         : null
       const config = renderConfigRef.current
       const aspect = config && config.height > 0 ? config.width / config.height : 1
-      const viewRadius = computeViewRadius(cameraDistanceRef.current, aspect)
+      const cameraDistance = renderCameraDistanceRef.current
+      const viewRadius = computeViewRadius(cameraDistance, aspect)
       socket.send(
         encodeInput(
           axis,
-          pointerRef.current.boost,
+          inputEnabledRef.current && pointerRef.current.boost,
           localHeadRef.current,
           viewRadius,
-          cameraDistanceRef.current,
+          cameraDistance,
         ),
       )
     }, 50)
   }
 
-  const sendJoin = (socket: WebSocket) => {
+  const sendJoin = (socket: WebSocket, deferSpawn = menuPhaseRef.current !== 'playing') => {
     if (socket.readyState !== WebSocket.OPEN) return
-    socket.send(encodeJoin(playerNameRef.current, playerIdRef.current))
+    socket.send(encodeJoin(playerNameRef.current, playerIdRef.current, deferSpawn))
   }
 
   const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -661,7 +839,9 @@ export default function App() {
   }
 
   const handlePointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    event.currentTarget.releasePointerCapture(event.pointerId)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
   }
 
   const handlePointerLeave = () => {
@@ -671,6 +851,7 @@ export default function App() {
   }
 
   const handleWheel = (event: WheelEvent) => {
+    if (!inputEnabledRef.current) return
     if (!Number.isFinite(event.deltaY) || event.deltaY === 0) return
     if (event.cancelable) event.preventDefault()
     const clampedDelta = clamp(event.deltaY, -120, 120)
@@ -686,6 +867,7 @@ export default function App() {
   const requestRespawn = () => {
     const socket = socketRef.current
     if (!socket || socket.readyState !== WebSocket.OPEN) return
+    setMenuPhase('playing')
     socket.send(encodeRespawn())
   }
 
@@ -694,9 +876,32 @@ export default function App() {
     setRoomInput(nextRoom)
     if (nextRoom !== roomName) {
       setRoomName(nextRoom)
+      setMenuPhase('preplay')
     } else if (socketRef.current) {
-      sendJoin(socketRef.current)
+      sendJoin(socketRef.current, menuPhaseRef.current !== 'playing')
     }
+  }
+
+  const handlePlay = () => {
+    const socket = socketRef.current
+    if (!socket || socket.readyState !== WebSocket.OPEN) return
+
+    const trimmedName = playerName.trim()
+    const nextName = trimmedName || createRandomPlayerName()
+    if (nextName !== playerName) {
+      setPlayerName(nextName)
+    }
+    playerNameRef.current = nextName
+
+    pointerRef.current.active = false
+    pointerRef.current.boost = false
+    localHeadRef.current = MENU_CAMERA_TARGET
+    cameraBlendRef.current = 0
+    cameraBlendStartMsRef.current = null
+    setMenuPhase('spawning')
+
+    sendJoin(socket, true)
+    socket.send(encodeRespawn())
   }
 
   const handleRendererModeChange = (value: string) => {
@@ -735,14 +940,16 @@ export default function App() {
   }
 
   return (
-    <div className='app'>
+    <div className={`app ${isPlaying ? 'app--playing' : 'app--menu'}`}>
       <div className='game-card'>
-        <div className='scorebar'>
-          <div className='score'>Score: {score}</div>
-          <div className='status'>
-            Room {roomName} · {connectionStatus} · {playersOnline} online
+        {isPlaying && (
+          <div className='scorebar'>
+            <div className='score'>Score: {score}</div>
+            <div className='status'>
+              Room {roomName} · {connectionStatus} · {playersOnline} online
+            </div>
           </div>
-        </div>
+        )}
 
         <div className='play-area'>
           <div className='game-surface'>
@@ -760,7 +967,91 @@ export default function App() {
             <canvas ref={hudCanvasRef} className='hud-canvas' aria-hidden='true' />
             <div ref={boostFxRef} className='boost-fx' aria-hidden='true' />
           </div>
-          {localPlayer && !localPlayer.alive && (
+          {!isPlaying && (
+            <div className='menu-overlay'>
+              <div className='menu-card'>
+                <div className='menu-title'>Welcome to Spherical Snake</div>
+                <div className='menu-subtitle'>Steer across a tiny living world.</div>
+                <div className='menu-status status'>
+                  Room {roomName} · {connectionStatus} · {playersOnline} online
+                </div>
+
+                <div className='menu-row'>
+                  <label className='control-label' htmlFor='player-name'>
+                    Pilot name
+                  </label>
+                  <input
+                    id='player-name'
+                    value={playerName}
+                    onChange={(event) => setPlayerName(event.target.value)}
+                    placeholder='Leave blank for random'
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault()
+                        handlePlay()
+                      }
+                    }}
+                  />
+                </div>
+
+                <button
+                  type='button'
+                  className='menu-play-button'
+                  disabled={connectionStatus !== 'Connected' || menuPhase === 'spawning'}
+                  onClick={handlePlay}
+                >
+                  {menuPhase === 'spawning' ? 'Spawning...' : 'Play'}
+                </button>
+
+                <div className='menu-note'>Press play to spawn. Empty names are randomized.</div>
+
+                <div className='menu-divider' />
+
+                <div className='menu-row menu-row-inline'>
+                  <label className='control-label' htmlFor='room-name'>
+                    Room
+                  </label>
+                  <input
+                    id='room-name'
+                    value={roomInput}
+                    onChange={(event) => setRoomInput(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault()
+                        handleJoinRoom()
+                      }
+                    }}
+                  />
+                  <button type='button' onClick={handleJoinRoom}>
+                    Join
+                  </button>
+                </div>
+
+                <div className='menu-row'>
+                  <label className='control-label' htmlFor='renderer-mode'>
+                    Renderer
+                  </label>
+                  <select
+                    id='renderer-mode'
+                    value={rendererPreference}
+                    onChange={(event) => handleRendererModeChange(event.target.value)}
+                  >
+                    <option value='auto'>Auto</option>
+                    <option value='webgpu'>WebGPU</option>
+                    <option value='webgl'>WebGL</option>
+                  </select>
+                </div>
+
+                <div className='renderer-status menu-renderer-status' aria-live='polite'>
+                  <div>{rendererStatus}</div>
+                  {rendererFallbackReason && (
+                    <div className='renderer-fallback'>{rendererFallbackReason}</div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+          {isPlaying && localPlayer && !localPlayer.alive && (
             <div className='overlay'>
               <div className='overlay-title'>Good game!</div>
               <div className='overlay-subtitle'>Your trail is still glowing.</div>
@@ -771,126 +1062,129 @@ export default function App() {
           )}
         </div>
 
-        <div className='control-panel'>
-          <div className='control-row'>
-            <label className='control-label' htmlFor='room-name'>
-              Room
-            </label>
-            <input
-              id='room-name'
-              value={roomInput}
-              onChange={(event) => setRoomInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  event.preventDefault()
-                  handleJoinRoom()
-                }
-              }}
-            />
-            <button type='button' onClick={handleJoinRoom}>
-              Join
-            </button>
-          </div>
-          <div className='control-row'>
-            <label className='control-label' htmlFor='player-name'>
-              Pilot name
-            </label>
-            <input
-              id='player-name'
-              value={playerName}
-              onChange={(event) => setPlayerName(event.target.value)}
-              onBlur={() => socketRef.current && sendJoin(socketRef.current)}
-            />
-            <button
-              type='button'
-              onClick={() => socketRef.current && sendJoin(socketRef.current)}
-            >
-              Update
-            </button>
-          </div>
-          <div className='control-row'>
-            <label className='control-label' htmlFor='renderer-mode'>
-              Renderer
-            </label>
-            <select
-              id='renderer-mode'
-              value={rendererPreference}
-              onChange={(event) => handleRendererModeChange(event.target.value)}
-            >
-              <option value='auto'>Auto</option>
-              <option value='webgpu'>WebGPU</option>
-              <option value='webgl'>WebGL</option>
-            </select>
-          </div>
-          <div className='renderer-status' aria-live='polite'>
-            <div>{rendererStatus}</div>
-            {rendererFallbackReason && <div className='renderer-fallback'>{rendererFallbackReason}</div>}
-          </div>
-          {DEBUG_UI_ENABLED && (
-            <div className='control-row debug-controls'>
-              <label className='control-label'>Debug</label>
-              <div className='debug-options' role='group' aria-label='Debug toggles'>
-                <label className='debug-option'>
-                  <input
-                    type='checkbox'
-                    checked={mountainDebug}
-                    onChange={(event) => setMountainDebug(event.target.checked)}
-                  />
-                  Mountain outlines
-                </label>
-                <label className='debug-option'>
-                  <input
-                    type='checkbox'
-                    checked={lakeDebug}
-                    onChange={(event) => setLakeDebug(event.target.checked)}
-                  />
-                  Lake collider
-                </label>
-                <label className='debug-option'>
-                  <input
-                    type='checkbox'
-                    checked={treeDebug}
-                    onChange={(event) => setTreeDebug(event.target.checked)}
-                  />
-                  Cactus colliders
-                </label>
-                <label className='debug-option'>
-                  <input
-                    type='checkbox'
-                    checked={terrainTessellationDebug}
-                    onChange={(event) => setTerrainTessellationDebug(event.target.checked)}
-                  />
-                  Terrain wireframe
-                </label>
-              </div>
+        {isPlaying && (
+          <div className='control-panel'>
+            <div className='control-row'>
+              <label className='control-label' htmlFor='room-name'>
+                Room
+              </label>
+              <input
+                id='room-name'
+                value={roomInput}
+                onChange={(event) => setRoomInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    handleJoinRoom()
+                  }
+                }}
+              />
+              <button type='button' onClick={handleJoinRoom}>
+                Join
+              </button>
             </div>
-          )}
-        </div>
+            <div className='control-row'>
+              <label className='control-label' htmlFor='player-name'>
+                Pilot name
+              </label>
+              <input
+                id='player-name'
+                value={playerName}
+                onChange={(event) => setPlayerName(event.target.value)}
+                onBlur={() => socketRef.current && sendJoin(socketRef.current, false)}
+              />
+              <button type='button' onClick={() => socketRef.current && sendJoin(socketRef.current, false)}>
+                Update
+              </button>
+            </div>
+            <div className='control-row'>
+              <label className='control-label' htmlFor='renderer-mode'>
+                Renderer
+              </label>
+              <select
+                id='renderer-mode'
+                value={rendererPreference}
+                onChange={(event) => handleRendererModeChange(event.target.value)}
+              >
+                <option value='auto'>Auto</option>
+                <option value='webgpu'>WebGPU</option>
+                <option value='webgl'>WebGL</option>
+              </select>
+            </div>
+            <div className='renderer-status' aria-live='polite'>
+              <div>{rendererStatus}</div>
+              {rendererFallbackReason && <div className='renderer-fallback'>{rendererFallbackReason}</div>}
+            </div>
+            {DEBUG_UI_ENABLED && (
+              <div className='control-row debug-controls'>
+                <label className='control-label'>Debug</label>
+                <div className='debug-options' role='group' aria-label='Debug toggles'>
+                  <label className='debug-option'>
+                    <input
+                      type='checkbox'
+                      checked={mountainDebug}
+                      onChange={(event) => setMountainDebug(event.target.checked)}
+                    />
+                    Mountain outlines
+                  </label>
+                  <label className='debug-option'>
+                    <input
+                      type='checkbox'
+                      checked={lakeDebug}
+                      onChange={(event) => setLakeDebug(event.target.checked)}
+                    />
+                    Lake collider
+                  </label>
+                  <label className='debug-option'>
+                    <input
+                      type='checkbox'
+                      checked={treeDebug}
+                      onChange={(event) => setTreeDebug(event.target.checked)}
+                    />
+                    Cactus colliders
+                  </label>
+                  <label className='debug-option'>
+                    <input
+                      type='checkbox'
+                      checked={terrainTessellationDebug}
+                      onChange={(event) => setTerrainTessellationDebug(event.target.checked)}
+                    />
+                    Terrain wireframe
+                  </label>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
-        <div className='info-panel'>
-          <div className='info-line'>Point to steer. Scroll to zoom. Press space to boost.</div>
-          <div className='info-line'>Best this run: {bestScore}</div>
-        </div>
+        {isPlaying && (
+          <div className='info-panel'>
+            <div className='info-line'>Point to steer. Scroll to zoom. Press space to boost.</div>
+            <div className='info-line'>Best this run: {bestScore}</div>
+          </div>
+        )}
       </div>
 
-      <aside className='leaderboard'>
-        <div className='leaderboard-header'>
-          <h2>Global leaderboard</h2>
-          <button type='button' onClick={handleSubmitBestScore}>
-            Submit best
-          </button>
-        </div>
-        {leaderboardStatus && <div className='leaderboard-status'>{leaderboardStatus}</div>}
-        <ol>
-          {leaderboard.length === 0 && <li className='muted'>No scores yet.</li>}
-          {leaderboard.map((entry, index) => (
-            <li key={`${entry.name}-${entry.created_at}-${index}`}>
-              <span>{entry.name}</span>
-              <span>{entry.score}</span>
-            </li>
-          ))}
-        </ol>
-      </aside>
+      {isPlaying && (
+        <aside className='leaderboard'>
+          <div className='leaderboard-header'>
+            <h2>Global leaderboard</h2>
+            <button type='button' onClick={handleSubmitBestScore}>
+              Submit best
+            </button>
+          </div>
+          {leaderboardStatus && <div className='leaderboard-status'>{leaderboardStatus}</div>}
+          <ol>
+            {leaderboard.length === 0 && <li className='muted'>No scores yet.</li>}
+            {leaderboard.map((entry, index) => (
+              <li key={`${entry.name}-${entry.created_at}-${index}`}>
+                <span>{entry.name}</span>
+                <span>{entry.score}</span>
+              </li>
+            ))}
+          </ol>
+        </aside>
+      )}
     </div>
   )
 }

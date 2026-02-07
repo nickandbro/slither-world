@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { enterGame } from './helpers'
 
 type RendererInfo = {
   requestedBackend: 'auto' | 'webgl' | 'webgpu'
@@ -10,6 +11,7 @@ test.describe('renderer mode controls @webgpu', () => {
   test('resolves webgpu preference with explicit runtime info', async ({ page }) => {
     await page.goto('/?renderer=webgpu')
     await expect(page.locator('.status')).toContainText('Connected')
+    await enterGame(page)
 
     await page.waitForFunction(() => {
       const debugApi = (
@@ -44,6 +46,7 @@ test.describe('renderer mode controls @webgpu', () => {
   test('persists manual renderer selection and syncs query param', async ({ page }) => {
     await page.goto('/')
     await expect(page.locator('.status')).toContainText('Connected')
+    await enterGame(page)
 
     const rendererInput = page.locator('#renderer-mode')
     await rendererInput.selectOption('webgl')

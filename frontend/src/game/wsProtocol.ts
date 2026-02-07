@@ -12,7 +12,7 @@ export type PlayerMeta = {
   color: string
 }
 
-const VERSION = 9
+const VERSION = 10
 
 const TYPE_JOIN = 0x01
 const TYPE_INPUT = 0x02
@@ -24,6 +24,7 @@ const TYPE_PLAYER_META = 0x12
 
 const FLAG_JOIN_PLAYER_ID = 1 << 0
 const FLAG_JOIN_NAME = 1 << 1
+const FLAG_JOIN_DEFER_SPAWN = 1 << 2
 
 const FLAG_INPUT_AXIS = 1 << 0
 const FLAG_INPUT_BOOST = 1 << 1
@@ -48,12 +49,17 @@ export type DecodedMessage =
   | { type: 'state'; state: GameStateSnapshot }
   | { type: 'meta' }
 
-export function encodeJoin(name: string | null, playerId: string | null): ArrayBuffer {
+export function encodeJoin(
+  name: string | null,
+  playerId: string | null,
+  deferSpawn = false,
+): ArrayBuffer {
   const idBytes = playerId ? uuidToBytes(playerId) : null
   const nameBytes = name !== null ? encodeString(name) : null
   let flags = 0
   if (idBytes) flags |= FLAG_JOIN_PLAYER_ID
   if (nameBytes) flags |= FLAG_JOIN_NAME
+  if (deferSpawn) flags |= FLAG_JOIN_DEFER_SPAWN
 
   const length = 4 + (idBytes ? 16 : 0) + (nameBytes ? 1 + nameBytes.length : 0)
   const buffer = new ArrayBuffer(length)

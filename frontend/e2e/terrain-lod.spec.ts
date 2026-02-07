@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import { enterGame } from './helpers'
 
 type TerrainPatchInfo = {
   totalPatches: number
@@ -50,6 +51,7 @@ test.describe('terrain patch visibility', () => {
   test('keeps static patch topology and updates visibility in webgl', async ({ page }) => {
     await page.goto('/?renderer=webgl')
     await expect(page.locator('.status')).toContainText('Connected')
+    await enterGame(page)
 
     await page.waitForFunction(() => {
       const debugApi = (
@@ -118,6 +120,7 @@ test.describe('terrain patch visibility', () => {
   test('exposes patch info in webgpu mode @webgpu', async ({ page }) => {
     await page.goto('/?renderer=webgpu')
     await expect(page.locator('.status')).toContainText('Connected')
+    await enterGame(page)
 
     await page.waitForFunction(() => {
       const debugApi = (

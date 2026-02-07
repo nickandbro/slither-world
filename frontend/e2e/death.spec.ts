@@ -1,6 +1,11 @@
 import { test, expect } from '@playwright/test'
+import { enterGame } from './helpers'
 
 const getBackendUrl = () => process.env.E2E_BACKEND_URL || 'http://localhost:8790'
+type DebugApi = {
+  getSnakeOpacity?: (id: string) => number | null
+  getSnakeHeadPosition?: (id: string) => { x: number; y: number; z: number } | null
+}
 
 const distance = (
   a: { x: number; y: number; z: number },
@@ -15,8 +20,12 @@ const distance = (
 test('bot death fades and stays in place while dead', async ({ page, request }) => {
   await page.goto('/')
   await expect(page.locator('.status')).toContainText('Connected')
+  await enterGame(page)
 
-  await page.waitForFunction(() => (window as any).__SNAKE_DEBUG__?.getSnakeOpacity)
+  await page.waitForFunction(() => {
+    const api = (window as Window & { __SNAKE_DEBUG__?: DebugApi }).__SNAKE_DEBUG__
+    return !!api?.getSnakeOpacity
+  })
   await page.waitForFunction(() => {
     const text = document.querySelector('.status')?.textContent ?? ''
     const match = text.match(/(\d+)\s+online/)
@@ -34,7 +43,7 @@ test('bot death fades and stays in place while dead', async ({ page, request }) 
 
   await page.waitForFunction(
     (id: string) => {
-      const api = (window as any).__SNAKE_DEBUG__
+      const api = (window as Window & { __SNAKE_DEBUG__?: DebugApi }).__SNAKE_DEBUG__
       const opacity = api?.getSnakeOpacity(id)
       return typeof opacity === 'number' && opacity < 0.8
     },
@@ -42,7 +51,7 @@ test('bot death fades and stays in place while dead', async ({ page, request }) 
   )
 
   const posA = await page.evaluate((id: string) => {
-    const api = (window as any).__SNAKE_DEBUG__
+    const api = (window as Window & { __SNAKE_DEBUG__?: DebugApi }).__SNAKE_DEBUG__
     return api?.getSnakeHeadPosition(id) ?? null
   }, playerId)
   expect(posA).not.toBeNull()
@@ -50,7 +59,7 @@ test('bot death fades and stays in place while dead', async ({ page, request }) 
   await page.waitForTimeout(800)
 
   const posB = await page.evaluate((id: string) => {
-    const api = (window as any).__SNAKE_DEBUG__
+    const api = (window as Window & { __SNAKE_DEBUG__?: DebugApi }).__SNAKE_DEBUG__
     return api?.getSnakeHeadPosition(id) ?? null
   }, playerId)
   expect(posB).not.toBeNull()
@@ -60,7 +69,7 @@ test('bot death fades and stays in place while dead', async ({ page, request }) 
 
   await page.waitForFunction(
     (id: string) => {
-      const api = (window as any).__SNAKE_DEBUG__
+      const api = (window as Window & { __SNAKE_DEBUG__?: DebugApi }).__SNAKE_DEBUG__
       const opacity = api?.getSnakeOpacity(id)
       return typeof opacity === 'number' && opacity < 0.2
     },

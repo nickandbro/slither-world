@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+import { enterGame } from './helpers'
 
 const STORAGE_KEYS = {
   name: 'spherical_snake_player_name',
@@ -38,6 +39,7 @@ test('submits a leaderboard entry', async ({ page }) => {
   }, { keys: STORAGE_KEYS, name: rawName })
 
   await page.goto('/')
+  await enterGame(page)
 
   await page.getByRole('button', { name: 'Submit best' }).click()
   await expect(page.locator('.leaderboard-status')).toContainText('Saved to leaderboard')

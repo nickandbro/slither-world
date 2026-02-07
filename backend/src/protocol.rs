@@ -1,7 +1,7 @@
 use crate::game::types::Point;
 use uuid::Uuid;
 
-pub const VERSION: u8 = 9;
+pub const VERSION: u8 = 10;
 
 pub const TYPE_JOIN: u8 = 0x01;
 pub const TYPE_INPUT: u8 = 0x02;
@@ -13,6 +13,7 @@ pub const TYPE_PLAYER_META: u8 = 0x12;
 
 pub const FLAG_JOIN_PLAYER_ID: u16 = 1 << 0;
 pub const FLAG_JOIN_NAME: u16 = 1 << 1;
+pub const FLAG_JOIN_DEFER_SPAWN: u16 = 1 << 2;
 
 pub const FLAG_INPUT_AXIS: u16 = 1 << 0;
 pub const FLAG_INPUT_BOOST: u16 = 1 << 1;
@@ -29,6 +30,7 @@ pub enum ClientMessage {
     Join {
         name: Option<String>,
         player_id: Option<Uuid>,
+        defer_spawn: bool,
     },
     Respawn,
     Input {
@@ -60,7 +62,12 @@ pub fn decode_client_message(data: &[u8]) -> Option<ClientMessage> {
             } else {
                 None
             };
-            Some(ClientMessage::Join { name, player_id })
+            let defer_spawn = flags & FLAG_JOIN_DEFER_SPAWN != 0;
+            Some(ClientMessage::Join {
+                name,
+                player_id,
+                defer_spawn,
+            })
         }
         TYPE_RESPAWN => Some(ClientMessage::Respawn),
         TYPE_INPUT => {
@@ -237,9 +244,35 @@ mod tests {
 
         let message = decode_client_message(&data).expect("message");
         match message {
-            ClientMessage::Join { name, player_id } => {
+            ClientMessage::Join {
+                name,
+                player_id,
+                defer_spawn,
+            } => {
                 assert_eq!(name.as_deref(), Some("Player-7"));
                 assert_eq!(player_id, Some(id));
+                assert!(!defer_spawn);
+            }
+            _ => panic!("unexpected message"),
+        }
+    }
+
+    #[test]
+    fn decode_join_with_deferred_spawn_flag() {
+        let mut encoder = Encoder::with_capacity(16);
+        encoder.write_header(TYPE_JOIN, FLAG_JOIN_DEFER_SPAWN);
+        let data = encoder.into_vec();
+
+        let message = decode_client_message(&data).expect("message");
+        match message {
+            ClientMessage::Join {
+                name,
+                player_id,
+                defer_spawn,
+            } => {
+                assert!(name.is_none());
+                assert!(player_id.is_none());
+                assert!(defer_spawn);
             }
             _ => panic!("unexpected message"),
         }

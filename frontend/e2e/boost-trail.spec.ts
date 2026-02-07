@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import { enterGame } from './helpers'
 
 type BoostTrailInfo = {
   sampleCount: number
@@ -24,6 +25,7 @@ const readBoostTrailInfo = async (page: Page, playerId: string): Promise<BoostTr
 test('boost skid marks grow while boosting and retire oldest-first after boost stops', async ({ page }) => {
   await page.goto('/')
   await expect(page.locator('.status')).toContainText('Connected')
+  await enterGame(page)
 
   await expect
     .poll(async () => {
