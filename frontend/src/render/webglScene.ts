@@ -126,23 +126,23 @@ const createPelletRadialTexture = (
 }
 
 const createPelletShadowTexture = () => {
-  const size = 96
+  const size = 128
   const canvas = document.createElement('canvas')
   canvas.width = size
   canvas.height = size
   const ctx = canvas.getContext('2d')
   if (!ctx) return null
   const center = size * 0.5
-  const radius = size * 0.23
+  const radius = size * 0.29
 
   ctx.clearRect(0, 0, size, size)
   ctx.save()
-  ctx.shadowBlur = size * 0.14
-  ctx.shadowOffsetY = size * 0.06
-  ctx.shadowColor = 'rgba(255,255,255,0.98)'
-  ctx.fillStyle = 'rgba(255,255,255,0.92)'
+  ctx.shadowBlur = size * 0.18
+  ctx.shadowOffsetY = size * 0.09
+  ctx.shadowColor = 'rgba(0,0,0,1)'
+  ctx.fillStyle = 'rgba(0,0,0,1)'
   ctx.beginPath()
-  ctx.arc(center, center - size * 0.04, radius, 0, Math.PI * 2)
+  ctx.arc(center, center - size * 0.07, radius, 0, Math.PI * 2)
   ctx.fill()
   ctx.restore()
 
@@ -480,18 +480,18 @@ const PELLET_COLORS = [
 const PELLET_SIZE_TIER_MULTIPLIERS = [0.9, 1.45, 2.8]
 const PELLET_SIZE_TIER_MEDIUM_MIN = 1.05
 const PELLET_SIZE_TIER_LARGE_MIN = 1.6
-const PELLET_GLOW_PULSE_SPEED = 4.6
-const PELLET_SHADOW_OPACITY_BASE = 0.62
-const PELLET_SHADOW_OPACITY_RANGE = 0.03
-const PELLET_CORE_OPACITY_BASE = 0.62
-const PELLET_CORE_OPACITY_RANGE = 0.38
-const PELLET_CORE_SIZE_RANGE = 0.01
-const PELLET_INNER_GLOW_OPACITY_BASE = 0.05
-const PELLET_INNER_GLOW_OPACITY_RANGE = 0.08
-const PELLET_INNER_GLOW_SIZE_RANGE = 0.03
-const PELLET_GLOW_OPACITY_BASE = 0.08
-const PELLET_GLOW_OPACITY_RANGE = 0.1
-const PELLET_GLOW_SIZE_RANGE = 0.06
+const PELLET_GLOW_PULSE_SPEED = 9.2
+const PELLET_SHADOW_OPACITY_BASE = 0.9
+const PELLET_SHADOW_OPACITY_RANGE = 0.008
+const PELLET_CORE_OPACITY_BASE = 0.54
+const PELLET_CORE_OPACITY_RANGE = 0.46
+const PELLET_CORE_SIZE_RANGE = 0.015
+const PELLET_INNER_GLOW_OPACITY_BASE = 0.018
+const PELLET_INNER_GLOW_OPACITY_RANGE = 0.048
+const PELLET_INNER_GLOW_SIZE_RANGE = 0.05
+const PELLET_GLOW_OPACITY_BASE = 0.01
+const PELLET_GLOW_OPACITY_RANGE = 0.034
+const PELLET_GLOW_SIZE_RANGE = 0.065
 const PELLET_GLOW_PHASE_STEP = 0.73
 const TONGUE_MAX_LENGTH = HEAD_RADIUS * 2.8
 const TONGUE_MAX_RANGE = HEAD_RADIUS * 3.1
@@ -1698,10 +1698,10 @@ const createScene = async (
 
   const PELLET_COLOR_BUCKET_COUNT = PELLET_COLORS.length
   const PELLET_BUCKET_COUNT = PELLET_COLOR_BUCKET_COUNT * PELLET_SIZE_TIER_MULTIPLIERS.length
-  const PELLET_SHADOW_POINT_SIZE = PELLET_RADIUS * 6.8
-  const PELLET_CORE_POINT_SIZE = PELLET_RADIUS * 5.2
-  const PELLET_INNER_GLOW_POINT_SIZE = PELLET_RADIUS * 11
-  const PELLET_GLOW_POINT_SIZE = PELLET_RADIUS * 16
+  const PELLET_SHADOW_POINT_SIZE = PELLET_RADIUS * 9.4
+  const PELLET_CORE_POINT_SIZE = PELLET_RADIUS * 5
+  const PELLET_INNER_GLOW_POINT_SIZE = PELLET_RADIUS * 14
+  const PELLET_GLOW_POINT_SIZE = PELLET_RADIUS * 23
   const pelletShadowTexture = createPelletShadowTexture()
   const pelletCoreTexture = createPelletCoreTexture()
   const pelletInnerGlowTexture = createPelletInnerGlowTexture()
@@ -6264,8 +6264,8 @@ diffuseColor.a *= retireEdge;`,
       const shadowPulse = 0.5 + 0.5 * Math.cos(phase * 0.6 + 1.1)
       bucket.shadowMaterial.opacity = clamp(
         PELLET_SHADOW_OPACITY_BASE + shadowPulse * PELLET_SHADOW_OPACITY_RANGE,
-        0.45,
-        0.75,
+        0.86,
+        0.94,
       )
       bucket.shadowMaterial.size = bucket.baseShadowSize
       bucket.coreMaterial.opacity = clamp(
@@ -6276,15 +6276,15 @@ diffuseColor.a *= retireEdge;`,
       bucket.coreMaterial.size = bucket.baseCoreSize * (1 + centered * PELLET_CORE_SIZE_RANGE)
       bucket.innerGlowMaterial.opacity = clamp(
         PELLET_INNER_GLOW_OPACITY_BASE + pulse * PELLET_INNER_GLOW_OPACITY_RANGE,
-        0.03,
-        0.22,
+        0.012,
+        0.11,
       )
       bucket.innerGlowMaterial.size =
         bucket.baseInnerGlowSize * (1 + centered * PELLET_INNER_GLOW_SIZE_RANGE)
       bucket.glowMaterial.opacity = clamp(
         PELLET_GLOW_OPACITY_BASE + pulse * PELLET_GLOW_OPACITY_RANGE,
-        0.05,
-        0.25,
+        0.008,
+        0.058,
       )
       bucket.glowMaterial.size = bucket.baseGlowSize * (1 + centered * PELLET_GLOW_SIZE_RANGE)
     }
