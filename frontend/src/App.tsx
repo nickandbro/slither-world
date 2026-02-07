@@ -104,14 +104,15 @@ const BOOST_EFFECT_PULSE_SPEED = 8.5
 const BOOST_EFFECT_ACTIVE_CLASS_THRESHOLD = 0.01
 const SCORE_RADIAL_FADE_IN_RATE = 10
 const SCORE_RADIAL_FADE_OUT_RATE = 8
-const SCORE_RADIAL_RESERVE_SMOOTH_UP_RATE = 16
-const SCORE_RADIAL_RESERVE_SMOOTH_DOWN_RATE = 16
-const SCORE_RADIAL_RESERVE_MAX_UP_SPEED = 4.5
-const SCORE_RADIAL_RESERVE_MAX_DOWN_SPEED = 5
-const SCORE_RADIAL_RESERVE_BURST_UP_RATE = 30
-const SCORE_RADIAL_RESERVE_BURST_MAX_UP_SPEED = 12
-const SCORE_RADIAL_RESERVE_BURST_DELTA_THRESHOLD = 0.18
-const SCORE_RADIAL_RESERVE_BURST_DURATION_MS = 140
+const SCORE_RADIAL_INTERVAL_SMOOTH_RATE = 18
+const SCORE_RADIAL_INTERVAL_BURST_RATE = 32
+const SCORE_RADIAL_INTERVAL_MAX_SPEED = 2.4
+const SCORE_RADIAL_INTERVAL_BURST_MAX_SPEED = 4
+const SCORE_RADIAL_INTERVAL_BURST_THRESHOLD = 0.16
+const SCORE_RADIAL_INTERVAL_BURST_DURATION_MS = 260
+const SCORE_RADIAL_TREND_EPSILON = 1e-4
+const SCORE_RADIAL_SEAM_SOFTEN_SHIFT = 0.012
+const SCORE_RADIAL_SEAM_SOFTEN_BAND = 0.08
 const MENU_CAMERA_DISTANCE = 7
 const MENU_CAMERA_VERTICAL_OFFSET = 2.5
 const MENU_TO_GAMEPLAY_BLEND_MS = 900
@@ -144,6 +145,25 @@ const computeViewRadius = (cameraDistance: number, aspect: number) => {
   return clamp(base + VIEW_RADIUS_EXTRA_MARGIN, 0.2, 1.4)
 }
 
+const normalizeInterval01 = (value: number) => {
+  if (!Number.isFinite(value)) return 0
+  const wrapped = value - Math.floor(value)
+  return wrapped < 0 ? wrapped + 1 : wrapped
+}
+
+const softenIntervalSeam = (value: number) => {
+  const interval = clamp(value, 0, 1)
+  if (interval <= SCORE_RADIAL_SEAM_SOFTEN_BAND) {
+    const t = interval / SCORE_RADIAL_SEAM_SOFTEN_BAND
+    return clamp(interval + (1 - t) * SCORE_RADIAL_SEAM_SOFTEN_SHIFT, 0, 1)
+  }
+  if (interval >= 1 - SCORE_RADIAL_SEAM_SOFTEN_BAND) {
+    const t = (1 - interval) / SCORE_RADIAL_SEAM_SOFTEN_BAND
+    return clamp(interval - (1 - t) * SCORE_RADIAL_SEAM_SOFTEN_SHIFT, 0, 1)
+  }
+  return interval
+}
+
 type BoostFxState = {
   intensity: number
   pulse: number
@@ -153,7 +173,8 @@ type BoostFxState = {
 
 type ScoreRadialVisualState = {
   lastBoosting: boolean
-  displayReserve: number | null
+  displayIntervalPhase: number | null
+  lastRawReserve: number | null
   burstBoostUntilMs: number
   lastIntervalPct: number
   lastDisplayScore: number
@@ -281,7 +302,8 @@ export default function App() {
   })
   const scoreRadialStateRef = useRef<ScoreRadialVisualState>({
     lastBoosting: false,
-    displayReserve: null,
+    displayIntervalPhase: null,
+    lastRawReserve: null,
     burstBoostUntilMs: 0,
     lastIntervalPct: 100,
     lastDisplayScore: 0,
@@ -673,72 +695,79 @@ export default function App() {
                 if (scoreRadialActive) {
                   const scoreFraction = clamp(localSnapshotPlayer.scoreFraction, 0, 0.999_999)
                   const rawReserve = Math.max(0, localSnapshotPlayer.score + scoreFraction)
-                  if (scoreRadialState.displayReserve === null || !scoreRadialState.lastBoosting) {
-                    scoreRadialState.displayReserve = rawReserve
+                  const targetInterval01 = normalizeInterval01(rawReserve)
+                  if (
+                    scoreRadialState.displayIntervalPhase === null ||
+                    !scoreRadialState.lastBoosting
+                  ) {
+                    scoreRadialState.displayIntervalPhase = targetInterval01
+                    scoreRadialState.lastRawReserve = rawReserve
                     scoreRadialState.burstBoostUntilMs = 0
                   } else {
-                    let reserveDelta = rawReserve - scoreRadialState.displayReserve
-                    if (Math.abs(reserveDelta) > 1e-6) {
-                      // Skip full score-interval loops so burst gains animate directly
-                      // toward the latest interval state instead of wrapping repeatedly.
-                      if (reserveDelta >= 1) {
-                        scoreRadialState.displayReserve += Math.floor(reserveDelta)
-                        reserveDelta = rawReserve - scoreRadialState.displayReserve
-                      } else if (reserveDelta <= -1) {
-                        scoreRadialState.displayReserve += Math.ceil(reserveDelta)
-                        reserveDelta = rawReserve - scoreRadialState.displayReserve
-                      }
-                      if (reserveDelta >= SCORE_RADIAL_RESERVE_BURST_DELTA_THRESHOLD) {
-                        scoreRadialState.burstBoostUntilMs =
-                          nowMs + SCORE_RADIAL_RESERVE_BURST_DURATION_MS
-                      }
-                      const burstActive =
-                        reserveDelta > 0 && nowMs < scoreRadialState.burstBoostUntilMs
-                      const smoothRate =
-                        reserveDelta >= 0
-                          ? burstActive
-                            ? SCORE_RADIAL_RESERVE_BURST_UP_RATE
-                            : SCORE_RADIAL_RESERVE_SMOOTH_UP_RATE
-                          : SCORE_RADIAL_RESERVE_SMOOTH_DOWN_RATE
-                      const smoothAlpha = 1 - Math.exp(-smoothRate * scoreRadialDeltaSeconds)
-                      let smoothedReserve =
-                        scoreRadialState.displayReserve + reserveDelta * smoothAlpha
-                      const maxSpeed =
-                        reserveDelta >= 0
-                          ? burstActive
-                            ? SCORE_RADIAL_RESERVE_BURST_MAX_UP_SPEED
-                            : SCORE_RADIAL_RESERVE_MAX_UP_SPEED
-                          : SCORE_RADIAL_RESERVE_MAX_DOWN_SPEED
-                      const maxStep = maxSpeed * scoreRadialDeltaSeconds
-                      const smoothStep = smoothedReserve - scoreRadialState.displayReserve
-                      if (maxStep > 0 && Math.abs(smoothStep) > maxStep) {
-                        smoothedReserve = scoreRadialState.displayReserve + Math.sign(smoothStep) * maxStep
-                      }
-                      smoothedReserve =
-                        reserveDelta >= 0
-                          ? Math.min(smoothedReserve, rawReserve)
-                          : Math.max(smoothedReserve, rawReserve)
-                      scoreRadialState.displayReserve = Math.max(0, smoothedReserve)
+                    const reserveTrend =
+                      rawReserve - (scoreRadialState.lastRawReserve ?? rawReserve)
+                    if (reserveTrend >= SCORE_RADIAL_INTERVAL_BURST_THRESHOLD) {
+                      scoreRadialState.burstBoostUntilMs =
+                        nowMs + SCORE_RADIAL_INTERVAL_BURST_DURATION_MS
                     }
+                    const burstActive =
+                      reserveTrend > SCORE_RADIAL_TREND_EPSILON &&
+                      nowMs < scoreRadialState.burstBoostUntilMs
+                    let targetIntervalPhase =
+                      targetInterval01 +
+                      Math.round(scoreRadialState.displayIntervalPhase - targetInterval01)
+                    if (
+                      reserveTrend > SCORE_RADIAL_TREND_EPSILON &&
+                      targetIntervalPhase <
+                        scoreRadialState.displayIntervalPhase - SCORE_RADIAL_TREND_EPSILON
+                    ) {
+                      targetIntervalPhase += 1
+                    } else if (
+                      reserveTrend < -SCORE_RADIAL_TREND_EPSILON &&
+                      targetIntervalPhase >
+                        scoreRadialState.displayIntervalPhase + SCORE_RADIAL_TREND_EPSILON
+                    ) {
+                      targetIntervalPhase -= 1
+                    }
+                    const intervalDelta =
+                      targetIntervalPhase - scoreRadialState.displayIntervalPhase
+                    if (Math.abs(intervalDelta) > 1e-6) {
+                      const smoothRate = burstActive
+                        ? SCORE_RADIAL_INTERVAL_BURST_RATE
+                        : SCORE_RADIAL_INTERVAL_SMOOTH_RATE
+                      const smoothAlpha = 1 - Math.exp(-smoothRate * scoreRadialDeltaSeconds)
+                      let smoothStep = intervalDelta * smoothAlpha
+                      const maxStep =
+                        (burstActive
+                          ? SCORE_RADIAL_INTERVAL_BURST_MAX_SPEED
+                          : SCORE_RADIAL_INTERVAL_MAX_SPEED) * scoreRadialDeltaSeconds
+                      if (maxStep > 0 && Math.abs(smoothStep) > maxStep) {
+                        smoothStep = Math.sign(smoothStep) * maxStep
+                      }
+                      scoreRadialState.displayIntervalPhase += smoothStep
+                    }
+                    scoreRadialState.lastRawReserve = rawReserve
                   }
-                  const displayReserve = Math.max(
-                    0,
-                    scoreRadialState.displayReserve ?? rawReserve,
+                  const displayIntervalPhase =
+                    scoreRadialState.displayIntervalPhase ?? targetInterval01
+                  const renderedInterval01 = softenIntervalSeam(
+                    normalizeInterval01(displayIntervalPhase),
                   )
-                  const intervalFraction = displayReserve - Math.floor(displayReserve)
-                  scoreIntervalPct = clamp(intervalFraction * 100, 0, 99.999)
+                  scoreIntervalPct = clamp(renderedInterval01 * 100, 0, 99.999)
                   scoreDisplay = localSnapshotPlayer.score
                   scoreRadialState.lastIntervalPct = scoreIntervalPct
                   scoreRadialState.lastDisplayScore = scoreDisplay
                 } else {
-                  scoreRadialState.displayReserve = null
+                  scoreRadialState.displayIntervalPhase = null
+                  scoreRadialState.lastRawReserve = null
                   scoreRadialState.burstBoostUntilMs = 0
                   scoreIntervalPct = scoreRadialState.lastIntervalPct
                   scoreDisplay = scoreRadialState.lastDisplayScore
                 }
                 scoreRadialState.lastBoosting = scoreRadialActive
               } else {
-                scoreRadialState.displayReserve = null
+                scoreRadialState.displayIntervalPhase = null
+                scoreRadialState.lastRawReserve = null
                 scoreRadialState.burstBoostUntilMs = 0
                 scoreIntervalPct = scoreRadialState.lastIntervalPct
                 scoreDisplay = scoreRadialState.lastDisplayScore
@@ -833,7 +862,8 @@ export default function App() {
       tickIntervalRef.current = 50
       playerMetaRef.current = new Map()
       scoreRadialStateRef.current.lastBoosting = false
-      scoreRadialStateRef.current.displayReserve = null
+      scoreRadialStateRef.current.displayIntervalPhase = null
+      scoreRadialStateRef.current.lastRawReserve = null
       scoreRadialStateRef.current.burstBoostUntilMs = 0
       scoreRadialStateRef.current.lastIntervalPct = 100
       scoreRadialStateRef.current.lastDisplayScore = 0

@@ -107,19 +107,12 @@ function drawScoreRadial(
 
   ctx.beginPath()
   ctx.arc(centerX, centerY, radius, 0, Math.PI * 2)
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.96)'
+  ctx.strokeStyle = 'rgba(221, 230, 245, 0.44)'
   ctx.lineWidth = lineWidth
   ctx.lineCap = 'round'
   ctx.stroke()
 
-  if (clampedInterval >= 99.999) {
-    ctx.beginPath()
-    ctx.arc(centerX, centerY, radius, 0, Math.PI * 2)
-    ctx.strokeStyle = 'rgba(54, 94, 204, 0.98)'
-    ctx.lineWidth = lineWidth
-    ctx.lineCap = 'round'
-    ctx.stroke()
-  } else if (clampedInterval > 0) {
+  if (clampedInterval > 0) {
     ctx.beginPath()
     ctx.arc(centerX, centerY, radius, startAngle, startAngle + angleSweep, false)
     ctx.strokeStyle = 'rgba(54, 94, 204, 0.98)'
