@@ -162,7 +162,8 @@ function drawScoreRadial(
   const radius = Math.max(19, Math.min(28, Math.round(config.width * 0.028)))
   const lineWidth = Math.max(4, Math.min(7, Math.round(radius * 0.24)))
   const margin = 8
-  const yOffset = Math.max(22, radius + 10) + stackLevel * (radius * 2 + 8)
+  const oxygenNudge = stackLevel > 0 ? 2 : 0
+  const yOffset = Math.max(22, radius + 10) + oxygenNudge
   let centerX = anchor.x
   let centerY = anchor.y - yOffset
   centerX = Math.min(config.width - radius - margin, Math.max(radius + margin, centerX))
@@ -228,13 +229,14 @@ function drawStatusMeters(
   if (!oxygenActive && !scoreActive) return
 
   if (oxygenActive && oxygen.anchor && oxygen.pct !== null) {
+    const oxygenStackLevel = scoreActive ? -1.25 : 0
     drawCompactMeter(
       ctx,
       config,
       oxygen.pct,
       oxygen.anchor,
       oxygen.low ? 'rgba(239, 68, 68, 0.96)' : 'rgba(56, 189, 248, 0.96)',
-      0,
+      oxygenStackLevel,
     )
   }
 
