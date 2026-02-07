@@ -104,6 +104,14 @@ const BOOST_EFFECT_PULSE_SPEED = 8.5
 const BOOST_EFFECT_ACTIVE_CLASS_THRESHOLD = 0.01
 const SCORE_RADIAL_FADE_IN_RATE = 10
 const SCORE_RADIAL_FADE_OUT_RATE = 8
+const SCORE_RADIAL_RESERVE_SMOOTH_UP_RATE = 16
+const SCORE_RADIAL_RESERVE_SMOOTH_DOWN_RATE = 16
+const SCORE_RADIAL_RESERVE_MAX_UP_SPEED = 4.5
+const SCORE_RADIAL_RESERVE_MAX_DOWN_SPEED = 5
+const SCORE_RADIAL_RESERVE_BURST_UP_RATE = 30
+const SCORE_RADIAL_RESERVE_BURST_MAX_UP_SPEED = 12
+const SCORE_RADIAL_RESERVE_BURST_DELTA_THRESHOLD = 0.18
+const SCORE_RADIAL_RESERVE_BURST_DURATION_MS = 140
 const MENU_CAMERA_DISTANCE = 7
 const MENU_CAMERA_VERTICAL_OFFSET = 2.5
 const MENU_TO_GAMEPLAY_BLEND_MS = 900
@@ -144,9 +152,9 @@ type BoostFxState = {
 }
 
 type ScoreRadialVisualState = {
-  lastScore: number | null
   lastBoosting: boolean
-  forceFullFrames: number
+  displayReserve: number | null
+  burstBoostUntilMs: number
   lastIntervalPct: number
   lastDisplayScore: number
   opacity: number
@@ -272,9 +280,9 @@ export default function App() {
     activeClassApplied: false,
   })
   const scoreRadialStateRef = useRef<ScoreRadialVisualState>({
-    lastScore: null,
     lastBoosting: false,
-    forceFullFrames: 0,
+    displayReserve: null,
+    burstBoostUntilMs: 0,
     lastIntervalPct: 100,
     lastDisplayScore: 0,
     opacity: 0,
@@ -663,34 +671,78 @@ export default function App() {
               let scoreDisplay: number | null = null
               if (localSnapshotPlayer) {
                 if (scoreRadialActive) {
-                  const intervalPct = clamp(localSnapshotPlayer.scoreFraction, 0, 0.999_999) * 100
-                  if (
-                    !scoreRadialState.lastBoosting ||
-                    (scoreRadialState.lastScore !== null &&
-                      localSnapshotPlayer.score < scoreRadialState.lastScore)
-                  ) {
-                    scoreRadialState.forceFullFrames = 1
+                  const scoreFraction = clamp(localSnapshotPlayer.scoreFraction, 0, 0.999_999)
+                  const rawReserve = Math.max(0, localSnapshotPlayer.score + scoreFraction)
+                  if (scoreRadialState.displayReserve === null || !scoreRadialState.lastBoosting) {
+                    scoreRadialState.displayReserve = rawReserve
+                    scoreRadialState.burstBoostUntilMs = 0
+                  } else {
+                    let reserveDelta = rawReserve - scoreRadialState.displayReserve
+                    if (Math.abs(reserveDelta) > 1e-6) {
+                      // Skip full score-interval loops so burst gains animate directly
+                      // toward the latest interval state instead of wrapping repeatedly.
+                      if (reserveDelta >= 1) {
+                        scoreRadialState.displayReserve += Math.floor(reserveDelta)
+                        reserveDelta = rawReserve - scoreRadialState.displayReserve
+                      } else if (reserveDelta <= -1) {
+                        scoreRadialState.displayReserve += Math.ceil(reserveDelta)
+                        reserveDelta = rawReserve - scoreRadialState.displayReserve
+                      }
+                      if (reserveDelta >= SCORE_RADIAL_RESERVE_BURST_DELTA_THRESHOLD) {
+                        scoreRadialState.burstBoostUntilMs =
+                          nowMs + SCORE_RADIAL_RESERVE_BURST_DURATION_MS
+                      }
+                      const burstActive =
+                        reserveDelta > 0 && nowMs < scoreRadialState.burstBoostUntilMs
+                      const smoothRate =
+                        reserveDelta >= 0
+                          ? burstActive
+                            ? SCORE_RADIAL_RESERVE_BURST_UP_RATE
+                            : SCORE_RADIAL_RESERVE_SMOOTH_UP_RATE
+                          : SCORE_RADIAL_RESERVE_SMOOTH_DOWN_RATE
+                      const smoothAlpha = 1 - Math.exp(-smoothRate * scoreRadialDeltaSeconds)
+                      let smoothedReserve =
+                        scoreRadialState.displayReserve + reserveDelta * smoothAlpha
+                      const maxSpeed =
+                        reserveDelta >= 0
+                          ? burstActive
+                            ? SCORE_RADIAL_RESERVE_BURST_MAX_UP_SPEED
+                            : SCORE_RADIAL_RESERVE_MAX_UP_SPEED
+                          : SCORE_RADIAL_RESERVE_MAX_DOWN_SPEED
+                      const maxStep = maxSpeed * scoreRadialDeltaSeconds
+                      const smoothStep = smoothedReserve - scoreRadialState.displayReserve
+                      if (maxStep > 0 && Math.abs(smoothStep) > maxStep) {
+                        smoothedReserve = scoreRadialState.displayReserve + Math.sign(smoothStep) * maxStep
+                      }
+                      smoothedReserve =
+                        reserveDelta >= 0
+                          ? Math.min(smoothedReserve, rawReserve)
+                          : Math.max(smoothedReserve, rawReserve)
+                      scoreRadialState.displayReserve = Math.max(0, smoothedReserve)
+                    }
                   }
-                  scoreIntervalPct = scoreRadialState.forceFullFrames > 0 ? 100 : intervalPct
-                  if (scoreRadialState.forceFullFrames > 0) {
-                    scoreRadialState.forceFullFrames -= 1
-                  }
+                  const displayReserve = Math.max(
+                    0,
+                    scoreRadialState.displayReserve ?? rawReserve,
+                  )
+                  const intervalFraction = displayReserve - Math.floor(displayReserve)
+                  scoreIntervalPct = clamp(intervalFraction * 100, 0, 99.999)
                   scoreDisplay = localSnapshotPlayer.score
                   scoreRadialState.lastIntervalPct = scoreIntervalPct
                   scoreRadialState.lastDisplayScore = scoreDisplay
                 } else {
-                  scoreRadialState.forceFullFrames = 0
+                  scoreRadialState.displayReserve = null
+                  scoreRadialState.burstBoostUntilMs = 0
                   scoreIntervalPct = scoreRadialState.lastIntervalPct
                   scoreDisplay = scoreRadialState.lastDisplayScore
                 }
-                scoreRadialState.lastScore = localSnapshotPlayer.score
                 scoreRadialState.lastBoosting = scoreRadialActive
               } else {
+                scoreRadialState.displayReserve = null
+                scoreRadialState.burstBoostUntilMs = 0
                 scoreIntervalPct = scoreRadialState.lastIntervalPct
                 scoreDisplay = scoreRadialState.lastDisplayScore
-                scoreRadialState.lastScore = null
                 scoreRadialState.lastBoosting = false
-                scoreRadialState.forceFullFrames = 0
               }
               drawHud(
                 hudCtx,
@@ -780,9 +832,9 @@ export default function App() {
       lastSnapshotTimeRef.current = null
       tickIntervalRef.current = 50
       playerMetaRef.current = new Map()
-      scoreRadialStateRef.current.lastScore = null
       scoreRadialStateRef.current.lastBoosting = false
-      scoreRadialStateRef.current.forceFullFrames = 0
+      scoreRadialStateRef.current.displayReserve = null
+      scoreRadialStateRef.current.burstBoostUntilMs = 0
       scoreRadialStateRef.current.lastIntervalPct = 100
       scoreRadialStateRef.current.lastDisplayScore = 0
       scoreRadialStateRef.current.opacity = 0

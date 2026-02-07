@@ -121,7 +121,7 @@ function drawScoreRadial(
     ctx.stroke()
   } else if (clampedInterval > 0) {
     ctx.beginPath()
-    ctx.arc(centerX, centerY, radius, startAngle, startAngle - angleSweep, true)
+    ctx.arc(centerX, centerY, radius, startAngle, startAngle + angleSweep, false)
     ctx.strokeStyle = 'rgba(54, 94, 204, 0.98)'
     ctx.lineWidth = lineWidth
     ctx.lineCap = 'round'
