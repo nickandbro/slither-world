@@ -209,6 +209,27 @@
   accent-color: #f97316;
 }
 
+.debug-option--select {
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.debug-option--select label {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(11, 19, 32, 0.72);
+}
+
+.debug-select {
+  min-width: 120px;
+  padding: 0.35rem 0.65rem;
+  border-radius: 999px;
+  border: 1px solid rgba(11, 19, 32, 0.2);
+  background: #f7fbfd;
+  font-family: inherit;
+  font-size: 0.75rem;
+}
+
 .overlay {
   position: absolute;
   inset: 0;

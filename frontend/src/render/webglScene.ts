@@ -108,6 +108,12 @@ type PelletMotionState = {
   wsp: number
 }
 
+type SkyGradientTexture = {
+  canvas: HTMLCanvasElement
+  ctx: CanvasRenderingContext2D
+  texture: THREE.CanvasTexture
+}
+
 const createPelletRadialTexture = (
   size: number,
   stops: Array<{ offset: number; color: string }>,
@@ -218,6 +224,55 @@ const createBoostDraftTexture = () => {
   texture.colorSpace = THREE.NoColorSpace
   texture.needsUpdate = true
   return texture
+}
+
+const createHorizonScatteringTexture = () => {
+  return createPelletRadialTexture(256, [
+    { offset: 0, color: 'rgba(255,255,255,0)' },
+    { offset: 0.52, color: 'rgba(255,255,255,0)' },
+    { offset: 0.74, color: 'rgba(255,255,255,0.18)' },
+    { offset: 0.9, color: 'rgba(255,255,255,0.11)' },
+    { offset: 1, color: 'rgba(255,255,255,0)' },
+  ])
+}
+
+const createSkyGradientTexture = (size: number) => {
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.colorSpace = THREE.SRGBColorSpace
+  texture.magFilter = THREE.LinearFilter
+  texture.minFilter = THREE.LinearFilter
+  texture.wrapS = THREE.ClampToEdgeWrapping
+  texture.wrapT = THREE.ClampToEdgeWrapping
+  texture.needsUpdate = true
+  return { canvas, ctx, texture } satisfies SkyGradientTexture
+}
+
+const colorToCss = (color: THREE.Color) => {
+  const r = Math.round(Math.min(1, Math.max(0, color.r)) * 255)
+  const g = Math.round(Math.min(1, Math.max(0, color.g)) * 255)
+  const b = Math.round(Math.min(1, Math.max(0, color.b)) * 255)
+  return `rgb(${r}, ${g}, ${b})`
+}
+
+const paintSkyGradientTexture = (
+  target: SkyGradientTexture,
+  topColor: THREE.Color,
+  horizonColor: THREE.Color,
+  bottomColor: THREE.Color,
+) => {
+  const { canvas, ctx, texture } = target
+  const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height)
+  gradient.addColorStop(0, colorToCss(topColor))
+  gradient.addColorStop(0.48, colorToCss(horizonColor))
+  gradient.addColorStop(1, colorToCss(bottomColor))
+  ctx.fillStyle = gradient
+  ctx.fillRect(0, 0, canvas.width, canvas.height)
+  texture.needsUpdate = true
 }
 
 type DeathState = {
@@ -334,6 +389,7 @@ type SnakeGroundingInfo = {
 
 export type RendererPreference = 'auto' | 'webgl' | 'webgpu'
 export type RendererBackend = 'webgl' | 'webgpu'
+export type DayNightDebugMode = 'auto' | 'day' | 'night'
 
 export type RenderScene = {
   resize: (width: number, height: number, dpr: number) => void
@@ -351,6 +407,7 @@ export type RenderScene = {
     treeCollider?: boolean
     terrainTessellation?: boolean
   }) => void
+  setDayNightDebugMode: (mode: DayNightDebugMode) => void
   dispose: () => void
 }
 
@@ -616,8 +673,53 @@ const PEBBLE_RADIUS_MIN = BASE_PLANET_RADIUS * 0.0045
 const PEBBLE_RADIUS_MAX = BASE_PLANET_RADIUS * 0.014
 const PEBBLE_OFFSET = 0.0015
 const PEBBLE_RADIUS_VARIANCE = 0.8
+const DAY_NIGHT_CYCLE_MS = 8 * 60 * 1000
+const DAY_NIGHT_SKY_TEXTURE_SIZE = 256
+const DAY_NIGHT_SKY_RADIUS = 18
+const DAY_NIGHT_CELESTIAL_ORBIT_X = 3.7
+const DAY_NIGHT_CELESTIAL_ORBIT_Y = 2.7
+const DAY_NIGHT_CELESTIAL_ORBIT_BASE_Y = 0.45
+const DAY_NIGHT_CELESTIAL_ORBIT_Z = -14.4
+const DAY_NIGHT_SUN_SIZE = 1.25
+const DAY_NIGHT_SUN_GLOW_SIZE = 2.2
+const DAY_NIGHT_MOON_SIZE = 0.95
+const DAY_NIGHT_MOON_GLOW_SIZE = 1.75
+const DAY_NIGHT_CELESTIAL_RIM_OFFSET_PX = 32
+const DAY_NIGHT_CELESTIAL_SAFE_MARGIN_PX = 36
+const DAY_NIGHT_HORIZON_SCALE = 1.17
+const DAY_NIGHT_HORIZON_MAX_OPACITY = 0.24
+const DAY_NIGHT_HORIZON_MIN_OPACITY = 0
+const DAY_NIGHT_HORIZON_DEPTH = 13.8
+const DAY_NIGHT_STAR_COUNT = 760
+const DAY_NIGHT_STAR_RADIUS = 17.2
+const DAY_NIGHT_STAR_SIZE = 0.17
+const DAY_NIGHT_STAR_TWINKLE_SPEED = 1.65
+const DAY_NIGHT_TAU = Math.PI * 2
+const DAY_NIGHT_DAY_EDGE_START = 0.38
+const DAY_NIGHT_DAY_EDGE_END = 0.7
+const DAY_NIGHT_STAR_EDGE_START = 0.08
+const DAY_NIGHT_STAR_EDGE_END = 0.46
+const DAY_NIGHT_EXPOSURE_DAY = 1.07
+const DAY_NIGHT_EXPOSURE_NIGHT = 0.9
+const SKY_DAY_TOP_COLOR = new THREE.Color('#4caef2')
+const SKY_DAY_HORIZON_COLOR = new THREE.Color('#93dbff')
+const SKY_DAY_BOTTOM_COLOR = new THREE.Color('#d4f2ff')
+const SKY_NIGHT_TOP_COLOR = new THREE.Color('#081025')
+const SKY_NIGHT_HORIZON_COLOR = new THREE.Color('#1a2741')
+const SKY_NIGHT_BOTTOM_COLOR = new THREE.Color('#060c1d')
+const DAY_LIGHT_COLOR = new THREE.Color('#fff6df')
+const NIGHT_LIGHT_COLOR = new THREE.Color('#aec3ff')
+const DAY_RIM_COLOR = new THREE.Color('#a5dfff')
+const NIGHT_RIM_COLOR = new THREE.Color('#607eb8')
+const SUN_CORE_COLOR = new THREE.Color('#ffeeb0')
+const SUN_GLOW_COLOR = new THREE.Color('#fff2c2')
+const MOON_CORE_COLOR = new THREE.Color('#d2deff')
+const MOON_GLOW_COLOR = new THREE.Color('#bacfff')
+const HORIZON_DAY_COLOR = new THREE.Color('#a8e5ff')
+const HORIZON_NIGHT_COLOR = new THREE.Color('#2f4e7f')
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
+const lerp = (a: number, b: number, t: number) => a + (b - a) * t
 const smoothstep = (edge0: number, edge1: number, x: number) => {
   const t = clamp((x - edge0) / (edge1 - edge0), 0, 1)
   return t * t * (3 - 2 * t)
@@ -1637,6 +1739,179 @@ const createScene = async (
   camera.add(keyLight)
   camera.add(rimLight)
 
+  let dayNightDebugMode: DayNightDebugMode = 'auto'
+  let dayNightPhase = 0
+  let dayNightFactor = 1
+  let dayNightSourceNowMs: number | null = null
+  let lastSkyGradientFactor = Number.NaN
+  const skyTopTemp = new THREE.Color()
+  const skyHorizonTemp = new THREE.Color()
+  const skyBottomTemp = new THREE.Color()
+  const horizonColorTemp = new THREE.Color()
+  let lastPlanetScreenCenterX = 0.5
+  let lastPlanetScreenCenterY = 0.5
+  let lastPlanetScreenRadiusPx = 240
+
+  const skyGroup = new THREE.Group()
+  skyGroup.renderOrder = -50
+  camera.add(skyGroup)
+
+  const skyGradient = createSkyGradientTexture(DAY_NIGHT_SKY_TEXTURE_SIZE)
+  const skyDomeGeometry = new THREE.SphereGeometry(DAY_NIGHT_SKY_RADIUS, 48, 32)
+  const skyDomeMaterial = new THREE.MeshBasicMaterial({
+    map: skyGradient?.texture ?? null,
+    color: '#ffffff',
+    side: THREE.BackSide,
+    depthWrite: false,
+    depthTest: false,
+    fog: false,
+  })
+  const skyDome = new THREE.Mesh(skyDomeGeometry, skyDomeMaterial)
+  skyDome.renderOrder = -50
+  skyDome.frustumCulled = false
+  skyGroup.add(skyDome)
+
+  const horizonTexture = createHorizonScatteringTexture()
+  const horizonMaterial = new THREE.SpriteMaterial({
+    map: horizonTexture ?? null,
+    color: HORIZON_DAY_COLOR.clone(),
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+    depthTest: false,
+    fog: false,
+  })
+  const horizonSprite = new THREE.Sprite(horizonMaterial)
+  horizonSprite.renderOrder = -49
+  horizonSprite.frustumCulled = false
+  skyGroup.add(horizonSprite)
+
+  const starsGeometry = new THREE.BufferGeometry()
+  const starPositions = new Float32Array(DAY_NIGHT_STAR_COUNT * 3)
+  const starRandom = createSeededRandom(0x4f23d19a)
+  for (let i = 0; i < DAY_NIGHT_STAR_COUNT; i += 1) {
+    const z = starRandom() * 2 - 1
+    const theta = starRandom() * DAY_NIGHT_TAU
+    const radial = Math.sqrt(Math.max(0, 1 - z * z))
+    const radius = DAY_NIGHT_STAR_RADIUS * (0.95 + starRandom() * 0.08)
+    const offset = i * 3
+    starPositions[offset] = Math.cos(theta) * radial * radius
+    starPositions[offset + 1] = z * radius
+    starPositions[offset + 2] = Math.sin(theta) * radial * radius
+  }
+  starsGeometry.setAttribute('position', new THREE.BufferAttribute(starPositions, 3))
+  const starTexture = createPelletRadialTexture(96, [
+    { offset: 0, color: 'rgba(255,255,255,1)' },
+    { offset: 0.75, color: 'rgba(255,255,255,0.4)' },
+    { offset: 1, color: 'rgba(255,255,255,0)' },
+  ])
+  const starsMaterial = new THREE.PointsMaterial({
+    color: '#f3f8ff',
+    size: DAY_NIGHT_STAR_SIZE,
+    transparent: true,
+    opacity: 0,
+    map: starTexture ?? null,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    depthTest: true,
+    sizeAttenuation: true,
+  })
+  const starsMesh = new THREE.Points(starsGeometry, starsMaterial)
+  starsMesh.frustumCulled = false
+  starsMesh.renderOrder = -49
+  skyGroup.add(starsMesh)
+
+  const sunTexture = createPelletRadialTexture(192, [
+    { offset: 0, color: 'rgba(255,255,255,1)' },
+    { offset: 0.5, color: 'rgba(255,244,185,0.96)' },
+    { offset: 1, color: 'rgba(255,244,185,0)' },
+  ])
+  const sunGlowTexture = createPelletRadialTexture(224, [
+    { offset: 0, color: 'rgba(255,245,188,0.95)' },
+    { offset: 0.62, color: 'rgba(255,245,188,0.42)' },
+    { offset: 1, color: 'rgba(255,245,188,0)' },
+  ])
+  const moonTexture = createPelletRadialTexture(192, [
+    { offset: 0, color: 'rgba(255,255,255,0.95)' },
+    { offset: 0.54, color: 'rgba(216,227,255,0.84)' },
+    { offset: 1, color: 'rgba(216,227,255,0)' },
+  ])
+  const moonGlowTexture = createPelletRadialTexture(192, [
+    { offset: 0, color: 'rgba(196,214,255,0.78)' },
+    { offset: 0.7, color: 'rgba(196,214,255,0.28)' },
+    { offset: 1, color: 'rgba(196,214,255,0)' },
+  ])
+
+  const sunCoreMaterial = new THREE.SpriteMaterial({
+    map: sunTexture ?? null,
+    color: SUN_CORE_COLOR.clone(),
+    transparent: true,
+    opacity: 1,
+    depthWrite: false,
+    depthTest: true,
+    fog: false,
+  })
+  const sunGlowMaterial = new THREE.SpriteMaterial({
+    map: sunGlowTexture ?? null,
+    color: SUN_GLOW_COLOR.clone(),
+    transparent: true,
+    opacity: 0.55,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    depthTest: true,
+    fog: false,
+  })
+  const moonCoreMaterial = new THREE.SpriteMaterial({
+    map: moonTexture ?? null,
+    color: MOON_CORE_COLOR.clone(),
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+    depthTest: true,
+    fog: false,
+  })
+  const moonGlowMaterial = new THREE.SpriteMaterial({
+    map: moonGlowTexture ?? null,
+    color: MOON_GLOW_COLOR.clone(),
+    transparent: true,
+    opacity: 0,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    depthTest: true,
+    fog: false,
+  })
+
+  const sunGroup = new THREE.Group()
+  const moonGroup = new THREE.Group()
+  sunGroup.renderOrder = -48
+  moonGroup.renderOrder = -48
+  sunGroup.frustumCulled = false
+  moonGroup.frustumCulled = false
+
+  const sunGlow = new THREE.Sprite(sunGlowMaterial)
+  const sunCore = new THREE.Sprite(sunCoreMaterial)
+  sunGlow.scale.set(DAY_NIGHT_SUN_GLOW_SIZE, DAY_NIGHT_SUN_GLOW_SIZE, 1)
+  sunCore.scale.set(DAY_NIGHT_SUN_SIZE, DAY_NIGHT_SUN_SIZE, 1)
+  sunGlow.frustumCulled = false
+  sunCore.frustumCulled = false
+  sunGlow.renderOrder = -48
+  sunCore.renderOrder = -47
+  sunGroup.add(sunGlow)
+  sunGroup.add(sunCore)
+
+  const moonGlow = new THREE.Sprite(moonGlowMaterial)
+  const moonCore = new THREE.Sprite(moonCoreMaterial)
+  moonGlow.scale.set(DAY_NIGHT_MOON_GLOW_SIZE, DAY_NIGHT_MOON_GLOW_SIZE, 1)
+  moonCore.scale.set(DAY_NIGHT_MOON_SIZE, DAY_NIGHT_MOON_SIZE, 1)
+  moonGlow.frustumCulled = false
+  moonCore.frustumCulled = false
+  moonGlow.renderOrder = -48
+  moonCore.renderOrder = -47
+  moonGroup.add(moonGlow)
+  moonGroup.add(moonCore)
+  skyGroup.add(sunGroup)
+  skyGroup.add(moonGroup)
+
   let lakes: Lake[] = []
   let trees: TreeInstance[] = []
   let mountains: MountainInstance[] = []
@@ -1859,6 +2134,13 @@ const createScene = async (
           opacity: number
           planeCount: number
         } | null
+        getDayNightInfo: () => {
+          mode: DayNightDebugMode
+          phase: number
+          dayFactor: number
+          cycleMs: number
+          sourceNowMs: number | null
+        }
       }
     | null = null
 
@@ -1909,6 +2191,13 @@ const createScene = async (
           opacity: number
           planeCount: number
         } | null
+        getDayNightInfo: () => {
+          mode: DayNightDebugMode
+          phase: number
+          dayFactor: number
+          cycleMs: number
+          sourceNowMs: number | null
+        }
       }
     }
     debugApi = {
@@ -2007,6 +2296,13 @@ const createScene = async (
           planeCount: 1,
         }
       },
+      getDayNightInfo: () => ({
+        mode: dayNightDebugMode,
+        phase: dayNightPhase,
+        dayFactor: dayNightFactor,
+        cycleMs: DAY_NIGHT_CYCLE_MS,
+        sourceNowMs: dayNightSourceNowMs,
+      }),
     }
     debugWindow.__SNAKE_DEBUG__ = debugApi
   }
@@ -6359,6 +6655,223 @@ diffuseColor.a *= retireEdge;`,
     }
   }
 
+  const resolveDayFactor = (sourceNowMs: number) => {
+    const wrapped =
+      ((sourceNowMs % DAY_NIGHT_CYCLE_MS) + DAY_NIGHT_CYCLE_MS) % DAY_NIGHT_CYCLE_MS
+    dayNightPhase = wrapped / DAY_NIGHT_CYCLE_MS
+    if (dayNightDebugMode === 'day') {
+      dayNightFactor = 1
+      return dayNightFactor
+    }
+    if (dayNightDebugMode === 'night') {
+      dayNightFactor = 0
+      return dayNightFactor
+    }
+    const daylightWave = Math.sin(dayNightPhase * DAY_NIGHT_TAU - Math.PI * 0.5) * 0.5 + 0.5
+    dayNightFactor = smoothstep(DAY_NIGHT_DAY_EDGE_START, DAY_NIGHT_DAY_EDGE_END, daylightWave)
+    return dayNightFactor
+  }
+
+  const projectScreenToCamera = (
+    xPx: number,
+    yPx: number,
+    depth: number,
+    out: THREE.Vector3,
+  ) => {
+    const safeDepth = Math.max(0.001, Math.abs(depth))
+    if (viewportWidth <= 1 || viewportHeight <= 1) {
+      out.set(0, 0, -safeDepth)
+      return out
+    }
+    const ndcX = (xPx / viewportWidth) * 2 - 1
+    const ndcY = 1 - (yPx / viewportHeight) * 2
+    const halfFov = THREE.MathUtils.degToRad(camera.fov) * 0.5
+    const tanHalf = Math.tan(halfFov)
+    out.set(ndcX * safeDepth * tanHalf * camera.aspect, ndcY * safeDepth * tanHalf, -safeDepth)
+    return out
+  }
+
+  const computePlanetScreenInfo = () => {
+    const safeWidth = Math.max(1, viewportWidth)
+    const safeHeight = Math.max(1, viewportHeight)
+    const fallbackCenterX = lastPlanetScreenCenterX * safeWidth
+    const fallbackCenterY = lastPlanetScreenCenterY * safeHeight
+    const fallbackRadius = clamp(
+      lastPlanetScreenRadiusPx,
+      Math.min(safeWidth, safeHeight) * 0.08,
+      Math.max(safeWidth, safeHeight) * 0.95,
+    )
+
+    const centerNdc = tempVectorD.set(0, 0, 0).project(camera)
+    if (!Number.isFinite(centerNdc.x) || !Number.isFinite(centerNdc.y) || !Number.isFinite(centerNdc.z)) {
+      return {
+        centerX: fallbackCenterX,
+        centerY: fallbackCenterY,
+        radiusPx: fallbackRadius,
+      }
+    }
+
+    const centerX = (centerNdc.x * 0.5 + 0.5) * safeWidth
+    const centerY = (-centerNdc.y * 0.5 + 0.5) * safeHeight
+    let radiusPx = fallbackRadius
+
+    const centerDistance = camera.position.length()
+    if (centerDistance > PLANET_RADIUS + 1e-4) {
+      tempVectorE.copy(camera.position).multiplyScalar(-1)
+      tempVectorF.copy(tempVectorE).cross(WORLD_UP)
+      if (tempVectorF.lengthSq() <= 1e-8) {
+        tempVectorF.copy(tempVectorE).cross(WORLD_RIGHT)
+      }
+      if (tempVectorF.lengthSq() > 1e-8) {
+        tempVectorF.normalize().multiplyScalar(PLANET_RADIUS)
+        const rimNdc = tempVectorG.copy(tempVectorF).project(camera)
+        if (Number.isFinite(rimNdc.x) && Number.isFinite(rimNdc.y)) {
+          const dxPx = (rimNdc.x - centerNdc.x) * safeWidth * 0.5
+          const dyPx = (rimNdc.y - centerNdc.y) * safeHeight * 0.5
+          radiusPx = Math.hypot(dxPx, dyPx)
+        }
+      }
+
+      if (!Number.isFinite(radiusPx) || radiusPx <= 0) {
+        const halfFov = THREE.MathUtils.degToRad(camera.fov) * 0.5
+        const focalPx = (safeHeight * 0.5) / Math.tan(halfFov)
+        radiusPx = (PLANET_RADIUS / centerDistance) * focalPx
+      }
+    }
+
+    if (Number.isFinite(centerX) && Number.isFinite(centerY) && Number.isFinite(radiusPx) && radiusPx > 1) {
+      lastPlanetScreenCenterX = centerX / safeWidth
+      lastPlanetScreenCenterY = centerY / safeHeight
+      lastPlanetScreenRadiusPx = radiusPx
+      return { centerX, centerY, radiusPx }
+    }
+
+    return {
+      centerX: fallbackCenterX,
+      centerY: fallbackCenterY,
+      radiusPx: fallbackRadius,
+    }
+  }
+
+  const updateDayNightVisuals = (sourceNowMs: number) => {
+    dayNightSourceNowMs = sourceNowMs
+    const dayFactor = resolveDayFactor(sourceNowMs)
+    const nightFactor = 1 - dayFactor
+    const starFactor = smoothstep(
+      DAY_NIGHT_STAR_EDGE_START,
+      DAY_NIGHT_STAR_EDGE_END,
+      nightFactor,
+    )
+
+    skyTopTemp.lerpColors(SKY_NIGHT_TOP_COLOR, SKY_DAY_TOP_COLOR, dayFactor)
+    skyHorizonTemp.lerpColors(SKY_NIGHT_HORIZON_COLOR, SKY_DAY_HORIZON_COLOR, dayFactor)
+    skyBottomTemp.lerpColors(SKY_NIGHT_BOTTOM_COLOR, SKY_DAY_BOTTOM_COLOR, dayFactor)
+    if (
+      skyGradient &&
+      (!Number.isFinite(lastSkyGradientFactor) ||
+        Math.abs(lastSkyGradientFactor - dayFactor) > 0.004)
+    ) {
+      paintSkyGradientTexture(skyGradient, skyTopTemp, skyHorizonTemp, skyBottomTemp)
+      lastSkyGradientFactor = dayFactor
+    }
+
+    ambient.intensity = lerp(0.26, 0.68, dayFactor)
+    keyLight.intensity = lerp(0.14, 0.5, dayFactor)
+    rimLight.intensity = lerp(0.12, 0.3, dayFactor)
+    keyLight.color.lerpColors(NIGHT_LIGHT_COLOR, DAY_LIGHT_COLOR, dayFactor)
+    rimLight.color.lerpColors(NIGHT_RIM_COLOR, DAY_RIM_COLOR, dayFactor)
+    renderer.toneMappingExposure = lerp(DAY_NIGHT_EXPOSURE_NIGHT, DAY_NIGHT_EXPOSURE_DAY, dayFactor)
+
+    const twinkle =
+      0.88 + 0.12 * Math.sin(sourceNowMs * 0.001 * DAY_NIGHT_STAR_TWINKLE_SPEED)
+    const starsOpacity = clamp(starFactor * twinkle, 0, 1)
+    starsMaterial.opacity = starsOpacity
+    starsMesh.visible = starsOpacity > 0.001
+
+    const { centerX, centerY, radiusPx } = computePlanetScreenInfo()
+    const safeWidth = Math.max(1, viewportWidth)
+    const safeHeight = Math.max(1, viewportHeight)
+    const halfFov = THREE.MathUtils.degToRad(camera.fov) * 0.5
+    const tanHalf = Math.tan(halfFov)
+    const sunDepth = Math.abs(DAY_NIGHT_CELESTIAL_ORBIT_Z)
+    const moonDepth = Math.abs(DAY_NIGHT_CELESTIAL_ORBIT_Z + 0.2)
+    const pixelsPerUnitAtSunDepth = (safeHeight * 0.5) / Math.max(0.001, tanHalf * sunDepth)
+    const sunSpriteRadiusPx = DAY_NIGHT_SUN_GLOW_SIZE * pixelsPerUnitAtSunDepth * 0.5
+    const moonSpriteRadiusPx = DAY_NIGHT_MOON_GLOW_SIZE * pixelsPerUnitAtSunDepth * 0.5
+
+    const baseRimRadius = Math.max(1, radiusPx + DAY_NIGHT_CELESTIAL_RIM_OFFSET_PX)
+    const orbitTheta = dayNightPhase * DAY_NIGHT_TAU - Math.PI * 0.5
+    const orbitScaleX = DAY_NIGHT_CELESTIAL_ORBIT_X / 3.7
+    const orbitScaleY = DAY_NIGHT_CELESTIAL_ORBIT_Y / 3.3
+    const ellipseX = Math.cos(orbitTheta) * orbitScaleX
+    const ellipseY = Math.sin(orbitTheta) * orbitScaleY
+
+    const placeOnRim = (
+      seedX: number,
+      seedY: number,
+      spriteRadiusPx: number,
+      phaseX: number,
+      phaseY: number,
+    ) => {
+      let x = seedX
+      let y = seedY
+      const margin = DAY_NIGHT_CELESTIAL_SAFE_MARGIN_PX + spriteRadiusPx
+      x = clamp(x, margin, safeWidth - margin)
+      y = clamp(y, margin, safeHeight - margin)
+      const dx = x - centerX
+      const dy = y - centerY
+      const dist = Math.hypot(dx, dy)
+      const minDist = radiusPx + spriteRadiusPx + 10
+      if (dist < minDist) {
+        const ux = dist > 1e-4 ? dx / dist : phaseX
+        const uy = dist > 1e-4 ? dy / dist : phaseY
+        x = centerX + ux * minDist
+        y = centerY + uy * minDist
+        x = clamp(x, margin, safeWidth - margin)
+        y = clamp(y, margin, safeHeight - margin)
+      }
+      return { x, y }
+    }
+
+    const sunSeedX = centerX + ellipseX * baseRimRadius
+    const sunSeedY = centerY + ellipseY * baseRimRadius
+    const sunPos = placeOnRim(sunSeedX, sunSeedY, sunSpriteRadiusPx, ellipseX, ellipseY)
+    const moonSeedX = centerX - ellipseX * baseRimRadius
+    const moonSeedY = centerY - ellipseY * baseRimRadius + DAY_NIGHT_CELESTIAL_ORBIT_BASE_Y * 10
+    const moonPos = placeOnRim(moonSeedX, moonSeedY, moonSpriteRadiusPx, -ellipseX, -ellipseY)
+
+    projectScreenToCamera(sunPos.x, sunPos.y, sunDepth, tempVectorG)
+    sunGroup.position.copy(tempVectorG)
+    projectScreenToCamera(moonPos.x, moonPos.y, moonDepth, tempVectorH)
+    moonGroup.position.copy(tempVectorH)
+
+    const horizonDay = smoothstep(0.18, 0.82, dayFactor)
+    const unitsPerPixelAtHorizonDepth =
+      (Math.max(0.001, DAY_NIGHT_HORIZON_DEPTH) * tanHalf * 2) / safeHeight
+    const horizonDiameterPx = Math.max(2, radiusPx * DAY_NIGHT_HORIZON_SCALE * 2)
+    const horizonScale = horizonDiameterPx * unitsPerPixelAtHorizonDepth
+    projectScreenToCamera(centerX, centerY, DAY_NIGHT_HORIZON_DEPTH, tempVectorF)
+    horizonSprite.position.copy(tempVectorF)
+    horizonSprite.scale.set(horizonScale, horizonScale, 1)
+    horizonColorTemp.lerpColors(HORIZON_NIGHT_COLOR, HORIZON_DAY_COLOR, dayFactor)
+    horizonMaterial.color.copy(horizonColorTemp)
+    horizonMaterial.opacity = lerp(
+      DAY_NIGHT_HORIZON_MIN_OPACITY,
+      DAY_NIGHT_HORIZON_MAX_OPACITY,
+      horizonDay,
+    )
+    horizonSprite.visible = horizonMaterial.opacity > 0.001
+
+    const sunOpacity = smoothstep(0.08, 0.4, dayFactor)
+    const moonOpacity = smoothstep(0.08, 0.5, nightFactor)
+    sunCoreMaterial.opacity = sunOpacity
+    sunGlowMaterial.opacity = sunOpacity * 0.65
+    moonCoreMaterial.opacity = moonOpacity
+    moonGlowMaterial.opacity = moonOpacity * 0.55
+    sunGroup.visible = sunOpacity > 0.001
+    moonGroup.visible = moonOpacity > 0.001
+  }
+
   const render = (
     snapshot: GameStateSnapshot | null,
     cameraState: Camera,
@@ -6383,6 +6896,8 @@ diffuseColor.a *= retireEdge;`,
       )
     }
     camera.updateMatrixWorld()
+    const cycleNowMs = snapshot?.now ?? Date.now()
+    updateDayNightVisuals(cycleNowMs)
 
     let localHeadScreen: { x: number; y: number } | null = null
 
@@ -6526,6 +7041,14 @@ diffuseColor.a *= retireEdge;`,
     }
   }
 
+  const setDayNightDebugMode = (mode: DayNightDebugMode) => {
+    if (mode === 'day' || mode === 'night' || mode === 'auto') {
+      dayNightDebugMode = mode
+      return
+    }
+    dayNightDebugMode = 'auto'
+  }
+
   const resize = (width: number, height: number, dpr: number) => {
     viewportWidth = width
     viewportHeight = height
@@ -6538,6 +7061,23 @@ diffuseColor.a *= retireEdge;`,
   const dispose = () => {
     renderer.dispose()
     disposeEnvironment()
+    camera.remove(skyGroup)
+    skyDomeGeometry.dispose()
+    skyDomeMaterial.dispose()
+    starsGeometry.dispose()
+    starsMaterial.dispose()
+    starTexture?.dispose()
+    horizonTexture?.dispose()
+    horizonMaterial.dispose()
+    skyGradient?.texture.dispose()
+    sunTexture?.dispose()
+    sunGlowTexture?.dispose()
+    moonTexture?.dispose()
+    moonGlowTexture?.dispose()
+    sunCoreMaterial.dispose()
+    sunGlowMaterial.dispose()
+    moonCoreMaterial.dispose()
+    moonGlowMaterial.dispose()
     headGeometry.dispose()
     bowlGeometry.dispose()
     tailGeometry.dispose()
@@ -6596,6 +7136,7 @@ diffuseColor.a *= retireEdge;`,
     render,
     setEnvironment,
     setDebugFlags,
+    setDayNightDebugMode,
     dispose,
   }
 }

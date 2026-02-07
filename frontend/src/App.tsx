@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import {
   createRenderScene,
+  type DayNightDebugMode,
   type RenderScene,
   type RendererBackend,
   type RendererPreference,
@@ -42,6 +43,7 @@ const LAKE_DEBUG_KEY = 'spherical_snake_lake_debug'
 const TREE_DEBUG_KEY = 'spherical_snake_tree_debug'
 const TERRAIN_WIREFRAME_DEBUG_KEY = 'spherical_snake_terrain_wireframe_debug'
 const TERRAIN_TESSELLATION_DEBUG_KEY_LEGACY = 'spherical_snake_terrain_tessellation_debug'
+const DAY_NIGHT_DEBUG_MODE_KEY = 'spherical_snake_day_night_debug_mode'
 const DEBUG_UI_ENABLED = import.meta.env.DEV || import.meta.env.VITE_E2E_DEBUG === '1'
 const getMountainDebug = () => {
   if (typeof window === 'undefined') return false
@@ -76,6 +78,16 @@ const getTerrainTessellationDebug = () => {
   } catch {
     return false
   }
+}
+const getDayNightDebugMode = (): DayNightDebugMode => {
+  if (typeof window === 'undefined') return 'auto'
+  try {
+    const value = window.localStorage.getItem(DAY_NIGHT_DEBUG_MODE_KEY)
+    if (value === 'day' || value === 'night' || value === 'auto') return value
+  } catch {
+    // ignore persistence errors
+  }
+  return 'auto'
 }
 const OFFSET_SMOOTHING = 0.12
 const CAMERA_DISTANCE_DEFAULT = 5.2
@@ -269,6 +281,9 @@ export default function App() {
   const [terrainTessellationDebug, setTerrainTessellationDebug] = useState(
     getTerrainTessellationDebug,
   )
+  const [dayNightDebugMode, setDayNightDebugMode] = useState<DayNightDebugMode>(
+    getDayNightDebugMode,
+  )
   const environmentRef = useRef<Environment | null>(environment)
   const debugFlagsRef = useRef({
     mountainOutline: mountainDebug,
@@ -276,6 +291,7 @@ export default function App() {
     treeCollider: treeDebug,
     terrainTessellation: terrainTessellationDebug,
   })
+  const dayNightDebugModeRef = useRef<DayNightDebugMode>(dayNightDebugMode)
   const playerIdRef = useRef<string | null>(playerId)
   const playerNameRef = useRef(playerName)
   const isPlaying = menuPhase === 'playing'
@@ -437,6 +453,16 @@ export default function App() {
   }, [mountainDebug, lakeDebug, treeDebug, terrainTessellationDebug])
 
   useEffect(() => {
+    try {
+      window.localStorage.setItem(DAY_NIGHT_DEBUG_MODE_KEY, dayNightDebugMode)
+    } catch {
+      // ignore persistence errors
+    }
+    dayNightDebugModeRef.current = dayNightDebugMode
+    webglRef.current?.setDayNightDebugMode?.(dayNightDebugModeRef.current)
+  }, [dayNightDebugMode])
+
+  useEffect(() => {
     if (score > bestScore) {
       setBestScore(score)
       storeBestScore(score)
@@ -493,6 +519,7 @@ export default function App() {
           webgl.setEnvironment?.(environmentRef.current)
         }
         webgl.setDebugFlags?.(debugFlagsRef.current)
+        webgl.setDayNightDebugMode?.(dayNightDebugModeRef.current)
 
         const handleResize = () => {
           const rect = glCanvas.getBoundingClientRect()
@@ -1113,6 +1140,21 @@ export default function App() {
                     />
                     Terrain wireframe
                   </label>
+                  <div className='debug-option debug-option--select'>
+                    <label htmlFor='day-night-mode'>Day/Night</label>
+                    <select
+                      id='day-night-mode'
+                      className='debug-select'
+                      value={dayNightDebugMode}
+                      onChange={(event) =>
+                        setDayNightDebugMode(event.target.value as DayNightDebugMode)
+                      }
+                    >
+                      <option value='auto'>Auto</option>
+                      <option value='day'>Force day</option>
+                      <option value='night'>Force night</option>
+                    </select>
+                  </div>
                 </div>
               </div>
             )}
