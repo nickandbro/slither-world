@@ -29,20 +29,6 @@ Repo root (recommended for full stack):
 - `./run-dev.sh` — run backend + frontend for local dev (ports 8788 + 5177 by default). Uses `cargo watch` for backend hot reload when available and falls back to `cargo run` if install fails.
 - `./run-e2e.sh` — start backend + frontend for Playwright E2E (ports 8790 + 5177 by default).
 
-Frontend (run inside `frontend/`):
-- `npm run dev` — start the Vite dev server.
-- `npm run build` — type-check and build to `frontend/dist/`.
-- `npm run preview` — build then serve the production build locally.
-- `npm run lint` — run ESLint across the frontend.
-- `npm run deploy` — build and deploy the static site via Wrangler.
-- `npm run test:e2e` — run Playwright E2E tests (uses `./run-e2e.sh`).
-  - `npm run test:e2e -- --project=chromium` — default regression suite (non-`@webgpu` tests).
-  - `npm run test:e2e -- --project=chromium-webgpu` — WebGPU-targeted renderer suite (`@webgpu` tests).
-
-Backend (run inside `backend/`):
-- `cargo run` — start the Tokio server (defaults to `0.0.0.0:8787`).
-- `cargo test` — run backend tests (if added).
-
 ## Testing Expectations
 - Default validation should be lightweight: prefer targeted checks such as `npm run build`, `npm run lint`, and focused backend/frontend tests relevant to the change.
 - Do **not** create new Playwright E2E specs for every change by default.

@@ -342,6 +342,7 @@ export type RenderScene = {
     camera: Camera,
     localPlayerId: string | null,
     cameraDistance: number,
+    cameraVerticalOffset?: number,
   ) => { x: number; y: number } | null
   setEnvironment: (environment: Environment) => void
   setDebugFlags: (flags: {
@@ -6363,6 +6364,7 @@ diffuseColor.a *= retireEdge;`,
     cameraState: Camera,
     localPlayerId: string | null,
     cameraDistance: number,
+    cameraVerticalOffset = 0,
   ) => {
     const now = performance.now()
     const deltaSeconds = Math.min(0.1, Math.max(0, (now - lastFrameTime) / 1000))
@@ -6374,7 +6376,11 @@ diffuseColor.a *= retireEdge;`,
       world.quaternion.identity()
     }
     if (Number.isFinite(cameraDistance)) {
-      camera.position.set(0, 0, cameraDistance)
+      camera.position.set(
+        0,
+        Number.isFinite(cameraVerticalOffset) ? cameraVerticalOffset : 0,
+        cameraDistance,
+      )
     }
     camera.updateMatrixWorld()
 
@@ -6454,7 +6460,7 @@ diffuseColor.a *= retireEdge;`,
     cameraLocalPosTemp.copy(camera.position).applyQuaternion(patchCenterQuat)
     cameraLocalDirTemp.copy(cameraLocalPosTemp).normalize()
     const aspect = viewportHeight > 0 ? viewportWidth / viewportHeight : 1
-    const viewAngle = computeVisibleSurfaceAngle(camera.position.z, aspect)
+    const viewAngle = computeVisibleSurfaceAngle(cameraLocalPosTemp.length(), aspect)
     if (PLANET_PATCH_ENABLED) {
       updatePlanetPatchVisibility(cameraLocalDirTemp, viewAngle)
     }

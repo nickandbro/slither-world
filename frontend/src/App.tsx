@@ -91,7 +91,8 @@ const BOOST_EFFECT_FADE_IN_RATE = 9
 const BOOST_EFFECT_FADE_OUT_RATE = 12
 const BOOST_EFFECT_PULSE_SPEED = 8.5
 const BOOST_EFFECT_ACTIVE_CLASS_THRESHOLD = 0.01
-const MENU_CAMERA_DISTANCE = 6.15
+const MENU_CAMERA_DISTANCE = 7
+const MENU_CAMERA_VERTICAL_OFFSET = 2.5
 const MENU_TO_GAMEPLAY_BLEND_MS = 900
 const formatRendererError = (error: unknown) => {
   if (error instanceof Error && error.message.trim()) {
@@ -138,7 +139,7 @@ type MenuFlowDebugInfo = {
   cameraDistance: number
 }
 
-const MENU_CAMERA_TARGET = normalize({ x: 0.04, y: 0.995, z: 0.08 })
+const MENU_CAMERA_TARGET = normalize({ x: 0.06, y: 0.992, z: 0.11 })
 const createMenuCamera = () => {
   const upRef = { current: { x: 0, y: 1, z: 0 } }
   const camera = updateCamera(MENU_CAMERA_TARGET, upRef)
@@ -227,6 +228,7 @@ export default function App() {
   const cameraUpRef = useRef<Point>({ x: 0, y: 1, z: 0 })
   const cameraDistanceRef = useRef(CAMERA_DISTANCE_DEFAULT)
   const renderCameraDistanceRef = useRef(MENU_CAMERA_DISTANCE)
+  const renderCameraVerticalOffsetRef = useRef(MENU_CAMERA_VERTICAL_OFFSET)
   const localHeadRef = useRef<Point | null>(MENU_CAMERA_TARGET)
   const headScreenRef = useRef<{ x: number; y: number } | null>(null)
   const playerMetaRef = useRef<Map<string, PlayerMeta>>(new Map())
@@ -238,7 +240,7 @@ export default function App() {
     phase: 'preplay',
     hasSpawned: false,
     cameraBlend: 0,
-    cameraDistance: MENU_CAMERA_DISTANCE,
+    cameraDistance: Math.hypot(MENU_CAMERA_DISTANCE, MENU_CAMERA_VERTICAL_OFFSET),
   })
   const boostFxStateRef = useRef<BoostFxState>({
     intensity: 0,
@@ -549,9 +551,11 @@ export default function App() {
 
             let renderCamera = MENU_CAMERA
             let renderDistance = MENU_CAMERA_DISTANCE
+            let renderVerticalOffset = MENU_CAMERA_VERTICAL_OFFSET
             if (phase === 'playing') {
               renderCamera = gameplayCamera.active ? gameplayCamera : MENU_CAMERA
               renderDistance = cameraDistanceRef.current
+              renderVerticalOffset = 0
               cameraBlendRef.current = 1
             } else if (phase === 'spawning' && gameplayCamera.active) {
               renderCamera = {
@@ -560,6 +564,7 @@ export default function App() {
               }
               renderDistance =
                 MENU_CAMERA_DISTANCE + (cameraDistanceRef.current - MENU_CAMERA_DISTANCE) * easedBlend
+              renderVerticalOffset = MENU_CAMERA_VERTICAL_OFFSET * (1 - easedBlend)
               if (blend >= 0.999 && hasSpawnedSnake) {
                 setMenuPhase('playing')
               }
@@ -567,6 +572,7 @@ export default function App() {
 
             cameraRef.current = renderCamera
             renderCameraDistanceRef.current = renderDistance
+            renderCameraVerticalOffsetRef.current = renderVerticalOffset
             localHeadRef.current = hasSpawnedSnake && localHead ? normalize(localHead) : MENU_CAMERA_TARGET
             boostActive =
               inputEnabledRef.current &&
@@ -575,7 +581,13 @@ export default function App() {
               localSnapshotPlayer.alive &&
               localSnapshotPlayer.stamina > BOOST_EFFECT_STAMINA_EPS
 
-            const headScreen = webgl.render(snapshot, renderCamera, localId, renderDistance)
+            const headScreen = webgl.render(
+              snapshot,
+              renderCamera,
+              localId,
+              renderDistance,
+              renderVerticalOffset,
+            )
             headScreenRef.current = headScreen
 
             if (inputEnabledRef.current) {
@@ -610,7 +622,7 @@ export default function App() {
               phase,
               hasSpawned: hasSpawnedSnake,
               cameraBlend: phase === 'playing' ? 1 : blend,
-              cameraDistance: renderDistance,
+              cameraDistance: Math.hypot(renderDistance, renderVerticalOffset),
             }
             if (DEBUG_UI_ENABLED && typeof window !== 'undefined') {
               const debugApi = (
@@ -672,6 +684,7 @@ export default function App() {
       playerMetaRef.current = new Map()
       localHeadRef.current = MENU_CAMERA_TARGET
       renderCameraDistanceRef.current = MENU_CAMERA_DISTANCE
+      renderCameraVerticalOffsetRef.current = MENU_CAMERA_VERTICAL_OFFSET
       cameraBlendRef.current = 0
       cameraBlendStartMsRef.current = null
       pointerRef.current.active = false
@@ -811,14 +824,16 @@ export default function App() {
       const config = renderConfigRef.current
       const aspect = config && config.height > 0 ? config.width / config.height : 1
       const cameraDistance = renderCameraDistanceRef.current
-      const viewRadius = computeViewRadius(cameraDistance, aspect)
+      const cameraVerticalOffset = renderCameraVerticalOffsetRef.current
+      const effectiveCameraDistance = Math.hypot(cameraDistance, cameraVerticalOffset)
+      const viewRadius = computeViewRadius(effectiveCameraDistance, aspect)
       socket.send(
         encodeInput(
           axis,
           inputEnabledRef.current && pointerRef.current.boost,
           localHeadRef.current,
           viewRadius,
-          cameraDistance,
+          effectiveCameraDistance,
         ),
       )
     }, 50)
@@ -970,13 +985,9 @@ export default function App() {
           {!isPlaying && (
             <div className='menu-overlay'>
               <div className='menu-hero'>
-                <div className='menu-title'>Welcome to Spherical Snake</div>
-                <div className='menu-subtitle'>Steer across a tiny living world.</div>
+                <div className='menu-title'>Slither World</div>
 
                 <div className='menu-input-row'>
-                  <label className='control-label' htmlFor='player-name'>
-                    Pilot name
-                  </label>
                   <input
                     id='player-name'
                     value={playerName}
