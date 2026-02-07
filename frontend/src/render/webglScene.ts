@@ -31,6 +31,12 @@ type SnakeVisual = {
   boostDraftMaterial: THREE.MeshBasicMaterial
   boostDraftPhase: number
   boostDraftIntensity: number
+  nameplate: THREE.Sprite
+  nameplateMaterial: THREE.SpriteMaterial
+  nameplateTexture: THREE.CanvasTexture | null
+  nameplateCanvas: HTMLCanvasElement | null
+  nameplateCtx: CanvasRenderingContext2D | null
+  nameplateText: string
   color: string
 }
 
@@ -109,6 +115,12 @@ type PelletMotionState = {
 }
 
 type SkyGradientTexture = {
+  canvas: HTMLCanvasElement
+  ctx: CanvasRenderingContext2D
+  texture: THREE.CanvasTexture
+}
+
+type NameplateTexture = {
   canvas: HTMLCanvasElement
   ctx: CanvasRenderingContext2D
   texture: THREE.CanvasTexture
@@ -250,6 +262,114 @@ const createSkyGradientTexture = (size: number) => {
   texture.wrapT = THREE.ClampToEdgeWrapping
   texture.needsUpdate = true
   return { canvas, ctx, texture } satisfies SkyGradientTexture
+}
+
+const createNameplateTexture = (text: string): NameplateTexture | null => {
+  const canvas = document.createElement('canvas')
+  canvas.width = NAMEPLATE_CANVAS_WIDTH
+  canvas.height = NAMEPLATE_CANVAS_HEIGHT
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.colorSpace = THREE.SRGBColorSpace
+  texture.magFilter = THREE.LinearFilter
+  texture.minFilter = THREE.LinearFilter
+  texture.generateMipmaps = false
+  texture.wrapS = THREE.ClampToEdgeWrapping
+  texture.wrapT = THREE.ClampToEdgeWrapping
+  paintNameplateTexture({ canvas, ctx, texture }, text)
+  return { canvas, ctx, texture } satisfies NameplateTexture
+}
+
+const truncateNameplateText = (
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  maxWidth: number,
+) => {
+  if (ctx.measureText(text).width <= maxWidth) return text
+  const glyphs = Array.from(text)
+  if (glyphs.length === 0) return ''
+  const ellipsis = '...'
+  const ellipsisWidth = ctx.measureText(ellipsis).width
+  if (ellipsisWidth >= maxWidth) return ellipsis
+
+  let low = 0
+  let high = glyphs.length
+  while (low < high) {
+    const mid = Math.ceil((low + high) * 0.5)
+    const candidate = glyphs.slice(0, mid).join('')
+    if (ctx.measureText(candidate).width + ellipsisWidth <= maxWidth) {
+      low = mid
+    } else {
+      high = mid - 1
+    }
+  }
+  return `${glyphs.slice(0, low).join('')}${ellipsis}`
+}
+
+const drawRoundedRectPath = (
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number,
+) => {
+  const clampedRadius = Math.min(radius, width * 0.5, height * 0.5)
+  ctx.beginPath()
+  ctx.moveTo(x + clampedRadius, y)
+  ctx.lineTo(x + width - clampedRadius, y)
+  ctx.quadraticCurveTo(x + width, y, x + width, y + clampedRadius)
+  ctx.lineTo(x + width, y + height - clampedRadius)
+  ctx.quadraticCurveTo(x + width, y + height, x + width - clampedRadius, y + height)
+  ctx.lineTo(x + clampedRadius, y + height)
+  ctx.quadraticCurveTo(x, y + height, x, y + height - clampedRadius)
+  ctx.lineTo(x, y + clampedRadius)
+  ctx.quadraticCurveTo(x, y, x + clampedRadius, y)
+  ctx.closePath()
+}
+
+const paintNameplateTexture = (target: NameplateTexture, text: string) => {
+  const { canvas, ctx, texture } = target
+  const centerX = canvas.width * 0.5
+  const centerY = canvas.height * 0.5
+  const boxX = NAMEPLATE_HORIZONTAL_PADDING
+  const boxY = NAMEPLATE_VERTICAL_PADDING
+  const boxWidth = canvas.width - NAMEPLATE_HORIZONTAL_PADDING * 2
+  const boxHeight = canvas.height - NAMEPLATE_VERTICAL_PADDING * 2
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
+  ctx.font = NAMEPLATE_FONT
+  const displayText = truncateNameplateText(ctx, text, NAMEPLATE_TEXT_MAX_WIDTH)
+
+  drawRoundedRectPath(
+    ctx,
+    boxX,
+    boxY,
+    boxWidth,
+    boxHeight,
+    NAMEPLATE_CORNER_RADIUS,
+  )
+  ctx.fillStyle = NAMEPLATE_BG_COLOR
+  ctx.fill()
+  ctx.strokeStyle = NAMEPLATE_BORDER_COLOR
+  ctx.lineWidth = NAMEPLATE_BORDER_WIDTH
+  ctx.stroke()
+
+  ctx.shadowColor = NAMEPLATE_TEXT_SHADOW_COLOR
+  ctx.shadowBlur = NAMEPLATE_TEXT_SHADOW_BLUR
+  ctx.shadowOffsetX = 0
+  ctx.shadowOffsetY = 1
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillStyle = NAMEPLATE_TEXT_COLOR
+  ctx.fillText(displayText, centerX, centerY + NAMEPLATE_TEXT_BASELINE_NUDGE)
+  ctx.shadowColor = 'transparent'
+  ctx.shadowBlur = 0
+  ctx.shadowOffsetX = 0
+  ctx.shadowOffsetY = 0
+
+  texture.needsUpdate = true
 }
 
 const colorToCss = (color: THREE.Color) => {
@@ -509,6 +629,25 @@ const SNAKE_RADIUS = 0.045
 const SNAKE_GIRTH_SCALE_MIN = 1
 const SNAKE_GIRTH_SCALE_MAX = 2
 const HEAD_RADIUS = SNAKE_RADIUS * 1.35
+const NAMEPLATE_CANVAS_WIDTH = 256
+const NAMEPLATE_CANVAS_HEIGHT = 92
+const NAMEPLATE_HORIZONTAL_PADDING = 14
+const NAMEPLATE_VERTICAL_PADDING = 16
+const NAMEPLATE_CORNER_RADIUS = 18
+const NAMEPLATE_BORDER_WIDTH = 2
+const NAMEPLATE_BG_COLOR = 'rgba(8, 17, 28, 0.48)'
+const NAMEPLATE_BORDER_COLOR = 'rgba(216, 231, 247, 0.2)'
+const NAMEPLATE_TEXT_COLOR = 'rgba(235, 243, 252, 0.9)'
+const NAMEPLATE_TEXT_SHADOW_COLOR = 'rgba(0, 0, 0, 0.4)'
+const NAMEPLATE_TEXT_SHADOW_BLUR = 6
+const NAMEPLATE_TEXT_BASELINE_NUDGE = 1
+const NAMEPLATE_FONT = '600 28px system-ui, sans-serif'
+const NAMEPLATE_TEXT_MAX_WIDTH = NAMEPLATE_CANVAS_WIDTH - NAMEPLATE_HORIZONTAL_PADDING * 2 - 14
+const NAMEPLATE_WORLD_WIDTH = HEAD_RADIUS * 5.7
+const NAMEPLATE_WORLD_ASPECT = NAMEPLATE_CANVAS_WIDTH / NAMEPLATE_CANVAS_HEIGHT
+const NAMEPLATE_WORLD_OFFSET = HEAD_RADIUS * 2.05
+const NAMEPLATE_FADE_NEAR_DISTANCE = 5.8
+const NAMEPLATE_FADE_FAR_DISTANCE = 11.4
 const SNAKE_LIFT_FACTOR = 0.85
 const SNAKE_UNDERWATER_CLEARANCE = SNAKE_RADIUS * 0.18
 const SNAKE_MIN_TERRAIN_CLEARANCE = SNAKE_RADIUS * 0.1
@@ -4152,6 +4291,21 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
     boostDraft.renderOrder = 2
     group.add(boostDraft)
 
+    const nameplateTarget = createNameplateTexture('Player')
+    const nameplateMaterial = new THREE.SpriteMaterial({
+      map: nameplateTarget?.texture ?? null,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      depthTest: true,
+      fog: false,
+    })
+    const nameplate = new THREE.Sprite(nameplateMaterial)
+    nameplate.visible = false
+    nameplate.renderOrder = 4
+    nameplate.scale.set(NAMEPLATE_WORLD_WIDTH, NAMEPLATE_WORLD_WIDTH / NAMEPLATE_WORLD_ASPECT, 1)
+    group.add(nameplate)
+
     return {
       group,
       tube,
@@ -4172,6 +4326,12 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
       boostDraftMaterial,
       boostDraftPhase: 0,
       boostDraftIntensity: 0,
+      nameplate,
+      nameplateMaterial,
+      nameplateTexture: nameplateTarget?.texture ?? null,
+      nameplateCanvas: nameplateTarget?.canvas ?? null,
+      nameplateCtx: nameplateTarget?.ctx ?? null,
+      nameplateText: '',
       color,
     }
   }
@@ -4207,6 +4367,26 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
     if (userData.opacityUniform) {
       userData.opacityUniform.value = 0
     }
+  }
+
+  const hideNameplate = (visual: SnakeVisual) => {
+    visual.nameplate.visible = false
+    visual.nameplateMaterial.opacity = 0
+  }
+
+  const updateNameplateText = (visual: SnakeVisual, name: string) => {
+    const sanitized = name.trim() || 'Player'
+    if (visual.nameplateText === sanitized) return
+    visual.nameplateText = sanitized
+    if (!visual.nameplateCanvas || !visual.nameplateCtx || !visual.nameplateTexture) return
+    paintNameplateTexture(
+      {
+        canvas: visual.nameplateCanvas,
+        ctx: visual.nameplateCtx,
+        texture: visual.nameplateTexture,
+      },
+      visual.nameplateText,
+    )
   }
 
   const updateBoostDraft = (
@@ -5844,6 +6024,9 @@ diffuseColor.a *= retireEdge;`,
     updateSnakeMaterial(visual.tongueBase.material, '#ff6f9f', false, opacity, 0.3)
     updateSnakeMaterial(visual.tongueForkLeft.material, '#ff6f9f', false, opacity, 0.3)
     updateSnakeMaterial(visual.tongueForkRight.material, '#ff6f9f', false, opacity, 0.3)
+    if (isLocal) {
+      hideNameplate(visual)
+    }
 
     const previousSnakeStart = lastSnakeStarts.get(player.id)
     if (previousSnakeStart !== undefined && previousSnakeStart !== player.snakeStart) {
@@ -5867,6 +6050,7 @@ diffuseColor.a *= retireEdge;`,
       visual.tongue.visible = false
       visual.bowl.visible = false
       hideBoostDraft(visual)
+      hideNameplate(visual)
       return null
     }
 
@@ -6015,6 +6199,7 @@ diffuseColor.a *= retireEdge;`,
       visual.tongue.visible = false
       visual.bowl.visible = false
       hideBoostDraft(visual)
+      hideNameplate(visual)
       lastHeadPositions.delete(player.id)
       lastForwardDirections.delete(player.id)
       lastTailDirections.delete(player.id)
@@ -6040,6 +6225,7 @@ diffuseColor.a *= retireEdge;`,
       visual.tongue.visible = false
       visual.bowl.visible = false
       hideBoostDraft(visual)
+      hideNameplate(visual)
       lastHeadPositions.delete(player.id)
       lastForwardDirections.delete(player.id)
       tongueStates.delete(player.id)
@@ -6179,6 +6365,38 @@ diffuseColor.a *= retireEdge;`,
       opacity,
       deltaSeconds,
     )
+    if (
+      !isLocal &&
+      player.alive &&
+      visual.group.visible &&
+      visual.nameplateTexture &&
+      visual.nameplateCanvas &&
+      visual.nameplateCtx
+    ) {
+      updateNameplateText(visual, player.name)
+      const distanceToCamera = camera.position.distanceTo(headPosition)
+      const distanceFade = 1 - smoothstep(
+        NAMEPLATE_FADE_NEAR_DISTANCE,
+        NAMEPLATE_FADE_FAR_DISTANCE,
+        distanceToCamera,
+      )
+      const nameplateOpacity = clamp(opacity * distanceFade, 0, 1)
+      if (nameplateOpacity > DEATH_VISIBILITY_CUTOFF) {
+        const scale = headScale
+        const nameplateWidth = NAMEPLATE_WORLD_WIDTH * scale
+        visual.nameplate.position
+          .copy(headPosition)
+          .addScaledVector(headNormal, NAMEPLATE_WORLD_OFFSET * scale)
+        visual.nameplate.quaternion.copy(camera.quaternion)
+        visual.nameplate.scale.set(nameplateWidth, nameplateWidth / NAMEPLATE_WORLD_ASPECT, 1)
+        visual.nameplateMaterial.opacity = nameplateOpacity
+        visual.nameplate.visible = true
+      } else {
+        hideNameplate(visual)
+      }
+    } else {
+      hideNameplate(visual)
+    }
 
     visual.eyeLeft.scale.setScalar(headScale)
     visual.eyeRight.scale.setScalar(headScale)
@@ -6345,6 +6563,8 @@ diffuseColor.a *= retireEdge;`,
     visual.tongueForkLeft.material.dispose()
     visual.tongueForkRight.material.dispose()
     visual.boostDraftMaterial.dispose()
+    visual.nameplateMaterial.dispose()
+    visual.nameplateTexture?.dispose()
     visual.bowlMaterial.dispose()
     resetSnakeTransientState(id)
     deathStates.delete(id)
