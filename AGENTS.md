@@ -30,6 +30,7 @@ Repo root (recommended for full stack):
 - `./run-dev.sh` — run backend + frontend for local dev (ports 8788 + 5177 by default). Uses `cargo watch` for backend hot reload when available and falls back to `cargo run` if install fails.
 - `./run-e2e.sh` — start backend + frontend for Playwright E2E (ports 8790 + 5177 by default).
 - `./run-local-dev-copy.sh` — run a localhost production-like copy (standalone backend + local Wrangler Worker) on ports 8788 + 8818 by default. Requires `ROOM_TOKEN_SECRET` and `ROOM_PROXY_SECRET` in `.env` or shell env.
+- Frontend production deploy script (`frontend/package.json`) uses an obfuscated client build (`npm run build:obfuscated`) before `wrangler deploy`.
 
 ## Testing Expectations
 - Default validation should be lightweight: prefer targeted checks such as `npm run build`, `npm run lint`, and focused backend/frontend tests relevant to the change.
