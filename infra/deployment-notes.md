@@ -14,11 +14,30 @@
 
 ## Current Runtime Image
 - Backend image in use:
-  - `ghcr.io/nickandbro/slither-world-backend:prod-20260208-6a7a591`
+  - `ghcr.io/nickandbro/slither-world-backend:prod-20260208-firewall-amd64-022020`
+
+## Firewall Posture (2026-02-08)
+- Control-plane firewall:
+  - Name: `snake-control-fw`
+  - ID: `10502341`
+  - Inbound allow: `80/tcp` from `0.0.0.0/0`, `::/0`
+  - Inbound allow: `22/tcp` from trusted admin CIDR only
+- Room firewall:
+  - Name: `snake-room-fw`
+  - ID: `10502342`
+  - Inbound allow: `80/tcp` from `0.0.0.0/0`, `::/0`
+  - SSH inbound blocked by default
+- Attachment strategy:
+  - Label-selector attach for existing fleet:
+    - Control selector: `app=spherical-snake-control,managed_by=snake-control`
+    - Room selector: `app=spherical-snake-room,managed_by=snake-control`
+  - Create-time attach for new room servers via control-plane env:
+    - `HETZNER_ROOM_FIREWALL_IDS=10502342`
 
 ## Critical Fixes Applied (2026-02-08)
 - `7d6e7e9`: fixed room cloud-init startup script generation and worker room-origin normalization for WS proxying.
 - `6a7a591`: fixed idle room scale-down heartbeat activity tracking.
+- `prod-20260208-firewall-amd64-022020`: added control-plane create-time firewall assignment (`HETZNER_ROOM_FIREWALL_IDS`) for autoscaled room VMs.
 - Room ID truncation fix (WS token mismatch):
   - Frontend no longer truncates server-assigned room IDs before websocket connect.
   - Frontend room sanitization length increased to `64`.
@@ -51,6 +70,7 @@
 - `HETZNER_LOCATION=ash`
 - `HETZNER_SERVER_TYPE=cpx11`
 - `HETZNER_IMAGE=ubuntu-24.04`
+- `HETZNER_ROOM_FIREWALL_IDS=10502342`
 - `ROOM_REGISTRY_USERNAME=<configured>`
 - `ROOM_REGISTRY_PASSWORD=<configured>`
 
@@ -59,4 +79,14 @@
 - WS connect through worker stays open/stable.
 - Load test to 25 active joined sessions keeps assignment to one room.
 - 26th assignment creates a second room/server.
+- Newly created room server has `snake-room-fw` attached on create (not only after selector reconciliation).
 - After all clients disconnect and idle threshold elapses, room fleet scales back to one warm room.
+
+## Firewall Rollout Verification (2026-02-08)
+- Control-plane container env includes:
+  - `HETZNER_ROOM_FIREWALL_IDS=10502342`
+  - `ROOM_IMAGE=ghcr.io/nickandbro/slither-world-backend:prod-20260208-firewall-amd64-022020`
+- Autoscale validation created a fresh room VM:
+  - Room ID: `room-b771b8625e774b2bac5e5a1a26218f34`
+  - Hetzner server ID: `120348252`
+  - Firewall on server public net: `10502342` with status `applied`

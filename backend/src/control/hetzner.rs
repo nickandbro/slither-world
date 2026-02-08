@@ -20,6 +20,7 @@ pub struct CreateServerParams<'a> {
     pub server_type: &'a str,
     pub image: &'a str,
     pub location: &'a str,
+    pub firewall_ids: &'a [i64],
     pub labels: HashMap<String, String>,
     pub user_data: &'a str,
 }
@@ -78,7 +79,7 @@ impl HetznerClient {
         &self,
         params: &CreateServerParams<'_>,
     ) -> anyhow::Result<CreatedServer> {
-        let body = json!({
+        let mut body = json!({
             "name": params.name,
             "server_type": params.server_type,
             "image": params.image,
@@ -87,6 +88,15 @@ impl HetznerClient {
             "labels": params.labels,
             "user_data": params.user_data,
         });
+        if !params.firewall_ids.is_empty() {
+            let firewalls = params
+                .firewall_ids
+                .iter()
+                .copied()
+                .map(|firewall_id| json!({ "firewall": firewall_id }))
+                .collect::<Vec<_>>();
+            body["firewalls"] = Value::Array(firewalls);
+        }
 
         let response: CreateServerResponse = self
             .request_json(Method::POST, "/servers", Some(body), None)

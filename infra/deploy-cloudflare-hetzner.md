@@ -37,16 +37,34 @@ ROOM_IDLE_SCALE_DOWN_SECS=180
 HETZNER_LOCATION=ash
 HETZNER_SERVER_TYPE=cpx11
 HETZNER_IMAGE=ubuntu-24.04
+HETZNER_ROOM_FIREWALL_IDS=<comma-separated-firewall-ids>
 ROOM_PORT=8787
 ```
 
 Notes:
 
 - `CONTROL_PLANE_URL` must be reachable by room servers.
+- `HETZNER_ROOM_FIREWALL_IDS` is required and is applied at server-create time so every autoscaled room gets firewall rules immediately.
 - Control-plane exposes:
   - `POST /api/matchmake`
   - `POST /internal/room-heartbeat` (Bearer auth with `ROOM_HEARTBEAT_TOKEN`)
   - `GET /internal/rooms?token=<ROOM_HEARTBEAT_TOKEN>` (ops/debug)
+
+## 2.1) Configure Hetzner firewalls (recommended baseline)
+
+Create a control-plane firewall:
+- Inbound `80/tcp` from `0.0.0.0/0` and `::/0`
+- Inbound `22/tcp` only from trusted admin IP CIDRs
+
+Create a room firewall:
+- Inbound `80/tcp` from `0.0.0.0/0` and `::/0`
+- No SSH ingress
+
+Attach firewalls in two ways:
+- Set `HETZNER_ROOM_FIREWALL_IDS` to the room firewall ID(s) so new room servers are born with the policy.
+- Also attach by label selectors for existing fleet safety:
+  - control-plane selector: `app=spherical-snake-control,managed_by=snake-control`
+  - room selector: `app=spherical-snake-room,managed_by=snake-control`
 
 ## 3) Deploy Cloudflare Worker
 

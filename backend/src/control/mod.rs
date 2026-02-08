@@ -39,6 +39,7 @@ struct ControlConfig {
     idle_scale_down_secs: i64,
     token_ttl_secs: i64,
     room_port: u16,
+    room_firewall_ids: Vec<i64>,
     room_image: String,
     room_registry_username: Option<String>,
     room_registry_password: Option<String>,
@@ -192,6 +193,7 @@ impl ControlConfig {
                 .ok()
                 .and_then(|value| value.parse::<u16>().ok())
                 .unwrap_or(8787),
+            room_firewall_ids: parse_required_id_list_env("HETZNER_ROOM_FIREWALL_IDS")?,
             room_image: env::var("ROOM_IMAGE").context("missing ROOM_IMAGE")?,
             room_registry_username: env::var("ROOM_REGISTRY_USERNAME")
                 .ok()
@@ -347,6 +349,7 @@ impl ControlState {
                 server_type: &self.config.hetzner_server_type,
                 image: &self.config.hetzner_image,
                 location: &self.config.hetzner_location,
+                firewall_ids: &self.config.room_firewall_ids,
                 labels,
                 user_data: &user_data,
             })
@@ -698,9 +701,37 @@ fn sanitize_room_name(value: &str) -> String {
     cleaned
 }
 
+fn parse_required_id_list_env(var_name: &str) -> anyhow::Result<Vec<i64>> {
+    let raw = env::var(var_name).with_context(|| format!("missing {var_name}"))?;
+    parse_id_list(var_name, &raw)
+}
+
+fn parse_id_list(var_name: &str, raw: &str) -> anyhow::Result<Vec<i64>> {
+    let mut ids = Vec::new();
+    for token in raw.split(',') {
+        let trimmed = token.trim();
+        if trimmed.is_empty() {
+            bail!("{var_name} contains an empty id segment");
+        }
+        let id = trimmed
+            .parse::<i64>()
+            .with_context(|| format!("{var_name} has invalid id '{trimmed}'"))?;
+        if id <= 0 {
+            bail!("{var_name} must contain only positive integer IDs");
+        }
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    if ids.is_empty() {
+        bail!("{var_name} must contain at least one firewall id");
+    }
+    Ok(ids)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::sanitize_room_name;
+    use super::{parse_id_list, sanitize_room_name};
 
     #[test]
     fn sanitize_room_name_preserves_generated_room_ids() {
@@ -714,6 +745,28 @@ mod tests {
         let cleaned = sanitize_room_name(source);
         assert!(cleaned.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'));
         assert!(cleaned.len() <= 64);
+    }
+
+    #[test]
+    fn parse_id_list_accepts_csv_and_deduplicates() {
+        let ids = parse_id_list("HETZNER_ROOM_FIREWALL_IDS", "123, 456,123").unwrap();
+        assert_eq!(ids, vec![123, 456]);
+    }
+
+    #[test]
+    fn parse_id_list_rejects_empty_segment() {
+        let error = parse_id_list("HETZNER_ROOM_FIREWALL_IDS", "123,,456")
+            .expect_err("empty segment should fail");
+        assert!(error
+            .to_string()
+            .contains("contains an empty id segment"));
+    }
+
+    #[test]
+    fn parse_id_list_rejects_non_positive_or_non_numeric() {
+        assert!(parse_id_list("HETZNER_ROOM_FIREWALL_IDS", "0").is_err());
+        assert!(parse_id_list("HETZNER_ROOM_FIREWALL_IDS", "-1").is_err());
+        assert!(parse_id_list("HETZNER_ROOM_FIREWALL_IDS", "abc").is_err());
     }
 }
 

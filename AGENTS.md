@@ -37,6 +37,22 @@ Repo root (recommended for full stack):
 - Only add or run E2E coverage when explicitly requested by the user (or when the task is explicitly E2E-focused).
 
 ## Configuration & Deployment Notes
+- Production deployment specifics (as of February 8, 2026):
+  - Cloudflare entrypoint: `https://snake-game.nickbrooks085.workers.dev`.
+  - Hetzner control-plane host: `snake-control-prod` (`178.156.136.148`) running backend image `ghcr.io/nickandbro/slither-world-backend:prod-20260208-firewall-amd64-022020`.
+  - Hetzner firewalls are in place:
+    - Control-plane firewall `snake-control-fw`: allow inbound `80/tcp` from internet and `22/tcp` only from trusted admin IPs.
+    - Room firewall `snake-room-fw`: allow inbound `80/tcp` from internet and block SSH ingress.
+    - Firewalls are also attached by label selectors (`app=spherical-snake-control` / `app=spherical-snake-room`) as a fleet-wide safety net.
+  - Current warm room server naming: `snake-room-<room-id>` (one room per server), managed by control-plane labels `app=spherical-snake-room` and `managed_by=snake-control`.
+  - Autoscale knobs in production are `ROOM_CAPACITY=25`, `MIN_WARM_ROOMS=1`, and `ROOM_IDLE_SCALE_DOWN_SECS=180`.
+  - Control-plane room provisioning requires `HETZNER_ROOM_FIREWALL_IDS` (comma-separated firewall IDs) so newly autoscaled room servers inherit firewall rules at create time.
+  - Production network port mode is `PORT=80` and `ROOM_PORT=80` for control-plane/room containers.
+  - Registry pull mode is required for room bootstrapping: control-plane must have `ROOM_IMAGE` plus `ROOM_REGISTRY_USERNAME`/`ROOM_REGISTRY_PASSWORD` to pull private GHCR images.
+  - Worker must set `CONTROL_PLANE_ORIGIN` to a hostname (Hetzner reverse-DNS host is used in prod), not a raw IP, to avoid Cloudflare direct-IP upstream rejection.
+  - Worker secrets must match control-plane values exactly: `ROOM_TOKEN_SECRET` and `ROOM_PROXY_SECRET`.
+  - Room IDs are not short aliases. Treat server-assigned `roomId` values as opaque IDs (length up to 64) and do not truncate before websocket connect; token `roomId` and websocket path room must match exactly.
+  - Operational runbook/details should also be kept in `infra/deployment-notes.md` whenever production deployment settings change.
 - Backend API routes:
   - `GET /api/leaderboard` and `POST /api/leaderboard` (JSON).
   - `GET /api/room/:room` WebSocket endpoint for multiplayer (binary frames).
