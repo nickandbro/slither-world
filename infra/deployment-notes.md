@@ -16,7 +16,14 @@
 
 ## Current Runtime Image
 - Backend image in use:
-  - `ghcr.io/nickandbro/slither-world-backend:prod-20260208-lag-autotune-73d9c68`
+  - `ghcr.io/nickandbro/slither-world-backend:prod-20260208-ccdeb07`
+
+## Latest Deploy (2026-02-08)
+- Control-plane container restarted on `snake-control-prod` to `prod-20260208-ccdeb07` and `ROOM_IMAGE` updated to match.
+- Worker deployed (`snake-game`) version id: `c4f59b01-c616-45c8-99be-5a39f5dca1ad`.
+- Frontend perf parity tweak:
+  - Split `vendor` chunk (node_modules) away from app chunk.
+  - Minimal JS obfuscation applies only to pure app (`src/`) chunks (no string-array/split-string transforms).
 
 ## Firewall Posture (2026-02-08)
 - Control-plane firewall:
@@ -41,6 +48,7 @@
 - `6a7a591`: fixed idle room scale-down heartbeat activity tracking.
 - `prod-20260208-firewall-amd64-022020`: added control-plane create-time firewall assignment (`HETZNER_ROOM_FIREWALL_IDS`) for autoscaled room VMs.
 - `prod-20260208-lag-autotune-73d9c68`: lag-spike mitigation improvements (client playout buffering, camera hold/recovery) and WS protocol bump to `12`.
+- `ccdeb07`: minimized client obfuscation (avoid WebGL/WebGPU perf regressions) and split vendor chunk so only app code is obfuscated.
 - Room ID truncation fix (WS token mismatch):
   - Frontend no longer truncates server-assigned room IDs before websocket connect.
   - Frontend room sanitization length increased to `64`.
