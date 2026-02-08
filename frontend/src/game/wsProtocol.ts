@@ -12,7 +12,7 @@ export type PlayerMeta = {
   color: string
 }
 
-const VERSION = 11
+const VERSION = 12
 
 const TYPE_JOIN = 0x01
 const TYPE_INPUT = 0x02
@@ -45,7 +45,13 @@ const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
 
 export type DecodedMessage =
-  | { type: 'init'; playerId: string; state: GameStateSnapshot; environment: Environment }
+  | {
+      type: 'init'
+      playerId: string
+      state: GameStateSnapshot
+      environment: Environment
+      tickMs: number
+    }
   | { type: 'state'; state: GameStateSnapshot }
   | { type: 'meta' }
 
@@ -165,8 +171,12 @@ export function decodeServerMessage(
 function decodeInit(reader: Reader, meta: Map<string, PlayerMeta>): DecodedMessage | null {
   const playerId = reader.readUuid()
   const now = reader.readI64()
+  const seq = reader.readU32()
+  const tickMs = reader.readU16()
   const pelletsCount = reader.readU16()
-  if (playerId === null || now === null || pelletsCount === null) return null
+  if (playerId === null || now === null || seq === null || tickMs === null || pelletsCount === null) {
+    return null
+  }
 
   const pellets = readPellets(reader, pelletsCount)
   if (!pellets) return null
@@ -190,15 +200,17 @@ function decodeInit(reader: Reader, meta: Map<string, PlayerMeta>): DecodedMessa
   return {
     type: 'init',
     playerId,
-    state: { now, pellets, players, totalPlayers },
+    tickMs,
+    state: { now, seq, pellets, players, totalPlayers },
     environment,
   }
 }
 
 function decodeState(reader: Reader, meta: Map<string, PlayerMeta>): DecodedMessage | null {
   const now = reader.readI64()
+  const seq = reader.readU32()
   const pelletsCount = reader.readU16()
-  if (now === null || pelletsCount === null) return null
+  if (now === null || seq === null || pelletsCount === null) return null
 
   const pellets = readPellets(reader, pelletsCount)
   if (!pellets) return null
@@ -210,7 +222,7 @@ function decodeState(reader: Reader, meta: Map<string, PlayerMeta>): DecodedMess
 
   return {
     type: 'state',
-    state: { now, pellets, players, totalPlayers },
+    state: { now, seq, pellets, players, totalPlayers },
   }
 }
 

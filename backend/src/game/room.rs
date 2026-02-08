@@ -99,6 +99,7 @@ struct RoomState {
     players: HashMap<String, Player>,
     pellets: Vec<Pellet>,
     next_pellet_id: u32,
+    next_state_seq: u32,
     next_evasive_spawn_at: HashMap<String, i64>,
     environment: Environment,
 }
@@ -219,6 +220,7 @@ impl Room {
                 players: HashMap::new(),
                 pellets: Vec::new(),
                 next_pellet_id: 0,
+                next_state_seq: 1,
                 next_evasive_spawn_at: HashMap::new(),
                 environment: Environment::generate(),
             }),
@@ -2306,7 +2308,9 @@ impl RoomState {
         let visible_player_count = visible_players.len().min(u16::MAX as usize);
         let pellet_count = visible_pellets.len().min(u16::MAX as usize);
         let now = Self::now_millis();
-        let mut capacity = 4 + 16 + 8 + 2 + pellet_count * 12 + 2 + 2;
+        let state_seq = self.next_state_seq.wrapping_sub(1);
+        let tick_ms = TICK_MS.min(u16::MAX as u64) as u16;
+        let mut capacity = 4 + 16 + 8 + 4 + 2 + 2 + pellet_count * 12 + 2 + 2;
         for player in self.players.values().take(total_players) {
             capacity += 16;
             capacity += 1 + Self::truncated_len(&player.name);
@@ -2337,6 +2341,8 @@ impl RoomState {
         encoder.write_header(protocol::TYPE_INIT, 0);
         encoder.write_uuid(&player_bytes);
         encoder.write_i64(now);
+        encoder.write_u32(state_seq);
+        encoder.write_u16(tick_ms);
         encoder.write_u16(pellet_count as u16);
         for pellet in visible_pellets.into_iter().take(pellet_count) {
             self.write_pellet(&mut encoder, pellet);
@@ -2360,14 +2366,14 @@ impl RoomState {
         encoder.into_vec()
     }
 
-    fn build_state_payload_for_session(&self, now: i64, session_id: &str) -> Vec<u8> {
+    fn build_state_payload_for_session(&self, now: i64, state_seq: u32, session_id: &str) -> Vec<u8> {
         let visible_players = self.visible_players_for_session(session_id);
         let visible_pellets = self.visible_pellets_for_session(session_id);
         let total_players = self.players.len().min(u16::MAX as usize);
         let visible_player_count = visible_players.len().min(u16::MAX as usize);
         let visible_pellet_count = visible_pellets.len().min(u16::MAX as usize);
 
-        let mut capacity = 4 + 8 + 2 + visible_pellet_count * 12 + 2 + 2;
+        let mut capacity = 4 + 8 + 4 + 2 + visible_pellet_count * 12 + 2 + 2;
         for visible in visible_players.iter().take(visible_player_count) {
             let player = visible.player;
             let window = visible.window;
@@ -2390,6 +2396,7 @@ impl RoomState {
         let mut encoder = protocol::Encoder::with_capacity(capacity);
         encoder.write_header(protocol::TYPE_STATE, 0);
         encoder.write_i64(now);
+        encoder.write_u32(state_seq);
         encoder.write_u16(visible_pellet_count as u16);
         for pellet in visible_pellets.into_iter().take(visible_pellet_count) {
             self.write_pellet(&mut encoder, pellet);
@@ -2561,13 +2568,15 @@ impl RoomState {
 
     fn broadcast_state(&mut self) {
         let now = Self::now_millis();
+        let state_seq = self.next_state_seq;
         let mut stale = Vec::new();
         for (session_id, session) in &self.sessions {
-            let payload = self.build_state_payload_for_session(now, session_id);
+            let payload = self.build_state_payload_for_session(now, state_seq, session_id);
             if session.sender.send(payload).is_err() {
                 stale.push(session_id.clone());
             }
         }
+        self.next_state_seq = self.next_state_seq.wrapping_add(1);
         for session_id in stale {
             self.disconnect_session(&session_id);
         }
@@ -2650,6 +2659,7 @@ mod tests {
             players: HashMap::new(),
             pellets: Vec::new(),
             next_pellet_id: 0,
+            next_state_seq: 1,
             next_evasive_spawn_at: HashMap::new(),
             environment: Environment::generate(),
         }
@@ -2704,6 +2714,12 @@ mod tests {
         value
     }
 
+    fn read_u32(bytes: &[u8], offset: &mut usize) -> u32 {
+        let value = u32::from_le_bytes(bytes[*offset..*offset + 4].try_into().unwrap());
+        *offset += 4;
+        value
+    }
+
     fn skip_player_state(bytes: &[u8], offset: &mut usize) {
         *offset += 16; // player id
         *offset += 1; // alive
@@ -2730,7 +2746,7 @@ mod tests {
         *offset += digestion_len as usize * 12;
     }
 
-    fn decode_state_counts(payload: &[u8]) -> (u16, u16) {
+    fn decode_state_counts(payload: &[u8]) -> (u32, u16, u16) {
         let mut offset = 0usize;
         let version = read_u8(payload, &mut offset);
         assert_eq!(version, protocol::VERSION);
@@ -2738,6 +2754,7 @@ mod tests {
         assert_eq!(message_type, protocol::TYPE_STATE);
         let _flags = read_u16(payload, &mut offset);
         offset += 8; // now
+        let state_seq = read_u32(payload, &mut offset);
         let pellet_count = read_u16(payload, &mut offset);
         offset += pellet_count as usize * 12;
         let total_players = read_u16(payload, &mut offset);
@@ -2746,10 +2763,10 @@ mod tests {
             skip_player_state(payload, &mut offset);
         }
         assert_eq!(offset, payload.len());
-        (total_players, visible_players)
+        (state_seq, total_players, visible_players)
     }
 
-    fn decode_init_counts(payload: &[u8]) -> (u16, u16) {
+    fn decode_init_counts(payload: &[u8]) -> (u32, u16, u16) {
         let mut offset = 0usize;
         let version = read_u8(payload, &mut offset);
         assert_eq!(version, protocol::VERSION);
@@ -2758,6 +2775,9 @@ mod tests {
         let _flags = read_u16(payload, &mut offset);
         offset += 16; // local player id
         offset += 8; // now
+        let state_seq = read_u32(payload, &mut offset);
+        let tick_ms = read_u16(payload, &mut offset);
+        assert_eq!(tick_ms, TICK_MS.min(u16::MAX as u64) as u16);
         let pellet_count = read_u16(payload, &mut offset);
         offset += pellet_count as usize * 12;
         let total_players = read_u16(payload, &mut offset);
@@ -2774,7 +2794,7 @@ mod tests {
             skip_player_state(payload, &mut offset);
         }
         assert!(offset <= payload.len());
-        (total_players, visible_players)
+        (state_seq, total_players, visible_players)
     }
 
     #[test]
@@ -4065,8 +4085,9 @@ mod tests {
             Some(0.45),
         );
 
-        let payload = state.build_state_payload_for_session(1234, "session-1");
-        let (total_players, visible_players) = decode_state_counts(&payload);
+        let payload = state.build_state_payload_for_session(1234, 77, "session-1");
+        let (state_seq, total_players, visible_players) = decode_state_counts(&payload);
+        assert_eq!(state_seq, 77);
         assert_eq!(total_players, 3);
         assert_eq!(visible_players, 2);
     }
@@ -4100,7 +4121,8 @@ mod tests {
         );
 
         let payload = state.build_init_payload_for_session("session-2", &local_id);
-        let (total_players, visible_players) = decode_init_counts(&payload);
+        let (state_seq, total_players, visible_players) = decode_init_counts(&payload);
+        assert_eq!(state_seq, state.next_state_seq.wrapping_sub(1));
         assert_eq!(total_players, 3);
         assert_eq!(visible_players, 2);
     }
@@ -4128,10 +4150,36 @@ mod tests {
             Some(0.45),
         );
 
-        let payload = state.build_state_payload_for_session(1234, "session-3");
-        let (total_players, visible_players) = decode_state_counts(&payload);
+        let payload = state.build_state_payload_for_session(1234, 91, "session-3");
+        let (state_seq, total_players, visible_players) = decode_state_counts(&payload);
+        assert_eq!(state_seq, 91);
         assert_eq!(total_players, 2);
         assert_eq!(visible_players, 1);
+    }
+
+    #[test]
+    fn broadcast_state_increments_state_sequence_once_per_tick() {
+        let mut state = make_state();
+        let (tx, mut rx) = unbounded_channel::<Vec<u8>>();
+        state.sessions.insert(
+            "session-seq".to_string(),
+            SessionEntry {
+                sender: tx,
+                player_id: None,
+                view_center: None,
+                view_radius: None,
+                camera_distance: None,
+            },
+        );
+
+        state.broadcast_state();
+        state.broadcast_state();
+
+        let first_payload = rx.try_recv().expect("first payload");
+        let second_payload = rx.try_recv().expect("second payload");
+        let (first_seq, _, _) = decode_state_counts(&first_payload);
+        let (second_seq, _, _) = decode_state_counts(&second_payload);
+        assert_eq!(second_seq, first_seq.wrapping_add(1));
     }
 
     fn make_full_lake_state() -> RoomState {

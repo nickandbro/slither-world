@@ -78,6 +78,7 @@ export type Environment = {
 
 export type GameStateSnapshot = {
   now: number
+  seq: number
   pellets: PelletSnapshot[]
   players: PlayerSnapshot[]
   totalPlayers: number

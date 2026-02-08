@@ -6,6 +6,7 @@ const TREE_DEBUG_KEY = 'spherical_snake_tree_debug'
 const TERRAIN_WIREFRAME_DEBUG_KEY = 'spherical_snake_terrain_wireframe_debug'
 const TERRAIN_TESSELLATION_DEBUG_KEY_LEGACY = 'spherical_snake_terrain_tessellation_debug'
 const DAY_NIGHT_DEBUG_MODE_KEY = 'spherical_snake_day_night_debug_mode'
+const NET_DEBUG_KEY = 'spherical_snake_net_debug'
 
 export const DEBUG_UI_ENABLED = import.meta.env.DEV || import.meta.env.VITE_E2E_DEBUG === '1'
 
@@ -56,6 +57,32 @@ export const getDayNightDebugMode = (): DayNightDebugMode => {
     // ignore persistence errors
   }
   return 'auto'
+}
+
+export const getNetDebugEnabled = () => {
+  if (typeof window === 'undefined') return false
+  try {
+    const url = new URL(window.location.href)
+    const host = url.hostname.toLowerCase()
+    const queryValue = url.searchParams.get('netDebug')
+    if (queryValue === '1') {
+      window.localStorage.setItem(NET_DEBUG_KEY, '1')
+      return true
+    }
+    if (queryValue === '0') {
+      window.localStorage.setItem(NET_DEBUG_KEY, '0')
+      return false
+    }
+    const stored = window.localStorage.getItem(NET_DEBUG_KEY)
+    if (stored === '1') return true
+    if (stored === '0') return false
+
+    // Default to enabled on localhost/loopback so local production-like copies
+    // expose net debugging without extra flags.
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1'
+  } catch {
+    return false
+  }
 }
 
 export const persistDebugSettings = (settings: {

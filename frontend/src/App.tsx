@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import {
   createRenderScene,
@@ -9,7 +9,7 @@ import {
 } from './render/webglScene'
 import type { Camera, Environment, GameStateSnapshot, Point } from './game/types'
 import { axisFromPointer, updateCamera } from './game/camera'
-import { IDENTITY_QUAT, clamp, normalize } from './game/math'
+import { IDENTITY_QUAT, clamp, lerpPoint, normalize } from './game/math'
 import { buildInterpolatedSnapshot, type TimedSnapshot } from './game/snapshots'
 import { drawHud, type RenderConfig } from './game/hud'
 import {
@@ -32,6 +32,7 @@ import {
   CAMERA_DISTANCE_MAX,
   CAMERA_DISTANCE_MIN,
   CAMERA_ZOOM_SENSITIVITY,
+  DEFAULT_NET_TUNING,
   DEATH_TO_MENU_DELAY_MS,
   MAX_EXTRAPOLATION_MS,
   MAX_SNAPSHOT_BUFFER,
@@ -39,8 +40,7 @@ import {
   MENU_CAMERA_VERTICAL_OFFSET,
   MENU_OVERLAY_FADE_OUT_MS,
   MENU_TO_GAMEPLAY_BLEND_MS,
-  MIN_INTERP_DELAY_MS,
-  OFFSET_SMOOTHING,
+  MOTION_BACKWARD_DOT_THRESHOLD,
   POINTER_MAX_RANGE_RATIO,
   REALTIME_LEADERBOARD_LIMIT,
   SCORE_RADIAL_BLOCKED_FLASH_MS,
@@ -48,9 +48,12 @@ import {
   SCORE_RADIAL_FADE_OUT_RATE,
   SCORE_RADIAL_INTERVAL_SMOOTH_RATE,
   SCORE_RADIAL_MIN_CAP_RESERVE,
+  resolveNetTuning,
+  type NetTuningOverrides,
 } from './app/core/constants'
 import {
   DEBUG_UI_ENABLED,
+  getNetDebugEnabled,
   getDayNightDebugMode,
   getLakeDebug,
   getMountainDebug,
@@ -78,6 +81,76 @@ import { ControlPanel } from './app/components/ControlPanel'
 import { MenuOverlay } from './app/components/MenuOverlay'
 import { RealtimeLeaderboard, type RealtimeLeaderboardEntry } from './app/components/RealtimeLeaderboard'
 
+type LagSpikeCause = 'none' | 'stale' | 'seq-gap' | 'arrival-gap'
+
+type NetSmoothingDebugInfo = {
+  lagSpikeActive: boolean
+  lagSpikeCause: LagSpikeCause
+  playoutDelayMs: number
+  jitterMs: number
+  receiveIntervalMs: number
+  staleMs: number
+  impairmentMsRemaining: number
+  maxExtrapolationMs: number
+  latestSeq: number | null
+  seqGapDetected: boolean
+  tuningRevision: number
+  tuningOverrides: NetTuningOverrides
+}
+
+type MotionStabilityDebugInfo = {
+  backwardCorrectionCount: number
+  minHeadDot: number
+  sampleCount: number
+}
+
+type NetLagEvent = {
+  id: number
+  atIso: string
+  tMs: number
+  type: 'spike_start' | 'spike_end' | 'seq_gap' | 'snapshot_drop' | 'summary' | 'tuning_update'
+  message: string
+  lagSpikeActive: boolean
+  lagSpikeCause: LagSpikeCause
+  playoutDelayMs: number
+  jitterMs: number
+  receiveIntervalMs: number
+  staleMs: number
+  impairmentMsRemaining: number
+  maxExtrapolationMs: number
+  latestSeq: number | null
+  seqGapDetected: boolean
+  tuningRevision: number
+  tuningOverrides: NetTuningOverrides
+  droppedSeq: number | null
+  seqGapSize: number | null
+  backwardCorrectionCount: number
+  sampleCount: number
+  minHeadDot: number
+  cameraHoldActive: boolean
+}
+
+type NetLagReport = {
+  generatedAtIso: string
+  net: NetSmoothingDebugInfo
+  motion: MotionStabilityDebugInfo
+  recentEvents: NetLagEvent[]
+}
+
+const SEQ_HALF_RANGE = 0x8000_0000
+const NET_EVENT_LOG_LIMIT = 240
+
+const isSeqNewer = (next: number, current: number) => {
+  const delta = (next - current) >>> 0
+  return delta !== 0 && delta < SEQ_HALF_RANGE
+}
+
+const seqGapSize = (next: number, current: number) => {
+  const delta = (next - current) >>> 0
+  if (delta < SEQ_HALF_RANGE) return delta
+  return 0
+}
+
 export default function App() {
   const glCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const hudCanvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -101,10 +174,33 @@ export default function App() {
   const sendIntervalRef = useRef<number | null>(null)
   const snapshotBufferRef = useRef<TimedSnapshot[]>([])
   const serverOffsetRef = useRef<number | null>(null)
+  const serverTickMsRef = useRef(50)
   const tickIntervalRef = useRef(50)
   const lastSnapshotTimeRef = useRef<number | null>(null)
+  const lastSnapshotReceivedAtRef = useRef<number | null>(null)
+  const receiveIntervalMsRef = useRef(50)
+  const receiveJitterMsRef = useRef(0)
+  const playoutDelayMsRef = useRef(100)
+  const delayBoostMsRef = useRef(0)
+  const lastDelayUpdateMsRef = useRef<number | null>(null)
+  const latestSeqRef = useRef<number | null>(null)
+  const seqGapDetectedRef = useRef(false)
+  const lastSeqGapAtMsRef = useRef<number | null>(null)
+  const lagSpikeActiveRef = useRef(false)
+  const lagSpikeCauseRef = useRef<LagSpikeCause>('none')
+  const lagSpikeEnterCandidateAtMsRef = useRef<number | null>(null)
+  const lagSpikeExitCandidateAtMsRef = useRef<number | null>(null)
+  const lagImpairmentUntilMsRef = useRef(0)
+  const netTuningOverridesRef = useRef<NetTuningOverrides>({})
+  const netTuningRef = useRef(resolveNetTuning(DEFAULT_NET_TUNING))
+  const netTuningRevisionRef = useRef(0)
   const cameraRef = useRef<Camera>({ q: { ...IDENTITY_QUAT }, active: false })
   const cameraUpRef = useRef<Point>({ x: 0, y: 1, z: 0 })
+  const stableGameplayCameraRef = useRef<Camera>({ q: { ...MENU_CAMERA.q }, active: true })
+  const lagCameraHoldActiveRef = useRef(false)
+  const lagCameraHoldQRef = useRef<Camera['q']>({ ...MENU_CAMERA.q })
+  const lagCameraRecoveryStartMsRef = useRef<number | null>(null)
+  const lagCameraRecoveryFromQRef = useRef<Camera['q']>({ ...MENU_CAMERA.q })
   const cameraDistanceRef = useRef(CAMERA_DISTANCE_DEFAULT)
   const renderCameraDistanceRef = useRef(MENU_CAMERA_DISTANCE)
   const renderCameraVerticalOffsetRef = useRef(MENU_CAMERA_VERTICAL_OFFSET)
@@ -130,6 +226,31 @@ export default function App() {
     cameraBlend: 0,
     cameraDistance: Math.hypot(MENU_CAMERA_DISTANCE, MENU_CAMERA_VERTICAL_OFFSET),
   })
+  const netDebugInfoRef = useRef<NetSmoothingDebugInfo>({
+    lagSpikeActive: false,
+    lagSpikeCause: 'none',
+    playoutDelayMs: 100,
+    jitterMs: 0,
+    receiveIntervalMs: 50,
+    staleMs: 0,
+    impairmentMsRemaining: 0,
+    maxExtrapolationMs: MAX_EXTRAPOLATION_MS,
+    latestSeq: null,
+    seqGapDetected: false,
+    tuningRevision: 0,
+    tuningOverrides: {},
+  })
+  const motionDebugInfoRef = useRef<MotionStabilityDebugInfo>({
+    backwardCorrectionCount: 0,
+    minHeadDot: 1,
+    sampleCount: 0,
+  })
+  const localSnakeDisplayRef = useRef<Point[] | null>(null)
+  const lastRenderFrameMsRef = useRef<number | null>(null)
+  const netLagEventsRef = useRef<NetLagEvent[]>([])
+  const netLagEventIdRef = useRef(1)
+  const lastNetSummaryLogMsRef = useRef(0)
+  const lastHeadSampleRef = useRef<Point | null>(null)
   const boostFxStateRef = useRef(createInitialBoostFxState())
   const scoreRadialStateRef = useRef<ScoreRadialVisualState>(createInitialScoreRadialState())
 
@@ -165,8 +286,17 @@ export default function App() {
   const dayNightDebugModeRef = useRef<DayNightDebugMode>(dayNightDebugMode)
   const playerIdRef = useRef<string | null>(playerId)
   const playerNameRef = useRef(playerName)
+  const netDebugEnabled = useMemo(getNetDebugEnabled, [])
   const isPlaying = menuPhase === 'playing'
   const showMenuOverlay = menuPhase === 'preplay' || menuOverlayExiting
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const debugWindow = window as Window & { __SNAKE_DEBUG__?: Record<string, unknown> }
+    if (!debugWindow.__SNAKE_DEBUG__ || typeof debugWindow.__SNAKE_DEBUG__ !== 'object') {
+      debugWindow.__SNAKE_DEBUG__ = {}
+    }
+  }, [])
 
   const localPlayer = useMemo(() => {
     return gameState?.players.find((player) => player.id === playerId) ?? null
@@ -244,21 +374,235 @@ export default function App() {
     updateBoostFx(boostFxRef.current, boostFxStateRef.current, boostActive)
   }
 
-  const pushSnapshot = (state: GameStateSnapshot) => {
+  const appendNetLagEvent = useCallback(
+    (
+      type: NetLagEvent['type'],
+      message: string,
+      extras?: Partial<Pick<NetLagEvent, 'droppedSeq' | 'seqGapSize'>>,
+    ) => {
+      const net = netDebugInfoRef.current
+      const motion = motionDebugInfoRef.current
+      const entry: NetLagEvent = {
+        id: netLagEventIdRef.current,
+        atIso: new Date().toISOString(),
+        tMs: performance.now(),
+        type,
+        message,
+        lagSpikeActive: net.lagSpikeActive,
+        lagSpikeCause: net.lagSpikeCause,
+        playoutDelayMs: net.playoutDelayMs,
+        jitterMs: net.jitterMs,
+        receiveIntervalMs: net.receiveIntervalMs,
+        staleMs: net.staleMs,
+        impairmentMsRemaining: net.impairmentMsRemaining,
+        maxExtrapolationMs: net.maxExtrapolationMs,
+        latestSeq: net.latestSeq,
+        seqGapDetected: net.seqGapDetected,
+        tuningRevision: net.tuningRevision,
+        tuningOverrides: { ...net.tuningOverrides },
+        droppedSeq: extras?.droppedSeq ?? null,
+        seqGapSize: extras?.seqGapSize ?? null,
+        backwardCorrectionCount: motion.backwardCorrectionCount,
+        sampleCount: motion.sampleCount,
+        minHeadDot: motion.minHeadDot,
+        cameraHoldActive: lagCameraHoldActiveRef.current,
+      }
+      netLagEventIdRef.current += 1
+      const eventLog = netLagEventsRef.current
+      eventLog.push(entry)
+      if (eventLog.length > NET_EVENT_LOG_LIMIT) {
+        eventLog.splice(0, eventLog.length - NET_EVENT_LOG_LIMIT)
+      }
+      if (netDebugEnabled) {
+        console.info(`[net][event:${entry.type}]`, entry)
+      }
+    },
+    [netDebugEnabled],
+  )
+
+  const buildNetLagReport = useCallback((): NetLagReport => {
+    return {
+      generatedAtIso: new Date().toISOString(),
+      net: { ...netDebugInfoRef.current },
+      motion: { ...motionDebugInfoRef.current },
+      recentEvents: netLagEventsRef.current.slice(-80),
+    }
+  }, [])
+
+  const applyNetTuningOverrides = useCallback(
+    (incoming: NetTuningOverrides | null | undefined, options?: { announce?: boolean }) => {
+      const normalized: NetTuningOverrides = {}
+      if (incoming && typeof incoming === 'object') {
+        for (const [rawKey, rawValue] of Object.entries(incoming)) {
+          if (!(rawKey in DEFAULT_NET_TUNING)) continue
+          if (typeof rawValue !== 'number' || !Number.isFinite(rawValue)) continue
+          const key = rawKey as keyof typeof DEFAULT_NET_TUNING
+          normalized[key] = rawValue
+        }
+      }
+      netTuningOverridesRef.current = normalized
+      netTuningRef.current = resolveNetTuning(normalized)
+      netTuningRevisionRef.current += 1
+      netDebugInfoRef.current = {
+        ...netDebugInfoRef.current,
+        tuningRevision: netTuningRevisionRef.current,
+        tuningOverrides: { ...netTuningOverridesRef.current },
+      }
+      const announce = options?.announce ?? true
+      if (announce) {
+        appendNetLagEvent(
+          'tuning_update',
+          `net tuning updated rev=${netTuningRevisionRef.current} overrides=${JSON.stringify(normalized)}`,
+        )
+      }
+      return {
+        revision: netTuningRevisionRef.current,
+        overrides: { ...netTuningOverridesRef.current },
+        resolved: { ...netTuningRef.current },
+      }
+    },
+    [appendNetLagEvent],
+  )
+
+  const setLagSpikeState = useCallback((active: boolean, cause: LagSpikeCause) => {
+    const normalizedCause: LagSpikeCause = active ? cause : 'none'
+    const changed =
+      lagSpikeActiveRef.current !== active ||
+      (active && lagSpikeCauseRef.current !== normalizedCause)
+    if (!changed) return
+
+    lagSpikeActiveRef.current = active
+    lagSpikeCauseRef.current = normalizedCause
+    netDebugInfoRef.current.lagSpikeActive = active
+    netDebugInfoRef.current.lagSpikeCause = normalizedCause
+
+    if (active) {
+      const tuning = netTuningRef.current
+      const tickMs = Math.max(16, serverTickMsRef.current)
+      const spikeBoost = tickMs * tuning.netSpikeDelayBoostTicks
+      delayBoostMsRef.current = Math.max(delayBoostMsRef.current, spikeBoost)
+      appendNetLagEvent(
+        'spike_start',
+        `spike started via ${normalizedCause}; delay boost ${delayBoostMsRef.current.toFixed(1)}ms`,
+      )
+      if (netDebugEnabled) {
+        console.info(
+          `[net] lag spike start cause=${normalizedCause} boost=${delayBoostMsRef.current.toFixed(1)}ms`,
+        )
+      }
+      return
+    }
+
+    appendNetLagEvent(
+      'spike_end',
+      `spike ended; delay=${playoutDelayMsRef.current.toFixed(1)}ms jitter=${receiveJitterMsRef.current.toFixed(1)}ms`,
+    )
+    if (netDebugEnabled) {
+      console.info(
+        `[net] lag spike end delay=${playoutDelayMsRef.current.toFixed(1)}ms jitter=${receiveJitterMsRef.current.toFixed(1)}ms`,
+      )
+    }
+  }, [appendNetLagEvent, netDebugEnabled])
+
+  const pushSnapshot = useCallback((state: GameStateSnapshot) => {
     const now = Date.now()
+    const nowMs = performance.now()
+    const hadSeqGap = seqGapDetectedRef.current
+    const tuning = netTuningRef.current
+
+    const latestSeq = latestSeqRef.current
+    if (latestSeq !== null) {
+      if (state.seq === latestSeq) {
+        // Duplicate frame can happen around reconnect/buffer edges; ignore quietly.
+        return
+      }
+      if (!isSeqNewer(state.seq, latestSeq)) {
+        appendNetLagEvent(
+          'snapshot_drop',
+          `dropped out-of-order snapshot seq=${state.seq} latest=${latestSeq}`,
+          { droppedSeq: state.seq },
+        )
+        if (netDebugEnabled) {
+          console.info(`[net] dropped out-of-order snapshot seq=${state.seq} latest=${latestSeq}`)
+        }
+        return
+      }
+      const gap = seqGapSize(state.seq, latestSeq)
+      if (gap > 1) {
+        seqGapDetectedRef.current = true
+        lastSeqGapAtMsRef.current = nowMs
+        if (!hadSeqGap) {
+          appendNetLagEvent('seq_gap', `sequence gap detected: +${gap}`, { seqGapSize: gap })
+        }
+      }
+    }
+    latestSeqRef.current = state.seq
+
     const sampleOffset = state.now - now
     const currentOffset = serverOffsetRef.current
-    serverOffsetRef.current =
-      currentOffset === null ? sampleOffset : currentOffset + (sampleOffset - currentOffset) * OFFSET_SMOOTHING
+    if (currentOffset === null) {
+      serverOffsetRef.current = sampleOffset
+    } else {
+      const tickMs = Math.max(16, serverTickMsRef.current)
+      const rawDelta = sampleOffset - currentOffset
+      const outlierThreshold = tickMs * 6
+      const deltaClamp =
+        lagSpikeActiveRef.current || Math.abs(rawDelta) > outlierThreshold ? tickMs * 0.65 : tickMs * 1.8
+      const clampedDelta = clamp(rawDelta, -deltaClamp, deltaClamp)
+      const offsetSmoothing =
+        lagSpikeActiveRef.current || Math.abs(rawDelta) > outlierThreshold
+          ? tuning.serverOffsetSmoothing * 0.35
+          : tuning.serverOffsetSmoothing
+      serverOffsetRef.current = currentOffset + clampedDelta * offsetSmoothing
+    }
 
     const lastSnapshotTime = lastSnapshotTimeRef.current
     if (lastSnapshotTime !== null) {
       const delta = state.now - lastSnapshotTime
       if (delta > 0 && delta < 1000) {
-        tickIntervalRef.current = tickIntervalRef.current * 0.9 + delta * 0.1
+        tickIntervalRef.current = tickIntervalRef.current * 0.8 + delta * 0.2
       }
     }
     lastSnapshotTimeRef.current = state.now
+    serverTickMsRef.current = Math.max(16, tickIntervalRef.current)
+
+    const lastReceivedAt = lastSnapshotReceivedAtRef.current
+    let latestIntervalMs = receiveIntervalMsRef.current
+    if (lastReceivedAt !== null) {
+      const interval = now - lastReceivedAt
+      if (interval > 0 && interval < 5000) {
+        const intervalEwma = receiveIntervalMsRef.current
+        const nextIntervalEwma = intervalEwma + (interval - intervalEwma) * tuning.netIntervalSmoothing
+        receiveIntervalMsRef.current = nextIntervalEwma
+        latestIntervalMs = nextIntervalEwma
+        const jitterSample = Math.abs(interval - nextIntervalEwma)
+        const jitterEwma = receiveJitterMsRef.current
+        receiveJitterMsRef.current =
+          jitterEwma + (jitterSample - jitterEwma) * tuning.netJitterSmoothing
+
+        const tickMs = Math.max(16, serverTickMsRef.current)
+        const intervalSpikeThreshold = Math.max(
+          tickMs * tuning.netSpikeIntervalFactor,
+          nextIntervalEwma +
+            receiveJitterMsRef.current * tuning.netJitterDelayMultiplier +
+            tuning.netSpikeIntervalMarginMs,
+        )
+        if (interval > intervalSpikeThreshold) {
+          const lateBy = interval - intervalSpikeThreshold
+          const holdMs = clamp(
+            tuning.netSpikeImpairmentHoldMs + lateBy * 5,
+            tuning.netSpikeImpairmentHoldMs,
+            tuning.netSpikeImpairmentMaxHoldMs,
+          )
+          lagImpairmentUntilMsRef.current = Math.max(lagImpairmentUntilMsRef.current, nowMs + holdMs)
+          delayBoostMsRef.current = Math.max(
+            delayBoostMsRef.current,
+            Math.min(tickMs * (tuning.netSpikeDelayBoostTicks * 1.8), lateBy * 1.25),
+          )
+        }
+      }
+    }
+    lastSnapshotReceivedAtRef.current = now
 
     const buffer = snapshotBufferRef.current
     buffer.push({ ...state, receivedAt: now })
@@ -266,19 +610,216 @@ export default function App() {
     if (buffer.length > MAX_SNAPSHOT_BUFFER) {
       buffer.splice(0, buffer.length - MAX_SNAPSHOT_BUFFER)
     }
-  }
 
-  const getRenderSnapshot = () => {
+    if (seqGapDetectedRef.current) {
+      const stableWindowMs = tuning.netStableRecoverySecs * 1000
+      const lastGapAt = lastSeqGapAtMsRef.current
+      if (lastGapAt !== null && nowMs - lastGapAt >= stableWindowMs) {
+        seqGapDetectedRef.current = false
+      }
+    }
+
+    netDebugInfoRef.current = {
+      ...netDebugInfoRef.current,
+      latestSeq: latestSeqRef.current,
+      jitterMs: receiveJitterMsRef.current,
+      receiveIntervalMs: latestIntervalMs,
+      seqGapDetected: seqGapDetectedRef.current,
+      tuningRevision: netTuningRevisionRef.current,
+      tuningOverrides: { ...netTuningOverridesRef.current },
+    }
+  }, [appendNetLagEvent, netDebugEnabled])
+
+  const getRenderSnapshot = useCallback(() => {
     const buffer = snapshotBufferRef.current
     if (buffer.length === 0) return null
     const offset = serverOffsetRef.current
     if (offset === null) return buffer[buffer.length - 1]
+    const tuning = netTuningRef.current
 
-    const delay = Math.max(MIN_INTERP_DELAY_MS, tickIntervalRef.current * 1.5)
-    const renderTime = Date.now() + offset - delay
-    const snapshot = buildInterpolatedSnapshot(buffer, renderTime, MAX_EXTRAPOLATION_MS)
+    const now = Date.now()
+    const nowMs = performance.now()
+    const tickMs = Math.max(16, serverTickMsRef.current)
+
+    const lastDelayUpdateMs = lastDelayUpdateMsRef.current
+    if (lastDelayUpdateMs !== null) {
+      const dtSeconds = Math.max(0, Math.min(0.1, (nowMs - lastDelayUpdateMs) / 1000))
+      if (dtSeconds > 0 && !lagSpikeActiveRef.current) {
+        delayBoostMsRef.current = Math.max(
+          0,
+          delayBoostMsRef.current - tuning.netDelayBoostDecayPerSec * dtSeconds,
+        )
+      }
+    }
+    lastDelayUpdateMsRef.current = nowMs
+
+    const lastReceivedAt = lastSnapshotReceivedAtRef.current
+    const staleMs = lastReceivedAt === null ? 0 : Math.max(0, now - lastReceivedAt)
+    const staleThresholdMs = Math.max(40, tickMs * tuning.netSpikeStaleTicks)
+    const staleSpike = staleMs > staleThresholdMs
+    const impairmentMsRemaining = Math.max(0, lagImpairmentUntilMsRef.current - nowMs)
+    const impairmentSpike = impairmentMsRemaining > 0
+    if (!staleSpike && seqGapDetectedRef.current) {
+      const stableWindowMs = tuning.netStableRecoverySecs * 1000
+      const lastGapAt = lastSeqGapAtMsRef.current
+      if (lastGapAt !== null && nowMs - lastGapAt >= stableWindowMs) {
+        seqGapDetectedRef.current = false
+      }
+    }
+
+    const seqGapSpike = seqGapDetectedRef.current
+    const instantCause: LagSpikeCause = staleSpike
+      ? 'stale'
+      : seqGapSpike
+        ? 'seq-gap'
+        : impairmentSpike
+          ? 'arrival-gap'
+          : 'none'
+    const shouldSpike = instantCause !== 'none'
+    let nextSpikeActive = lagSpikeActiveRef.current
+    let nextCause: LagSpikeCause = lagSpikeCauseRef.current
+
+    if (!lagSpikeActiveRef.current) {
+      if (shouldSpike) {
+        if (lagSpikeEnterCandidateAtMsRef.current === null) {
+          lagSpikeEnterCandidateAtMsRef.current = nowMs
+        }
+        const enterConfirmed =
+          nowMs - (lagSpikeEnterCandidateAtMsRef.current ?? nowMs) >= tuning.netSpikeEnterConfirmMs
+        if (enterConfirmed) {
+          lagSpikeEnterCandidateAtMsRef.current = null
+          lagSpikeExitCandidateAtMsRef.current = null
+          nextSpikeActive = true
+          nextCause = instantCause
+        } else {
+          nextSpikeActive = false
+          nextCause = 'none'
+        }
+      } else {
+        lagSpikeEnterCandidateAtMsRef.current = null
+        nextSpikeActive = false
+        nextCause = 'none'
+      }
+    } else if (shouldSpike) {
+      lagSpikeExitCandidateAtMsRef.current = null
+      nextSpikeActive = true
+      nextCause = instantCause
+    } else {
+      if (lagSpikeExitCandidateAtMsRef.current === null) {
+        lagSpikeExitCandidateAtMsRef.current = nowMs
+      }
+      const exitConfirmed =
+        nowMs - (lagSpikeExitCandidateAtMsRef.current ?? nowMs) >= tuning.netSpikeExitConfirmMs
+      if (exitConfirmed) {
+        lagSpikeExitCandidateAtMsRef.current = null
+        nextSpikeActive = false
+        nextCause = 'none'
+      } else {
+        nextSpikeActive = true
+      }
+    }
+
+    setLagSpikeState(nextSpikeActive, nextCause)
+
+    const baseDelayMs = tickMs * tuning.netBaseDelayTicks
+    const minDelayMs = tickMs * tuning.netMinDelayTicks
+    const maxDelayMs = tickMs * tuning.netMaxDelayTicks
+    const jitterDelayMs = receiveJitterMsRef.current * tuning.netJitterDelayMultiplier
+    const delay = clamp(baseDelayMs + jitterDelayMs + delayBoostMsRef.current, minDelayMs, maxDelayMs)
+    playoutDelayMsRef.current = delay
+
+    const maxExtrapolationMs = lagSpikeActiveRef.current
+      ? clamp(tickMs * 0.5, 10, 28)
+      : clamp(tickMs * 0.4, 8, MAX_EXTRAPOLATION_MS)
+    const renderTime = now + offset - delay
+    const snapshot = buildInterpolatedSnapshot(buffer, renderTime, maxExtrapolationMs)
+    netDebugInfoRef.current = {
+      lagSpikeActive: lagSpikeActiveRef.current,
+      lagSpikeCause: lagSpikeCauseRef.current,
+      playoutDelayMs: delay,
+      jitterMs: receiveJitterMsRef.current,
+      receiveIntervalMs: receiveIntervalMsRef.current,
+      staleMs,
+      impairmentMsRemaining,
+      maxExtrapolationMs,
+      latestSeq: latestSeqRef.current,
+      seqGapDetected: seqGapDetectedRef.current,
+      tuningRevision: netTuningRevisionRef.current,
+      tuningOverrides: { ...netTuningOverridesRef.current },
+    }
     return snapshot
-  }
+  }, [setLagSpikeState])
+
+  const stabilizeLocalSnapshot = useCallback(
+    (
+      snapshot: GameStateSnapshot | null,
+      localId: string | null,
+      frameDeltaSeconds: number,
+    ): GameStateSnapshot | null => {
+      if (!snapshot || !localId) {
+        localSnakeDisplayRef.current = null
+        return snapshot
+      }
+
+      const localIndex = snapshot.players.findIndex((player) => player.id === localId)
+      if (localIndex < 0) {
+        localSnakeDisplayRef.current = null
+        return snapshot
+      }
+
+      const localPlayer = snapshot.players[localIndex]
+      if (!localPlayer.alive || localPlayer.snake.length === 0) {
+        localSnakeDisplayRef.current = null
+        return snapshot
+      }
+
+      const incomingSnake = localPlayer.snake
+      const previousSnake = localSnakeDisplayRef.current
+      if (!previousSnake || previousSnake.length === 0) {
+        localSnakeDisplayRef.current = incomingSnake.map((node) => ({ ...node }))
+        return snapshot
+      }
+
+      const nearSpike =
+        lagSpikeActiveRef.current ||
+        lagCameraHoldActiveRef.current ||
+        lagCameraRecoveryStartMsRef.current !== null ||
+        delayBoostMsRef.current > 0.5
+      const tuning = netTuningRef.current
+      const rate = nearSpike
+        ? tuning.localSnakeStabilizerRateSpike
+        : tuning.localSnakeStabilizerRateNormal
+      const dt = clamp(frameDeltaSeconds, 0, 0.1)
+      const alpha = 1 - Math.exp(-rate * dt)
+
+      if (alpha >= 0.999) {
+        localSnakeDisplayRef.current = incomingSnake.map((node) => ({ ...node }))
+        return snapshot
+      }
+
+      const blendLen = Math.min(previousSnake.length, incomingSnake.length)
+      const blendedSnake: Point[] = []
+      for (let i = 0; i < incomingSnake.length; i += 1) {
+        if (i < blendLen) {
+          blendedSnake.push(lerpPoint(previousSnake[i], incomingSnake[i], alpha))
+        } else {
+          blendedSnake.push({ ...incomingSnake[i] })
+        }
+      }
+      localSnakeDisplayRef.current = blendedSnake.map((node) => ({ ...node }))
+
+      const players = snapshot.players.slice()
+      players[localIndex] = {
+        ...localPlayer,
+        snake: blendedSnake,
+      }
+      return {
+        ...snapshot,
+        players,
+      }
+    },
+    [],
+  )
 
   useEffect(() => {
     playerIdRef.current = playerId
@@ -413,16 +954,43 @@ export default function App() {
           const config = renderConfigRef.current
           let boostActive = false
           if (config && webgl) {
-            const snapshot = getRenderSnapshot()
+            const nowMs = performance.now()
+            const lastRenderFrameMs = lastRenderFrameMsRef.current
+            const frameDeltaSeconds =
+              lastRenderFrameMs !== null ? Math.max(0, Math.min(0.1, (nowMs - lastRenderFrameMs) / 1000)) : 1 / 60
+            lastRenderFrameMsRef.current = nowMs
             const localId = playerIdRef.current
+            const snapshot = stabilizeLocalSnapshot(getRenderSnapshot(), localId, frameDeltaSeconds)
             const localSnapshotPlayer =
               snapshot?.players.find((player) => player.id === localId) ?? null
             const localHead = localSnapshotPlayer?.snake[0] ?? null
             const hasSpawnedSnake =
               !!localSnapshotPlayer && localSnapshotPlayer.alive && localSnapshotPlayer.snake.length > 0
-            const gameplayCamera = updateCamera(localHead, cameraUpRef)
+            const rawGameplayCamera = updateCamera(localHead, cameraUpRef)
             const phase = menuPhaseRef.current
-            const nowMs = performance.now()
+
+            if (phase === 'playing' && hasSpawnedSnake && localHead) {
+              const normalizedHead = normalize(localHead)
+              const previousHead = lastHeadSampleRef.current
+              if (previousHead) {
+                const headDot = clamp(
+                  previousHead.x * normalizedHead.x +
+                    previousHead.y * normalizedHead.y +
+                    previousHead.z * normalizedHead.z,
+                  -1,
+                  1,
+                )
+                const motionInfo = motionDebugInfoRef.current
+                motionInfo.sampleCount += 1
+                motionInfo.minHeadDot = Math.min(motionInfo.minHeadDot, headDot)
+                if (headDot < MOTION_BACKWARD_DOT_THRESHOLD) {
+                  motionInfo.backwardCorrectionCount += 1
+                }
+              }
+              lastHeadSampleRef.current = normalizedHead
+            } else {
+              lastHeadSampleRef.current = null
+            }
 
             if (hasSpawnedSnake) {
               deathStartedAtMsRef.current = null
@@ -441,7 +1009,7 @@ export default function App() {
               deathStartedAtMsRef.current !== null &&
               nowMs - deathStartedAtMsRef.current >= DEATH_TO_MENU_DELAY_MS
             ) {
-              const sourceCameraQ = gameplayCamera.active ? gameplayCamera.q : cameraRef.current.q
+              const sourceCameraQ = rawGameplayCamera.active ? rawGameplayCamera.q : cameraRef.current.q
               returnFromCameraQRef.current = { ...sourceCameraQ }
               returnFromDistanceRef.current = renderCameraDistanceRef.current
               returnFromVerticalOffsetRef.current = renderCameraVerticalOffsetRef.current
@@ -454,6 +1022,63 @@ export default function App() {
                 socket.send(encodeJoin(playerNameRef.current, playerIdRef.current, true))
               }
               setMenuPhase('returning')
+            }
+
+            let gameplayCamera = rawGameplayCamera
+            if (phase === 'playing' && hasSpawnedSnake && rawGameplayCamera.active) {
+              const tuning = netTuningRef.current
+              if (lagSpikeActiveRef.current) {
+                lagCameraRecoveryStartMsRef.current = null
+                if (!lagCameraHoldActiveRef.current) {
+                  const stableCamera = stableGameplayCameraRef.current
+                  lagCameraHoldQRef.current = {
+                    ...(stableCamera.active ? stableCamera.q : rawGameplayCamera.q),
+                  }
+                  lagCameraHoldActiveRef.current = true
+                  lagCameraRecoveryFromQRef.current = { ...lagCameraHoldQRef.current }
+                }
+                const spikeFollowAlpha =
+                  1 - Math.exp(-tuning.netCameraSpikeFollowRate * Math.max(0, frameDeltaSeconds))
+                lagCameraHoldQRef.current = slerpQuaternion(
+                  lagCameraHoldQRef.current,
+                  rawGameplayCamera.q,
+                  spikeFollowAlpha,
+                )
+                gameplayCamera = {
+                  active: true,
+                  q: lagCameraHoldQRef.current,
+                }
+              } else if (lagCameraHoldActiveRef.current) {
+                if (lagCameraRecoveryStartMsRef.current === null) {
+                  lagCameraRecoveryStartMsRef.current = nowMs
+                  lagCameraRecoveryFromQRef.current = { ...lagCameraHoldQRef.current }
+                }
+                const recoveryElapsed = nowMs - lagCameraRecoveryStartMsRef.current
+                const recoveryBlend = clamp(recoveryElapsed / tuning.netCameraRecoveryMs, 0, 1)
+                const easedRecovery = easeInOutCubic(recoveryBlend)
+                gameplayCamera = {
+                  active: true,
+                  q: slerpQuaternion(
+                    lagCameraRecoveryFromQRef.current,
+                    rawGameplayCamera.q,
+                    easedRecovery,
+                  ),
+                }
+                if (recoveryBlend >= 0.999) {
+                  lagCameraHoldActiveRef.current = false
+                  lagCameraRecoveryStartMsRef.current = null
+                }
+              }
+
+              if (gameplayCamera.active && !lagSpikeActiveRef.current) {
+                stableGameplayCameraRef.current = {
+                  active: true,
+                  q: { ...gameplayCamera.q },
+                }
+              }
+            } else {
+              lagCameraHoldActiveRef.current = false
+              lagCameraRecoveryStartMsRef.current = null
             }
 
             let blend = cameraBlendRef.current
@@ -717,14 +1342,101 @@ export default function App() {
               cameraBlend: phase === 'playing' ? 1 : blend,
               cameraDistance: Math.hypot(renderDistance, renderVerticalOffset),
             }
-            if (DEBUG_UI_ENABLED && typeof window !== 'undefined') {
+            if (netDebugEnabled && phase === 'playing') {
+              const elapsedSinceSummary = nowMs - lastNetSummaryLogMsRef.current
+              if (elapsedSinceSummary >= 5000) {
+                const netInfo = netDebugInfoRef.current
+                const motionInfo = motionDebugInfoRef.current
+                appendNetLagEvent(
+                  'summary',
+                  `summary lag=${netInfo.lagSpikeActive ? '1' : '0'} cause=${netInfo.lagSpikeCause} delay=${netInfo.playoutDelayMs.toFixed(1)}ms jitter=${netInfo.jitterMs.toFixed(1)}ms interval=${netInfo.receiveIntervalMs.toFixed(1)}ms stale=${netInfo.staleMs.toFixed(1)}ms impair=${netInfo.impairmentMsRemaining.toFixed(0)}ms tuningRev=${netInfo.tuningRevision} backward=${motionInfo.backwardCorrectionCount}/${motionInfo.sampleCount} minDot=${motionInfo.minHeadDot.toFixed(4)}`,
+                )
+                console.info(
+                  `[net] summary lag=${netInfo.lagSpikeActive} cause=${netInfo.lagSpikeCause} delay=${netInfo.playoutDelayMs.toFixed(1)}ms jitter=${netInfo.jitterMs.toFixed(1)}ms interval=${netInfo.receiveIntervalMs.toFixed(1)}ms stale=${netInfo.staleMs.toFixed(1)}ms impair=${netInfo.impairmentMsRemaining.toFixed(0)}ms tuningRev=${netInfo.tuningRevision} backward=${motionInfo.backwardCorrectionCount}/${motionInfo.sampleCount} minDot=${motionInfo.minHeadDot.toFixed(4)}`,
+                )
+                lastNetSummaryLogMsRef.current = nowMs
+              }
+            }
+            if (typeof window !== 'undefined') {
               const debugApi = (
                 window as Window & { __SNAKE_DEBUG__?: Record<string, unknown> }
               ).__SNAKE_DEBUG__
-              if (debugApi && typeof debugApi === 'object') {
-                ;(debugApi as { getMenuFlowInfo?: () => MenuFlowDebugInfo }).getMenuFlowInfo = () => ({
+              const rootDebugApi =
+                debugApi && typeof debugApi === 'object'
+                  ? debugApi
+                  : ((window as Window & { __SNAKE_DEBUG__?: Record<string, unknown> }).__SNAKE_DEBUG__ = {})
+              if (rootDebugApi && typeof rootDebugApi === 'object') {
+                ;(rootDebugApi as { getMenuFlowInfo?: () => MenuFlowDebugInfo }).getMenuFlowInfo = () => ({
                   ...menuDebugInfoRef.current,
                 })
+                ;(
+                  rootDebugApi as {
+                    getNetSmoothingInfo?: () => NetSmoothingDebugInfo
+                  }
+                ).getNetSmoothingInfo = () => ({
+                  ...netDebugInfoRef.current,
+                })
+                ;(
+                  rootDebugApi as {
+                    getMotionStabilityInfo?: () => MotionStabilityDebugInfo
+                  }
+                ).getMotionStabilityInfo = () => ({
+                  ...motionDebugInfoRef.current,
+                })
+                ;(
+                  rootDebugApi as {
+                    getNetLagEvents?: () => NetLagEvent[]
+                  }
+                ).getNetLagEvents = () => netLagEventsRef.current.slice()
+                ;(
+                  rootDebugApi as {
+                    getNetLagReport?: () => NetLagReport
+                  }
+                ).getNetLagReport = () => buildNetLagReport()
+                ;(
+                  rootDebugApi as {
+                    clearNetLagEvents?: () => void
+                  }
+                ).clearNetLagEvents = () => {
+                  netLagEventsRef.current = []
+                  netLagEventIdRef.current = 1
+                }
+                ;(
+                  rootDebugApi as {
+                    getNetTuningOverrides?: () => NetTuningOverrides
+                  }
+                ).getNetTuningOverrides = () => ({
+                  ...netTuningOverridesRef.current,
+                })
+                ;(
+                  rootDebugApi as {
+                    getResolvedNetTuning?: () => typeof DEFAULT_NET_TUNING
+                  }
+                ).getResolvedNetTuning = () => ({
+                  ...netTuningRef.current,
+                })
+                ;(
+                  rootDebugApi as {
+                    setNetTuningOverrides?: (
+                      overrides: NetTuningOverrides,
+                    ) => {
+                      revision: number
+                      overrides: NetTuningOverrides
+                      resolved: typeof DEFAULT_NET_TUNING
+                    }
+                  }
+                ).setNetTuningOverrides = (overrides) =>
+                  applyNetTuningOverrides(overrides, { announce: true })
+                ;(
+                  rootDebugApi as {
+                    resetNetTuningOverrides?: () => {
+                      revision: number
+                      overrides: NetTuningOverrides
+                      resolved: typeof DEFAULT_NET_TUNING
+                    }
+                  }
+                ).resetNetTuningOverrides = () =>
+                  applyNetTuningOverrides({}, { announce: true })
               }
             }
           }
@@ -754,10 +1466,20 @@ export default function App() {
       webglRef.current = null
       renderConfigRef.current = null
       headScreenRef.current = null
+      localSnakeDisplayRef.current = null
+      lastRenderFrameMsRef.current = null
       resetBoostFxVisual()
     }
     // Renderer swaps are intentionally triggered by explicit backend preference only.
-  }, [rendererPreference])
+  }, [
+    rendererPreference,
+    getRenderSnapshot,
+    netDebugEnabled,
+    appendNetLagEvent,
+    buildNetLagReport,
+    stabilizeLocalSnapshot,
+    applyNetTuningOverrides,
+  ])
 
   useEffect(() => {
     let reconnectTimer: number | null = null
@@ -767,11 +1489,57 @@ export default function App() {
       if (cancelled) return
       snapshotBufferRef.current = []
       serverOffsetRef.current = null
+      serverTickMsRef.current = 50
       lastSnapshotTimeRef.current = null
+      lastSnapshotReceivedAtRef.current = null
+      receiveIntervalMsRef.current = 50
+      receiveJitterMsRef.current = 0
+      playoutDelayMsRef.current = 100
+      delayBoostMsRef.current = 0
+      lastDelayUpdateMsRef.current = null
+      latestSeqRef.current = null
+      seqGapDetectedRef.current = false
+      lastSeqGapAtMsRef.current = null
+      lagSpikeActiveRef.current = false
+      lagSpikeCauseRef.current = 'none'
+      lagSpikeEnterCandidateAtMsRef.current = null
+      lagSpikeExitCandidateAtMsRef.current = null
+      lagImpairmentUntilMsRef.current = 0
+      netTuningRef.current = resolveNetTuning(netTuningOverridesRef.current)
       tickIntervalRef.current = 50
       playerMetaRef.current = new Map()
       resetScoreRadialState(scoreRadialStateRef.current)
+      netDebugInfoRef.current = {
+        lagSpikeActive: false,
+        lagSpikeCause: 'none',
+        playoutDelayMs: 100,
+        jitterMs: 0,
+        receiveIntervalMs: 50,
+        staleMs: 0,
+        impairmentMsRemaining: 0,
+        maxExtrapolationMs: MAX_EXTRAPOLATION_MS,
+        latestSeq: null,
+        seqGapDetected: false,
+        tuningRevision: netTuningRevisionRef.current,
+        tuningOverrides: { ...netTuningOverridesRef.current },
+      }
+      motionDebugInfoRef.current = {
+        backwardCorrectionCount: 0,
+        minHeadDot: 1,
+        sampleCount: 0,
+      }
+      netLagEventsRef.current = []
+      netLagEventIdRef.current = 1
+      lastNetSummaryLogMsRef.current = 0
+      lastHeadSampleRef.current = null
+      localSnakeDisplayRef.current = null
+      lastRenderFrameMsRef.current = null
       localHeadRef.current = MENU_CAMERA_TARGET
+      stableGameplayCameraRef.current = { q: { ...MENU_CAMERA.q }, active: true }
+      lagCameraHoldActiveRef.current = false
+      lagCameraHoldQRef.current = { ...MENU_CAMERA.q }
+      lagCameraRecoveryStartMsRef.current = null
+      lagCameraRecoveryFromQRef.current = { ...MENU_CAMERA.q }
       renderCameraDistanceRef.current = MENU_CAMERA_DISTANCE
       renderCameraVerticalOffsetRef.current = MENU_CAMERA_VERTICAL_OFFSET
       cameraBlendRef.current = 0
@@ -840,6 +1608,16 @@ export default function App() {
         if (decoded.type === 'init') {
           setPlayerId(decoded.playerId)
           storePlayerId(decoded.playerId)
+          if (Number.isFinite(decoded.tickMs) && decoded.tickMs > 0) {
+            const normalizedTickMs = Math.max(16, decoded.tickMs)
+            serverTickMsRef.current = normalizedTickMs
+            tickIntervalRef.current = normalizedTickMs
+            receiveIntervalMsRef.current = normalizedTickMs
+            netDebugInfoRef.current = {
+              ...netDebugInfoRef.current,
+              receiveIntervalMs: normalizedTickMs,
+            }
+          }
           setEnvironment(decoded.environment)
           pushSnapshot(decoded.state)
           setGameState(decoded.state)
@@ -872,7 +1650,7 @@ export default function App() {
       socketRef.current?.close()
       socketRef.current = null
     }
-  }, [roomName])
+  }, [roomName, pushSnapshot])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
