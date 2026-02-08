@@ -8,13 +8,59 @@ BACKEND_URL="http://127.0.0.1:${BACKEND_PORT}"
 ROOM_ORIGIN_URL="http://localhost:${BACKEND_PORT}"
 LOCAL_URL="http://localhost:${LOCAL_PORT}"
 
+collect_descendants() {
+  local parent_pid="$1"
+  local child_pid
+  while read -r child_pid; do
+    [[ -z "${child_pid}" ]] && continue
+    echo "${child_pid}"
+    collect_descendants "${child_pid}"
+  done < <(pgrep -P "${parent_pid}" 2>/dev/null || true)
+}
+
+stop_process_tree() {
+  local root_pid="$1"
+  [[ -z "${root_pid}" ]] && return
+  if ! kill -0 "${root_pid}" >/dev/null 2>&1; then
+    return
+  fi
+
+  local pid
+  local descendants
+  descendants="$(collect_descendants "${root_pid}" | tr '\n' ' ')"
+
+  for pid in ${descendants}; do
+    kill -TERM "${pid}" >/dev/null 2>&1 || true
+  done
+  kill -TERM "${root_pid}" >/dev/null 2>&1 || true
+
+  for _ in $(seq 1 30); do
+    local alive=0
+    for pid in ${descendants}; do
+      if kill -0 "${pid}" >/dev/null 2>&1; then
+        alive=1
+        break
+      fi
+    done
+    if [[ "${alive}" -eq 0 ]] && ! kill -0 "${root_pid}" >/dev/null 2>&1; then
+      return
+    fi
+    sleep 0.1
+  done
+
+  for pid in ${descendants}; do
+    kill -KILL "${pid}" >/dev/null 2>&1 || true
+  done
+  kill -KILL "${root_pid}" >/dev/null 2>&1 || true
+}
+
 cleanup() {
-  if [[ -n "${WORKER_PID:-}" ]]; then
-    kill "${WORKER_PID}" >/dev/null 2>&1 || true
+  if [[ "${CLEANUP_DONE:-0}" == "1" ]]; then
+    return
   fi
-  if [[ -n "${BACKEND_PID:-}" ]]; then
-    kill "${BACKEND_PID}" >/dev/null 2>&1 || true
-  fi
+  CLEANUP_DONE=1
+  stop_process_tree "${WORKER_PID:-}"
+  stop_process_tree "${BACKEND_PID:-}"
 }
 
 trap cleanup EXIT INT TERM
@@ -31,6 +77,7 @@ require_command cargo
 require_command npm
 require_command npx
 require_command curl
+require_command pgrep
 
 if lsof -iTCP:"${BACKEND_PORT}" -sTCP:LISTEN -Pn >/dev/null 2>&1; then
   echo "Backend port ${BACKEND_PORT} is already in use." >&2
@@ -58,7 +105,8 @@ fi
 
 (
   cd "${ROOT_DIR}/backend"
-  PORT="${BACKEND_PORT}" \
+  exec env \
+    PORT="${BACKEND_PORT}" \
     SNAKE_ROLE=standalone \
     ROOM_TOKEN_SECRET="${ROOM_TOKEN_SECRET}" \
     STANDALONE_ROOM_ORIGIN="${ROOM_ORIGIN_URL}" \
@@ -89,7 +137,7 @@ fi
 (
   cd "${ROOT_DIR}/frontend"
   npm run build
-  npx wrangler dev \
+  exec npx wrangler dev \
     -c wrangler.dev.toml \
     --local \
     --ip 127.0.0.1 \
