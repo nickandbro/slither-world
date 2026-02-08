@@ -2108,6 +2108,12 @@ export const createScene = async (
   const pelletCoreTexture = createPelletCoreTexture()
   const pelletInnerGlowTexture = createPelletInnerGlowTexture()
   const pelletGlowTexture = createPelletGlowTexture()
+  const occluderDepthMaterial = new THREE.MeshDepthMaterial({
+    depthPacking: THREE.BasicDepthPacking,
+  })
+  occluderDepthMaterial.depthTest = true
+  occluderDepthMaterial.depthWrite = true
+  occluderDepthMaterial.colorWrite = false
   let treeTierGeometries: THREE.BufferGeometry[] = []
   let treeTierMeshes: THREE.InstancedMesh[] = []
   let treeTrunkGeometry: THREE.BufferGeometry | null = null
@@ -6653,7 +6659,7 @@ diffuseColor.a *= retireEdge;`,
       transparent: true,
       opacity: PELLET_INNER_GLOW_OPACITY_BASE,
       depthWrite: false,
-      depthTest: false,
+      depthTest: true,
       blending: THREE.AdditiveBlending,
       sizeAttenuation: true,
       toneMapped: false,
@@ -6666,7 +6672,7 @@ diffuseColor.a *= retireEdge;`,
       transparent: true,
       opacity: PELLET_GLOW_OPACITY_BASE,
       depthWrite: false,
-      depthTest: false,
+      depthTest: true,
       blending: THREE.AdditiveBlending,
       sizeAttenuation: true,
       toneMapped: false,
@@ -6683,10 +6689,10 @@ diffuseColor.a *= retireEdge;`,
     glowPoints.frustumCulled = false
     innerGlowPoints.frustumCulled = false
     corePoints.frustumCulled = false
-    shadowPoints.renderOrder = 3
-    glowPoints.renderOrder = 4
-    innerGlowPoints.renderOrder = 5
-    corePoints.renderOrder = 6
+    shadowPoints.renderOrder = 1.2
+    glowPoints.renderOrder = 1.3
+    innerGlowPoints.renderOrder = 1.4
+    corePoints.renderOrder = 1.5
     pelletsGroup.add(shadowPoints)
     pelletsGroup.add(glowPoints)
     pelletsGroup.add(innerGlowPoints)
@@ -7096,6 +7102,77 @@ diffuseColor.a *= retireEdge;`,
     moonGroup.visible = moonOpacity > 0.001
   }
 
+  const renderWorldPass = (
+    includeWorldChild: (child: THREE.Object3D) => boolean,
+    options: {
+      skyVisible: boolean
+      overrideMaterial?: THREE.Material | null
+      clearDepth?: boolean
+    },
+  ) => {
+    const savedSkyVisible = skyGroup.visible
+    const savedOverrideMaterial = scene.overrideMaterial
+    const worldChildCount = world.children.length
+    const worldChildVisibility = new Array<boolean>(worldChildCount)
+    for (let i = 0; i < worldChildCount; i += 1) {
+      const child = world.children[i]
+      worldChildVisibility[i] = child.visible
+      child.visible = worldChildVisibility[i] && includeWorldChild(child)
+    }
+
+    skyGroup.visible = savedSkyVisible && options.skyVisible
+    scene.overrideMaterial = options.overrideMaterial ?? null
+    if (options.clearDepth) {
+      renderer.clearDepth()
+    }
+    renderer.render(scene, camera)
+    scene.overrideMaterial = savedOverrideMaterial
+    skyGroup.visible = savedSkyVisible
+
+    for (let i = 0; i < worldChildCount; i += 1) {
+      const child = world.children[i]
+      child.visible = worldChildVisibility[i]
+    }
+  }
+
+  const withOpaqueSnakeDepthOccluders = (renderPass: () => void) => {
+    const visibilitySnapshot: Array<{
+      object: THREE.Object3D
+      visible: boolean
+    }> = []
+    const hideForDepth = (object: THREE.Object3D) => {
+      visibilitySnapshot.push({
+        object,
+        visible: object.visible,
+      })
+      object.visible = false
+    }
+
+    for (const visual of snakes.values()) {
+      const isOpaqueOccluder =
+        visual.group.visible &&
+        visual.tube.material.depthWrite &&
+        visual.head.material.depthWrite &&
+        visual.tail.material.depthWrite
+      if (!isOpaqueOccluder) {
+        hideForDepth(visual.group)
+        continue
+      }
+      if (visual.bowl.visible) hideForDepth(visual.bowl)
+      if (visual.boostDraft.visible) hideForDepth(visual.boostDraft)
+      if (visual.nameplate.visible) hideForDepth(visual.nameplate)
+    }
+
+    try {
+      renderPass()
+    } finally {
+      for (let i = visibilitySnapshot.length - 1; i >= 0; i -= 1) {
+        const snapshot = visibilitySnapshot[i]
+        snapshot.object.visible = snapshot.visible
+      }
+    }
+  }
+
   const render = (
     snapshot: GameStateSnapshot | null,
     cameraState: Camera,
@@ -7226,7 +7303,47 @@ diffuseColor.a *= retireEdge;`,
     }
     updatePelletGlow(lakeTimeSeconds)
 
-    renderer.render(scene, camera)
+    const lakeMeshSet = new Set<THREE.Object3D>(lakeMeshes)
+    const includeWithoutPelletsAndLakes = (child: THREE.Object3D) =>
+      child !== pelletsGroup && !lakeMeshSet.has(child)
+    const includeLakeMeshes = (child: THREE.Object3D) => lakeMeshSet.has(child)
+    const includePelletOccluders = (child: THREE.Object3D) =>
+      child === environmentGroup || child === snakesGroup
+    const savedAutoClear = renderer.autoClear
+    renderer.autoClear = false
+    renderer.clear()
+    try {
+      // Pass 1: Render the main world without pellets/lakes so pellet occlusion can be composited separately.
+      renderWorldPass(includeWithoutPelletsAndLakes, {
+        skyVisible: true,
+      })
+      // Pass 2: Build depth from terrain objects only (not planet) to occlude pellet glow without planet clipping.
+      withOpaqueSnakeDepthOccluders(() => {
+        renderWorldPass(includePelletOccluders, {
+          skyVisible: false,
+          overrideMaterial: occluderDepthMaterial,
+          clearDepth: true,
+        })
+      })
+      // Pass 3: Render pellets against terrain-object depth, allowing partial occlusion.
+      renderWorldPass((child) => child === pelletsGroup, {
+        skyVisible: false,
+      })
+      // Pass 4: Rebuild full scene depth (including planet) so lake overlays depth-test correctly.
+      withOpaqueSnakeDepthOccluders(() => {
+        renderWorldPass(includeWithoutPelletsAndLakes, {
+          skyVisible: false,
+          overrideMaterial: occluderDepthMaterial,
+          clearDepth: true,
+        })
+      })
+      // Pass 5: Render lakes last so underwater pellets still read through the water surface overlay.
+      renderWorldPass(includeLakeMeshes, {
+        skyVisible: false,
+      })
+    } finally {
+      renderer.autoClear = savedAutoClear
+    }
     return localHeadScreen
   }
 
@@ -7338,6 +7455,7 @@ diffuseColor.a *= retireEdge;`,
     pelletCoreTexture?.dispose()
     pelletInnerGlowTexture?.dispose()
     pelletGlowTexture?.dispose()
+    occluderDepthMaterial.dispose()
     pelletGroundCache.clear()
     pelletMotionStates.clear()
     pelletIdsSeen.clear()
