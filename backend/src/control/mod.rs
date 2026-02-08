@@ -519,7 +519,9 @@ impl ControlState {
         let mut registry = self.registry.lock().await;
         if let Some(record) = registry.rooms.get_mut(&payload.room_id) {
             record.player_count = payload.player_count;
-            record.last_heartbeat_at = now;
+            if payload.player_count > 0 || payload.total_sessions > 0 {
+                record.last_heartbeat_at = now;
+            }
         } else {
             tracing::warn!(
                 room_id = payload.room_id,
