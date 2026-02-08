@@ -35,7 +35,7 @@ packages:
   - docker.io
 runcmd:
   - systemctl enable --now docker
-{login_lines}\
+{login_lines}
   - docker pull {image}
   - docker rm -f snake-room || true
   - >
@@ -93,5 +93,21 @@ mod tests {
             port: 8787,
         });
         assert!(script.contains("docker login ghcr.io"));
+    }
+
+    #[test]
+    fn cloud_init_does_not_emit_stray_backslash_line() {
+        let script = build_room_cloud_init(&RoomCloudInitConfig {
+            image: "ghcr.io/example/snake:latest",
+            registry_username: Some("user"),
+            registry_password: Some("pass"),
+            room_id: "room-auth",
+            control_plane_url: "https://control.example.com",
+            heartbeat_token: "heart",
+            room_proxy_secret: "proxy",
+            max_human_players: 25,
+            port: 8787,
+        });
+        assert!(!script.contains("\n\\\n"));
     }
 }

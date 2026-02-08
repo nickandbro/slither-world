@@ -60,14 +60,20 @@ async function proxyRoomWebSocket(request: Request, env: Env, url: URL): Promise
     return new Response('Room token mismatch', { status: 401 })
   }
 
+  const normalizedOrigin = normalizeRoomOrigin(claims.origin)
   const upstreamUrl = new URL(
     `/api/room/${encodeURIComponent(roomId)}`,
-    claims.origin.endsWith('/') ? claims.origin : `${claims.origin}/`,
+    normalizedOrigin.endsWith('/') ? normalizedOrigin : `${normalizedOrigin}/`,
   )
   const upstreamRequest = new Request(upstreamUrl.toString(), request)
   upstreamRequest.headers.set('x-room-proxy-secret', env.ROOM_PROXY_SECRET)
 
-  return fetch(upstreamRequest)
+  try {
+    return await fetch(upstreamRequest)
+  } catch (error) {
+    console.error('ws_proxy_fetch_error', error)
+    return new Response('Upstream websocket connect failed', { status: 502 })
+  }
 }
 
 async function verifyRoomToken(token: string, secret: string): Promise<RoomTokenClaims | null> {
@@ -148,4 +154,29 @@ function constantTimeEqual(a: string, b: string): boolean {
     diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
   }
   return diff === 0
+}
+
+function normalizeRoomOrigin(origin: string): string {
+  let parsed: URL
+  try {
+    parsed = new URL(origin)
+  } catch {
+    return origin
+  }
+
+  if (isIpv4Address(parsed.hostname)) {
+    const reversed = parsed.hostname.split('.').reverse().join('.')
+    parsed.hostname = `static.${reversed}.clients.your-server.de`
+  }
+  return parsed.toString()
+}
+
+function isIpv4Address(hostname: string): boolean {
+  const parts = hostname.split('.')
+  if (parts.length !== 4) return false
+  return parts.every((part) => {
+    if (!/^\d+$/.test(part)) return false
+    const value = Number(part)
+    return Number.isInteger(value) && value >= 0 && value <= 255
+  })
 }
