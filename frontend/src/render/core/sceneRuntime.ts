@@ -264,6 +264,85 @@ const createSkyGradientTexture = (size: number) => {
   return { canvas, ctx, texture } satisfies SkyGradientTexture
 }
 
+const loadImage = (url: string) => {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error(`Failed to load image: ${url}`))
+    image.src = url
+  })
+}
+
+const createCircularMaskedTextureFromImage = (
+  image: HTMLImageElement,
+  size: number,
+  featherFraction: number,
+) => {
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+
+  const sourceWidth = Math.max(1, image.naturalWidth)
+  const sourceHeight = Math.max(1, image.naturalHeight)
+  const sourceSize = Math.max(1, Math.min(sourceWidth, sourceHeight))
+  const sourceX = Math.max(0, (sourceWidth - sourceSize) * 0.5)
+  const sourceY = Math.max(0, (sourceHeight - sourceSize) * 0.5)
+  ctx.clearRect(0, 0, size, size)
+  ctx.drawImage(
+    image,
+    sourceX,
+    sourceY,
+    sourceSize,
+    sourceSize,
+    0,
+    0,
+    size,
+    size,
+  )
+
+  const radius = size * 0.5
+  const feather = clamp(featherFraction, 0, 0.45)
+  const featherStart = radius * Math.max(0, 1 - feather)
+  const alphaMask = ctx.createRadialGradient(
+    radius,
+    radius,
+    featherStart,
+    radius,
+    radius,
+    radius,
+  )
+  alphaMask.addColorStop(0, 'rgba(255,255,255,1)')
+  alphaMask.addColorStop(1, 'rgba(255,255,255,0)')
+  ctx.globalCompositeOperation = 'destination-in'
+  ctx.fillStyle = alphaMask
+  ctx.fillRect(0, 0, size, size)
+  ctx.globalCompositeOperation = 'source-over'
+
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.colorSpace = THREE.SRGBColorSpace
+  texture.magFilter = THREE.LinearFilter
+  texture.minFilter = THREE.LinearFilter
+  texture.wrapS = THREE.ClampToEdgeWrapping
+  texture.wrapT = THREE.ClampToEdgeWrapping
+  texture.needsUpdate = true
+  return texture
+}
+
+const createMoonTextureFromAsset = async (
+  url: string,
+  size: number,
+  featherFraction: number,
+) => {
+  try {
+    const image = await loadImage(url)
+    return createCircularMaskedTextureFromImage(image, size, featherFraction)
+  } catch {
+    return null
+  }
+}
+
 const createNameplateTexture = (text: string): NameplateTexture | null => {
   const canvas = document.createElement('canvas')
   canvas.width = NAMEPLATE_CANVAS_WIDTH
@@ -825,6 +904,11 @@ const DAY_NIGHT_SUN_SIZE = 1.25
 const DAY_NIGHT_SUN_GLOW_SIZE = 2.2
 const DAY_NIGHT_MOON_SIZE = 0.95
 const DAY_NIGHT_MOON_GLOW_SIZE = 1.75
+const DAY_NIGHT_MOON_TEXTURE_URL = '/images/moon-texture.png'
+const DAY_NIGHT_MOON_TEXTURE_SIZE = 512
+const DAY_NIGHT_MOON_TEXTURE_EDGE_FEATHER = 0.028
+const DAY_NIGHT_CELESTIAL_BLEND_START = 0.38
+const DAY_NIGHT_CELESTIAL_BLEND_END = 0.62
 const DAY_NIGHT_CELESTIAL_RIM_OFFSET_PX = 32
 const DAY_NIGHT_CELESTIAL_SAFE_MARGIN_PX = 36
 const DAY_NIGHT_HORIZON_SCALE = 1.17
@@ -854,7 +938,7 @@ const DAY_RIM_COLOR = new THREE.Color('#a5dfff')
 const NIGHT_RIM_COLOR = new THREE.Color('#607eb8')
 const SUN_CORE_COLOR = new THREE.Color('#ffeeb0')
 const SUN_GLOW_COLOR = new THREE.Color('#fff2c2')
-const MOON_CORE_COLOR = new THREE.Color('#d2deff')
+const MOON_CORE_COLOR = new THREE.Color('#ffffff')
 const MOON_GLOW_COLOR = new THREE.Color('#bacfff')
 const HORIZON_DAY_COLOR = new THREE.Color('#a8e5ff')
 const HORIZON_NIGHT_COLOR = new THREE.Color('#2f4e7f')
@@ -1948,11 +2032,17 @@ export const createScene = async (
     { offset: 0.62, color: 'rgba(255,245,188,0.42)' },
     { offset: 1, color: 'rgba(255,245,188,0)' },
   ])
-  const moonTexture = createPelletRadialTexture(192, [
-    { offset: 0, color: 'rgba(255,255,255,0.95)' },
-    { offset: 0.54, color: 'rgba(216,227,255,0.84)' },
-    { offset: 1, color: 'rgba(216,227,255,0)' },
-  ])
+  const moonTexture =
+    (await createMoonTextureFromAsset(
+      DAY_NIGHT_MOON_TEXTURE_URL,
+      DAY_NIGHT_MOON_TEXTURE_SIZE,
+      DAY_NIGHT_MOON_TEXTURE_EDGE_FEATHER,
+    )) ??
+    createPelletRadialTexture(192, [
+      { offset: 0, color: 'rgba(255,255,255,0.95)' },
+      { offset: 0.54, color: 'rgba(216,227,255,0.84)' },
+      { offset: 1, color: 'rgba(216,227,255,0)' },
+    ])
   const moonGlowTexture = createPelletRadialTexture(192, [
     { offset: 0, color: 'rgba(196,214,255,0.78)' },
     { offset: 0.7, color: 'rgba(196,214,255,0.28)' },
@@ -7098,8 +7188,15 @@ diffuseColor.a *= retireEdge;`,
     )
     horizonSprite.visible = horizonMaterial.opacity > 0.001
 
-    const sunOpacity = smoothstep(0.08, 0.4, dayFactor)
-    const moonOpacity = smoothstep(0.08, 0.5, nightFactor)
+    const blendT = smoothstep(
+      DAY_NIGHT_CELESTIAL_BLEND_START,
+      DAY_NIGHT_CELESTIAL_BLEND_END,
+      dayFactor,
+    )
+    const sunBaseOpacity = smoothstep(0.08, 0.4, dayFactor)
+    const moonBaseOpacity = smoothstep(0.08, 0.5, nightFactor)
+    const sunOpacity = sunBaseOpacity * blendT
+    const moonOpacity = moonBaseOpacity * (1 - blendT)
     sunCoreMaterial.opacity = sunOpacity
     sunGlowMaterial.opacity = sunOpacity * 0.65
     moonCoreMaterial.opacity = moonOpacity
