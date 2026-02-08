@@ -3,6 +3,7 @@ import type { MenuPhase } from '../core/menuCamera'
 type MenuOverlayProps = {
   playerName: string
   playLabel: string
+  isExiting: boolean
   connectionStatus: string
   menuPhase: MenuPhase
   onPlayerNameChange: (value: string) => void
@@ -12,13 +13,14 @@ type MenuOverlayProps = {
 export function MenuOverlay({
   playerName,
   playLabel,
+  isExiting,
   connectionStatus,
   menuPhase,
   onPlayerNameChange,
   onPlay,
 }: MenuOverlayProps) {
   return (
-    <div className='menu-overlay'>
+    <div className={`menu-overlay${isExiting ? ' menu-overlay--exiting' : ''}`}>
       <div className='menu-hero'>
         <div className='menu-title menu-title--logo-o' aria-label='Slither World'>
           <span>Slither W</span>
@@ -51,7 +53,7 @@ export function MenuOverlay({
         <button
           type='button'
           className='menu-play-button'
-          disabled={connectionStatus !== 'Connected' || menuPhase === 'spawning'}
+          disabled={connectionStatus !== 'Connected' || menuPhase === 'spawning' || isExiting}
           onClick={onPlay}
         >
           {playLabel}

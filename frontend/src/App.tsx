@@ -36,6 +36,7 @@ import {
   MAX_SNAPSHOT_BUFFER,
   MENU_CAMERA_DISTANCE,
   MENU_CAMERA_VERTICAL_OFFSET,
+  MENU_OVERLAY_FADE_OUT_MS,
   MENU_TO_GAMEPLAY_BLEND_MS,
   MIN_INTERP_DELAY_MS,
   OFFSET_SMOOTHING,
@@ -117,6 +118,7 @@ export default function App() {
   const deathStartedAtMsRef = useRef<number | null>(null)
   const returnToMenuCommittedRef = useRef(false)
   const allowPreplayAutoResumeRef = useRef(true)
+  const menuOverlayExitTimerRef = useRef<number | null>(null)
   const menuDebugInfoRef = useRef<MenuFlowDebugInfo>({
     phase: 'preplay',
     hasSpawned: false,
@@ -137,6 +139,7 @@ export default function App() {
   const [activeRenderer, setActiveRenderer] = useState<RendererBackend | null>(null)
   const [rendererFallbackReason, setRendererFallbackReason] = useState<string | null>(null)
   const [menuPhase, setMenuPhase] = useState<MenuPhase>('preplay')
+  const [menuOverlayExiting, setMenuOverlayExiting] = useState(false)
   const [showPlayAgain, setShowPlayAgain] = useState(false)
   const [mountainDebug, setMountainDebug] = useState(getMountainDebug)
   const [lakeDebug, setLakeDebug] = useState(getLakeDebug)
@@ -158,7 +161,7 @@ export default function App() {
   const playerIdRef = useRef<string | null>(playerId)
   const playerNameRef = useRef(playerName)
   const isPlaying = menuPhase === 'playing'
-  const showMenuOverlay = menuPhase === 'preplay' || menuPhase === 'spawning'
+  const showMenuOverlay = menuPhase === 'preplay' || menuOverlayExiting
 
   const localPlayer = useMemo(() => {
     return gameState?.players.find((player) => player.id === playerId) ?? null
@@ -766,6 +769,11 @@ export default function App() {
       deathStartedAtMsRef.current = null
       returnToMenuCommittedRef.current = false
       allowPreplayAutoResumeRef.current = true
+      if (menuOverlayExitTimerRef.current !== null) {
+        window.clearTimeout(menuOverlayExitTimerRef.current)
+        menuOverlayExitTimerRef.current = null
+      }
+      setMenuOverlayExiting(false)
       pointerRef.current.active = false
       pointerRef.current.boost = false
       setConnectionStatus('Connecting')
@@ -848,6 +856,10 @@ export default function App() {
         window.clearInterval(sendIntervalRef.current)
       }
       sendIntervalRef.current = null
+      if (menuOverlayExitTimerRef.current !== null) {
+        window.clearTimeout(menuOverlayExitTimerRef.current)
+      }
+      menuOverlayExitTimerRef.current = null
     }
   }, [])
 
@@ -951,6 +963,12 @@ export default function App() {
   }
 
   const handleJoinRoom = () => {
+    if (menuOverlayExitTimerRef.current !== null) {
+      window.clearTimeout(menuOverlayExitTimerRef.current)
+      menuOverlayExitTimerRef.current = null
+    }
+    setMenuOverlayExiting(false)
+
     const nextRoom = sanitizeRoomName(roomInput)
     setRoomInput(nextRoom)
     if (nextRoom !== roomName) {
@@ -964,6 +982,7 @@ export default function App() {
   const handlePlay = () => {
     const socket = socketRef.current
     if (!socket || socket.readyState !== WebSocket.OPEN) return
+    if (menuOverlayExiting) return
 
     const trimmedName = playerName.trim()
     const nextName = trimmedName || createRandomPlayerName()
@@ -972,23 +991,41 @@ export default function App() {
     }
     playerNameRef.current = nextName
 
-    pointerRef.current.active = false
-    pointerRef.current.boost = false
-    localHeadRef.current = MENU_CAMERA_TARGET
-    cameraBlendRef.current = 0
-    cameraBlendStartMsRef.current = null
-    returnBlendStartMsRef.current = null
-    returnFromCameraQRef.current = { ...MENU_CAMERA.q }
-    returnFromDistanceRef.current = MENU_CAMERA_DISTANCE
-    returnFromVerticalOffsetRef.current = 0
-    localLifeSpawnedRef.current = false
-    deathStartedAtMsRef.current = null
-    returnToMenuCommittedRef.current = false
     allowPreplayAutoResumeRef.current = false
-    setMenuPhase('spawning')
+    setMenuOverlayExiting(true)
 
-    sendJoin(socket, true)
-    socket.send(encodeRespawn())
+    if (menuOverlayExitTimerRef.current !== null) {
+      window.clearTimeout(menuOverlayExitTimerRef.current)
+      menuOverlayExitTimerRef.current = null
+    }
+
+    menuOverlayExitTimerRef.current = window.setTimeout(() => {
+      menuOverlayExitTimerRef.current = null
+
+      const activeSocket = socketRef.current
+      if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN) {
+        setMenuOverlayExiting(false)
+        return
+      }
+
+      pointerRef.current.active = false
+      pointerRef.current.boost = false
+      localHeadRef.current = MENU_CAMERA_TARGET
+      cameraBlendRef.current = 0
+      cameraBlendStartMsRef.current = null
+      returnBlendStartMsRef.current = null
+      returnFromCameraQRef.current = { ...MENU_CAMERA.q }
+      returnFromDistanceRef.current = MENU_CAMERA_DISTANCE
+      returnFromVerticalOffsetRef.current = 0
+      localLifeSpawnedRef.current = false
+      deathStartedAtMsRef.current = null
+      returnToMenuCommittedRef.current = false
+      setMenuOverlayExiting(false)
+      setMenuPhase('spawning')
+
+      sendJoin(activeSocket, true)
+      activeSocket.send(encodeRespawn())
+    }, MENU_OVERLAY_FADE_OUT_MS)
   }
 
   const handleRendererModeChange = (value: string) => {
@@ -1024,6 +1061,7 @@ export default function App() {
             <MenuOverlay
               playerName={playerName}
               playLabel={showPlayAgain ? 'Play again' : 'Play'}
+              isExiting={menuOverlayExiting}
               connectionStatus={connectionStatus}
               menuPhase={menuPhase}
               onPlayerNameChange={setPlayerName}

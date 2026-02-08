@@ -47,12 +47,15 @@ Repo root (recommended for full stack):
 - Frontend renderer selection is controlled by URL query param `renderer=auto|webgpu|webgl` and persisted to localStorage key `spherical_snake_renderer`.
 - Default renderer mode is `auto`: it attempts WebGPU first and falls back to WebGL with a status note if WebGPU is unavailable or init fails.
 - Changing renderer mode from the control panel performs a full page reload (required because canvas context type cannot be switched in-place).
-- Startup flow is a pre-spawn hero menu over the live world: before gameplay starts, the menu shows only a pilot-name input and a `Play` button.
+- Startup flow is a pre-spawn hero menu over the live world: before gameplay starts, the menu shows only a pilot-name input and a primary play button (`Play` on initial load, `Play again` after returning from a death).
 - Pre-spawn hero copy is intentionally minimal: title text is `Slither World` with no subtitle or pilot-name label.
 - Pre-spawn menu controls use an immediate, clean drop-in CSS entrance (title/input/button short stagger) with reduced-motion fallback.
+- Clicking `Play`/`Play again` fades the menu overlay out before spawn/join is sent and before the menu-to-gameplay camera blend begins.
 - Pre-spawn menu overlay does not dim the scene; the live world remains fully visible behind the controls.
 - The client always boots into room `main` for the pre-spawn menu view (with live bots/world already running beneath the menu); room switching remains available from the in-game control panel after spawn.
 - Menu framing uses an elevated pre-spawn camera offset so the planet rim sits around mid-screen, then blends smoothly into snake-follow gameplay camera after clicking `Play`.
+- On local death, the client keeps gameplay view briefly for the death-to-pellet moment, then smoothly animates the camera back to the pre-spawn menu framing.
+- After that death-return, the player remains deferred-spawn on the menu (no automatic respawn) until they click `Play again`.
 - During pre-spawn, gameplay HUD/panels (bottom-left player-stats text, control panel, leaderboard) remain hidden and are restored after entering gameplay.
 - The in-game right-side leaderboard is a realtime overlay (not a card UI): it ranks the top 5 alive snakes in the active room by live score (`score + scoreFraction`) and shows a crown icon beside `#1`.
 - Renderer initialization is async; when touching render bootstrapping, ensure the latest server `Environment` and debug flags are applied immediately after scene creation to avoid visual collider desync from backend-authoritative collisions.

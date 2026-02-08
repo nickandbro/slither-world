@@ -242,6 +242,16 @@
   padding-top: min(10vh, 4.2rem);
   background: transparent;
   pointer-events: none;
+  opacity: 1;
+  transition: opacity 220ms ease;
+}
+
+.menu-overlay--exiting {
+  opacity: 0;
+}
+
+.menu-overlay--exiting .menu-hero {
+  pointer-events: none;
 }
 
 .menu-hero {
@@ -582,6 +592,10 @@ button:active {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .menu-overlay {
+    transition: none;
+  }
+
   .menu-title,
   .menu-input-row,
   .menu-play-button {
