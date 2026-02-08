@@ -31,6 +31,7 @@ import {
   CAMERA_DISTANCE_MAX,
   CAMERA_DISTANCE_MIN,
   CAMERA_ZOOM_SENSITIVITY,
+  DEATH_TO_MENU_DELAY_MS,
   MAX_EXTRAPOLATION_MS,
   MAX_SNAPSHOT_BUFFER,
   MENU_CAMERA_DISTANCE,
@@ -72,7 +73,6 @@ import {
   type ScoreRadialVisualState,
 } from './app/core/scoreRadial'
 import { ControlPanel } from './app/components/ControlPanel'
-import { GameOverOverlay } from './app/components/GameOverOverlay'
 import { MenuOverlay } from './app/components/MenuOverlay'
 import { RealtimeLeaderboard, type RealtimeLeaderboardEntry } from './app/components/RealtimeLeaderboard'
 
@@ -109,6 +109,15 @@ export default function App() {
   const inputEnabledRef = useRef(false)
   const cameraBlendRef = useRef(0)
   const cameraBlendStartMsRef = useRef<number | null>(null)
+  const returnBlendStartMsRef = useRef<number | null>(null)
+  const returnFromCameraQRef = useRef<Camera['q']>({ ...MENU_CAMERA.q })
+  const returnFromDistanceRef = useRef(MENU_CAMERA_DISTANCE)
+  const returnFromVerticalOffsetRef = useRef(0)
+  const localLifeSpawnedRef = useRef(false)
+  const deathStartedAtMsRef = useRef<number | null>(null)
+  const returnToMenuCommittedRef = useRef(false)
+  const allowPreplayAutoResumeRef = useRef(true)
+  const hasSpawnedOnceRef = useRef(false)
   const menuDebugInfoRef = useRef<MenuFlowDebugInfo>({
     phase: 'preplay',
     hasSpawned: false,
@@ -129,6 +138,7 @@ export default function App() {
   const [activeRenderer, setActiveRenderer] = useState<RendererBackend | null>(null)
   const [rendererFallbackReason, setRendererFallbackReason] = useState<string | null>(null)
   const [menuPhase, setMenuPhase] = useState<MenuPhase>('preplay')
+  const [hasSpawnedOnce, setHasSpawnedOnce] = useState(false)
   const [mountainDebug, setMountainDebug] = useState(getMountainDebug)
   const [lakeDebug, setLakeDebug] = useState(getLakeDebug)
   const [treeDebug, setTreeDebug] = useState(getTreeDebug)
@@ -149,6 +159,7 @@ export default function App() {
   const playerIdRef = useRef<string | null>(playerId)
   const playerNameRef = useRef(playerName)
   const isPlaying = menuPhase === 'playing'
+  const showMenuOverlay = menuPhase === 'preplay' || menuPhase === 'spawning'
 
   const localPlayer = useMemo(() => {
     return gameState?.players.find((player) => player.id === playerId) ?? null
@@ -188,6 +199,7 @@ export default function App() {
 
   useEffect(() => {
     if (menuPhase !== 'preplay') return
+    if (!allowPreplayAutoResumeRef.current) return
     if (!localPlayer || !localPlayer.alive || localPlayer.snake.length === 0) return
     cameraBlendRef.current = 1
     cameraBlendStartMsRef.current = null
@@ -260,6 +272,12 @@ export default function App() {
     if (menuPhase !== 'playing') {
       pointerRef.current.active = false
       pointerRef.current.boost = false
+    }
+    if (menuPhase === 'preplay' && !allowPreplayAutoResumeRef.current) {
+      const socket = socketRef.current
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(encodeJoin(playerNameRef.current, playerIdRef.current, true))
+      }
     }
   }, [menuPhase])
 
@@ -384,19 +402,70 @@ export default function App() {
             const phase = menuPhaseRef.current
             const nowMs = performance.now()
 
+            if (hasSpawnedSnake) {
+              deathStartedAtMsRef.current = null
+              if (!localLifeSpawnedRef.current) {
+                localLifeSpawnedRef.current = true
+                if (!hasSpawnedOnceRef.current) {
+                  hasSpawnedOnceRef.current = true
+                  setHasSpawnedOnce(true)
+                }
+              }
+            } else if (localLifeSpawnedRef.current && deathStartedAtMsRef.current === null) {
+              deathStartedAtMsRef.current = nowMs
+              pointerRef.current.active = false
+              pointerRef.current.boost = false
+            }
+
+            if (
+              phase === 'playing' &&
+              localLifeSpawnedRef.current &&
+              deathStartedAtMsRef.current !== null &&
+              nowMs - deathStartedAtMsRef.current >= DEATH_TO_MENU_DELAY_MS
+            ) {
+              const sourceCameraQ = gameplayCamera.active ? gameplayCamera.q : cameraRef.current.q
+              returnFromCameraQRef.current = { ...sourceCameraQ }
+              returnFromDistanceRef.current = renderCameraDistanceRef.current
+              returnFromVerticalOffsetRef.current = renderCameraVerticalOffsetRef.current
+              returnBlendStartMsRef.current = nowMs
+              returnToMenuCommittedRef.current = false
+              localLifeSpawnedRef.current = false
+              deathStartedAtMsRef.current = null
+              const socket = socketRef.current
+              if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(encodeJoin(playerNameRef.current, playerIdRef.current, true))
+              }
+              setMenuPhase('returning')
+            }
+
             let blend = cameraBlendRef.current
             if (phase === 'preplay') {
               blend = 0
               cameraBlendStartMsRef.current = null
-            } else if (hasSpawnedSnake && gameplayCamera.active) {
-              if (cameraBlendStartMsRef.current === null) {
-                cameraBlendStartMsRef.current = nowMs
+              returnBlendStartMsRef.current = null
+            } else if (phase === 'spawning') {
+              if (hasSpawnedSnake && gameplayCamera.active) {
+                if (cameraBlendStartMsRef.current === null) {
+                  cameraBlendStartMsRef.current = nowMs
+                }
+                const elapsed = nowMs - cameraBlendStartMsRef.current
+                blend = clamp(elapsed / MENU_TO_GAMEPLAY_BLEND_MS, 0, 1)
+              } else {
+                blend = 0
+                cameraBlendStartMsRef.current = null
               }
-              const elapsed = nowMs - cameraBlendStartMsRef.current
+              returnBlendStartMsRef.current = null
+            } else if (phase === 'returning') {
+              if (returnBlendStartMsRef.current === null) {
+                returnBlendStartMsRef.current = nowMs
+              }
+              const elapsed = nowMs - returnBlendStartMsRef.current
               blend = clamp(elapsed / MENU_TO_GAMEPLAY_BLEND_MS, 0, 1)
-            } else {
-              blend = 0
               cameraBlendStartMsRef.current = null
+            } else {
+              blend = 1
+              cameraBlendStartMsRef.current = null
+              returnBlendStartMsRef.current = null
             }
             cameraBlendRef.current = blend
             const easedBlend = easeInOutCubic(blend)
@@ -420,12 +489,36 @@ export default function App() {
               if (blend >= 0.999 && hasSpawnedSnake) {
                 setMenuPhase('playing')
               }
+            } else if (phase === 'returning') {
+              renderCamera = {
+                active: true,
+                q: slerpQuaternion(returnFromCameraQRef.current, MENU_CAMERA.q, easedBlend),
+              }
+              renderDistance =
+                returnFromDistanceRef.current +
+                (MENU_CAMERA_DISTANCE - returnFromDistanceRef.current) * easedBlend
+              renderVerticalOffset =
+                returnFromVerticalOffsetRef.current +
+                (MENU_CAMERA_VERTICAL_OFFSET - returnFromVerticalOffsetRef.current) * easedBlend
+              if (blend >= 0.999 && !returnToMenuCommittedRef.current) {
+                returnToMenuCommittedRef.current = true
+                allowPreplayAutoResumeRef.current = false
+                const socket = socketRef.current
+                if (socket && socket.readyState === WebSocket.OPEN) {
+                  socket.send(encodeJoin(playerNameRef.current, playerIdRef.current, true))
+                }
+                setMenuPhase('preplay')
+              }
             }
 
             cameraRef.current = renderCamera
             renderCameraDistanceRef.current = renderDistance
             renderCameraVerticalOffsetRef.current = renderVerticalOffset
             localHeadRef.current = hasSpawnedSnake && localHead ? normalize(localHead) : MENU_CAMERA_TARGET
+            if (!hasSpawnedSnake) {
+              pointerRef.current.active = false
+              pointerRef.current.boost = false
+            }
             boostActive =
               inputEnabledRef.current &&
               !!localSnapshotPlayer &&
@@ -669,6 +762,14 @@ export default function App() {
       renderCameraVerticalOffsetRef.current = MENU_CAMERA_VERTICAL_OFFSET
       cameraBlendRef.current = 0
       cameraBlendStartMsRef.current = null
+      returnBlendStartMsRef.current = null
+      returnFromCameraQRef.current = { ...MENU_CAMERA.q }
+      returnFromDistanceRef.current = MENU_CAMERA_DISTANCE
+      returnFromVerticalOffsetRef.current = 0
+      localLifeSpawnedRef.current = false
+      deathStartedAtMsRef.current = null
+      returnToMenuCommittedRef.current = false
+      allowPreplayAutoResumeRef.current = true
       pointerRef.current.active = false
       pointerRef.current.boost = false
       setConnectionStatus('Connecting')
@@ -853,13 +954,6 @@ export default function App() {
     cameraDistanceRef.current = nextDistance
   }
 
-  const requestRespawn = () => {
-    const socket = socketRef.current
-    if (!socket || socket.readyState !== WebSocket.OPEN) return
-    setMenuPhase('playing')
-    socket.send(encodeRespawn())
-  }
-
   const handleJoinRoom = () => {
     const nextRoom = sanitizeRoomName(roomInput)
     setRoomInput(nextRoom)
@@ -887,6 +981,14 @@ export default function App() {
     localHeadRef.current = MENU_CAMERA_TARGET
     cameraBlendRef.current = 0
     cameraBlendStartMsRef.current = null
+    returnBlendStartMsRef.current = null
+    returnFromCameraQRef.current = { ...MENU_CAMERA.q }
+    returnFromDistanceRef.current = MENU_CAMERA_DISTANCE
+    returnFromVerticalOffsetRef.current = 0
+    localLifeSpawnedRef.current = false
+    deathStartedAtMsRef.current = null
+    returnToMenuCommittedRef.current = false
+    allowPreplayAutoResumeRef.current = false
     setMenuPhase('spawning')
 
     sendJoin(socket, true)
@@ -922,16 +1024,16 @@ export default function App() {
             <canvas ref={hudCanvasRef} className='hud-canvas' aria-hidden='true' />
             <div ref={boostFxRef} className='boost-fx' aria-hidden='true' />
           </div>
-          {!isPlaying && (
+          {showMenuOverlay && (
             <MenuOverlay
               playerName={playerName}
+              playLabel={hasSpawnedOnce ? 'Play again' : 'Play'}
               connectionStatus={connectionStatus}
               menuPhase={menuPhase}
               onPlayerNameChange={setPlayerName}
               onPlay={handlePlay}
             />
           )}
-          {isPlaying && localPlayer && !localPlayer.alive && <GameOverOverlay onRespawn={requestRespawn} />}
         </div>
 
         {isPlaying && (

@@ -2,7 +2,7 @@ import { updateCamera } from '../../game/camera'
 import { IDENTITY_QUAT, clamp, normalize, normalizeQuat } from '../../game/math'
 import type { Camera, Point } from '../../game/types'
 
-export type MenuPhase = 'preplay' | 'spawning' | 'playing'
+export type MenuPhase = 'preplay' | 'spawning' | 'playing' | 'returning'
 
 export type MenuFlowDebugInfo = {
   phase: MenuPhase

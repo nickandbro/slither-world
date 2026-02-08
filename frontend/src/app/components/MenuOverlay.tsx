@@ -2,6 +2,7 @@ import type { MenuPhase } from '../core/menuCamera'
 
 type MenuOverlayProps = {
   playerName: string
+  playLabel: string
   connectionStatus: string
   menuPhase: MenuPhase
   onPlayerNameChange: (value: string) => void
@@ -10,6 +11,7 @@ type MenuOverlayProps = {
 
 export function MenuOverlay({
   playerName,
+  playLabel,
   connectionStatus,
   menuPhase,
   onPlayerNameChange,
@@ -52,7 +54,7 @@ export function MenuOverlay({
           disabled={connectionStatus !== 'Connected' || menuPhase === 'spawning'}
           onClick={onPlay}
         >
-          Play
+          {playLabel}
         </button>
       </div>
     </div>
