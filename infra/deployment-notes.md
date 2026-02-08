@@ -21,6 +21,9 @@
 ## Latest Deploy (2026-02-08)
 - Control-plane container restarted on `snake-control-prod` to `prod-20260208-ccdeb07` and `ROOM_IMAGE` updated to match.
 - Worker deployed (`snake-game`) version id: `c4f59b01-c616-45c8-99be-5a39f5dca1ad`.
+- Room fleet rollout note:
+  - Existing warm room servers do not automatically restart/pull the new `ROOM_IMAGE`.
+  - After updating `ROOM_IMAGE`, delete existing room VM(s) and restart the control-plane so it reseeds the registry and provisions fresh rooms from the new image.
 - Frontend perf parity tweak:
   - Split `vendor` chunk (node_modules) away from app chunk.
   - Minimal JS obfuscation applies only to pure app (`src/`) chunks (no string-array/split-string transforms).
