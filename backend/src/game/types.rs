@@ -30,7 +30,13 @@ pub struct Digestion {
 #[derive(Debug, Clone)]
 pub enum PelletState {
     Idle,
-    Attracting { target_player_id: String },
+    Attracting {
+        target_player_id: String,
+    },
+    Evasive {
+        owner_player_id: String,
+        expires_at_ms: i64,
+    },
 }
 
 #[derive(Debug, Clone)]

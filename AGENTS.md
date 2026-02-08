@@ -80,6 +80,7 @@ Repo root (recommended for full stack):
 - Small pellet digestion behavior is merged per player per tick: consumed pellet growth fractions are aggregated into one digestion event with weighted bump strength; growth is applied authoritatively at tail arrival (including fractional tail extension before full-node commits).
 - Tail node commits from digestion are paced at a maximum of one node per movement substep; excess fractional growth stays in `tail_extension` for later substeps to avoid burst tail jumps.
 - Pellet economy is intentionally decoupled between growth and score: big pellets grant `0.10` physical growth, small pellets grant `1/20` of big growth (`0.005`), and scoring is normalized in big-pellet units so `1` big pellet still yields `+1` score.
+- Early-length evasive pellets are server-authored: connected human players with snake length `8..=20` receive owner-bound evasive big-pellet opportunities on a per-player cooldown (~60s with jitter), spawned near the owner in a locally safe area away from other heads/colliders. Evasive pellets use smooth, slight zig-zag motion and only evade while the bound owner is actively chasing; near-mouth behavior is open capture (owner, other humans, or bots): when within suction radius of any mouth they are pulled toward that mouth and then consumed once inside consume angle. Evasive movement is capped below boost top speed so boosted snakes can still catch them.
 
 ## Debug / Test Utilities
 - `scripts/debug-kill.sh` — helper to hit the debug kill endpoint (defaults to room `main`, target `bot`).

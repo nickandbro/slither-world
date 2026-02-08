@@ -1,8 +1,19 @@
 use super::constants::{
     BASE_PELLET_COUNT, BASE_SPEED, BIG_PELLET_GROWTH_FRACTION, BOOST_MULTIPLIER,
     BOOST_NODE_DRAIN_PER_SEC, BOOST_SCORE_DRAIN_PER_SEC, BOT_BOOST_DISTANCE, BOT_COUNT, COLOR_POOL,
-    DEATH_PELLET_SIZE_MAX, DEATH_PELLET_SIZE_MIN, MAX_PELLETS, MAX_SPAWN_ATTEMPTS,
-    MIN_SURVIVAL_LENGTH, NODE_QUEUE_SIZE, OXYGEN_DRAIN_PER_SEC, OXYGEN_MAX, PELLET_SIZE_ENCODE_MAX,
+    DEATH_PELLET_SIZE_MAX, DEATH_PELLET_SIZE_MIN, EVASIVE_PELLET_CHASE_CONE_ANGLE,
+    EVASIVE_PELLET_CHASE_MAX_ANGLE_RATIO, EVASIVE_PELLET_COOLDOWN_JITTER_MS,
+    EVASIVE_PELLET_COOLDOWN_MS, EVASIVE_PELLET_EVADE_FADE_RADIUS_RATIO,
+    EVASIVE_PELLET_EVADE_FULL_RADIUS_RATIO, EVASIVE_PELLET_EVADE_MIN_FACTOR,
+    EVASIVE_PELLET_EVADE_RADIUS, EVASIVE_PELLET_EVADE_SPEED, EVASIVE_PELLET_EVADE_STEP_MAX,
+    EVASIVE_PELLET_LIFETIME_MS, EVASIVE_PELLET_MAX_LEN, EVASIVE_PELLET_MAX_PER_PLAYER,
+    EVASIVE_PELLET_MAX_STEP_PER_TICK, EVASIVE_PELLET_MIN_LEN,
+    EVASIVE_PELLET_OTHER_HEAD_EXCLUSION_ANGLE, EVASIVE_PELLET_OWNER_NEAR_ANGLE_MAX,
+    EVASIVE_PELLET_OWNER_NEAR_ANGLE_MIN, EVASIVE_PELLET_RETRY_DELAY_MS, EVASIVE_PELLET_SIZE_MAX,
+    EVASIVE_PELLET_SIZE_MIN, EVASIVE_PELLET_SPAWN_ATTEMPTS, EVASIVE_PELLET_SUCTION_RADIUS,
+    EVASIVE_PELLET_SUCTION_SPEED, EVASIVE_PELLET_SUCTION_STEP_MAX, EVASIVE_PELLET_ZIGZAG_HZ,
+    EVASIVE_PELLET_ZIGZAG_STRENGTH, MAX_PELLETS, MAX_SPAWN_ATTEMPTS, MIN_SURVIVAL_LENGTH,
+    NODE_QUEUE_SIZE, OXYGEN_DRAIN_PER_SEC, OXYGEN_MAX, PELLET_SIZE_ENCODE_MAX,
     PELLET_SIZE_ENCODE_MIN, PLAYER_TIMEOUT_MS, RESPAWN_COOLDOWN_MS, RESPAWN_RETRY_MS,
     SMALL_PELLET_ATTRACT_RADIUS, SMALL_PELLET_ATTRACT_SPEED, SMALL_PELLET_ATTRACT_STEP_MAX_RATIO,
     SMALL_PELLET_CONSUME_ANGLE, SMALL_PELLET_DIGESTION_STRENGTH,
@@ -81,6 +92,7 @@ struct RoomState {
     players: HashMap<String, Player>,
     pellets: Vec<Pellet>,
     next_pellet_id: u32,
+    next_evasive_spawn_at: HashMap<String, i64>,
     environment: Environment,
 }
 
@@ -196,6 +208,7 @@ impl Room {
                 players: HashMap::new(),
                 pellets: Vec::new(),
                 next_pellet_id: 0,
+                next_evasive_spawn_at: HashMap::new(),
                 environment: Environment::generate(),
             }),
             running: AtomicBool::new(false),
@@ -690,8 +703,14 @@ impl RoomState {
         self.players.values().filter(|player| player.is_bot).count()
     }
 
+    fn prune_evasive_spawn_timers(&mut self) {
+        self.next_evasive_spawn_at
+            .retain(|player_id, _| self.players.contains_key(player_id));
+    }
+
     fn remove_bots(&mut self) {
         self.players.retain(|_, player| !player.is_bot);
+        self.prune_evasive_spawn_timers();
     }
 
     fn next_bot_index(&self) -> usize {
@@ -1170,6 +1189,154 @@ impl RoomState {
         None
     }
 
+    fn next_evasive_spawn_delay_ms(rng: &mut impl Rng) -> i64 {
+        let jitter = if EVASIVE_PELLET_COOLDOWN_JITTER_MS > 0 {
+            rng.gen_range(-EVASIVE_PELLET_COOLDOWN_JITTER_MS..=EVASIVE_PELLET_COOLDOWN_JITTER_MS)
+        } else {
+            0
+        };
+        (EVASIVE_PELLET_COOLDOWN_MS + jitter).max(EVASIVE_PELLET_RETRY_DELAY_MS)
+    }
+
+    fn is_evasive_eligible_player(player: &Player) -> bool {
+        if player.is_bot || !player.connected || !player.alive {
+            return false;
+        }
+        (EVASIVE_PELLET_MIN_LEN..=EVASIVE_PELLET_MAX_LEN).contains(&player.snake.len())
+    }
+
+    fn active_evasive_pellet_count_for_owner(&self, owner_player_id: &str) -> usize {
+        self.pellets
+            .iter()
+            .filter(|pellet| match &pellet.state {
+                PelletState::Evasive {
+                    owner_player_id: state_owner,
+                    ..
+                } => state_owner == owner_player_id,
+                _ => false,
+            })
+            .count()
+    }
+
+    fn is_far_enough_from_other_heads(&self, owner_player_id: &str, point: Point) -> bool {
+        let min_dot = EVASIVE_PELLET_OTHER_HEAD_EXCLUSION_ANGLE.cos();
+        for (player_id, player) in &self.players {
+            if player_id == owner_player_id || !player.alive {
+                continue;
+            }
+            let Some(head) = player.snake.first() else {
+                continue;
+            };
+            let head_point = Point {
+                x: head.x,
+                y: head.y,
+                z: head.z,
+            };
+            if dot(head_point, point) > min_dot {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn pick_evasive_spawn_for_owner(
+        &self,
+        owner_player_id: &str,
+        rng: &mut impl Rng,
+    ) -> Option<Point> {
+        let owner = self.players.get(owner_player_id)?;
+        let head = owner.snake.first()?;
+        let head = normalize(Point {
+            x: head.x,
+            y: head.y,
+            z: head.z,
+        });
+
+        let owner_min_dot = EVASIVE_PELLET_OWNER_NEAR_ANGLE_MIN.cos();
+        for _ in 0..EVASIVE_PELLET_SPAWN_ATTEMPTS {
+            let target = Self::random_unit_point(rng);
+            let angle = rng.gen_range(
+                EVASIVE_PELLET_OWNER_NEAR_ANGLE_MIN..=EVASIVE_PELLET_OWNER_NEAR_ANGLE_MAX,
+            );
+            let candidate = normalize(rotate_toward(head, target, angle));
+            if dot(head, candidate) > owner_min_dot {
+                continue;
+            }
+            if self.is_invalid_pellet_spawn(candidate) {
+                continue;
+            }
+            if !self.is_far_enough_from_other_heads(owner_player_id, candidate) {
+                continue;
+            }
+            return Some(candidate);
+        }
+        None
+    }
+
+    fn spawn_evasive_pellets(&mut self, now_ms: i64) {
+        let mut rng = rand::thread_rng();
+        let eligible_player_ids: Vec<String> = self
+            .players
+            .iter()
+            .filter_map(|(player_id, player)| {
+                if Self::is_evasive_eligible_player(player) {
+                    Some(player_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if eligible_player_ids.is_empty() {
+            return;
+        }
+
+        for owner_player_id in eligible_player_ids {
+            if self.active_evasive_pellet_count_for_owner(&owner_player_id)
+                >= EVASIVE_PELLET_MAX_PER_PLAYER
+            {
+                continue;
+            }
+            let next_spawn_at = self
+                .next_evasive_spawn_at
+                .entry(owner_player_id.clone())
+                .or_insert_with(|| now_ms + Self::next_evasive_spawn_delay_ms(&mut rng));
+            if now_ms < *next_spawn_at {
+                continue;
+            }
+
+            let Some(spawn_point) = self.pick_evasive_spawn_for_owner(&owner_player_id, &mut rng)
+            else {
+                self.next_evasive_spawn_at
+                    .insert(owner_player_id, now_ms + EVASIVE_PELLET_RETRY_DELAY_MS);
+                continue;
+            };
+
+            let size = rng.gen_range(EVASIVE_PELLET_SIZE_MIN..=EVASIVE_PELLET_SIZE_MAX);
+            let pellet_id = self.next_small_pellet_id();
+            self.pellets.push(Pellet {
+                id: pellet_id,
+                normal: spawn_point,
+                color_index: rng.gen_range(0..SMALL_PELLET_COLOR_COUNT),
+                base_size: size,
+                current_size: size,
+                growth_fraction: BIG_PELLET_GROWTH_FRACTION,
+                state: PelletState::Evasive {
+                    owner_player_id: owner_player_id.clone(),
+                    expires_at_ms: now_ms + EVASIVE_PELLET_LIFETIME_MS,
+                },
+            });
+            self.next_evasive_spawn_at.insert(
+                owner_player_id,
+                now_ms + Self::next_evasive_spawn_delay_ms(&mut rng),
+            );
+        }
+
+        if self.pellets.len() > MAX_PELLETS {
+            let excess = self.pellets.len() - MAX_PELLETS;
+            self.pellets.drain(0..excess);
+        }
+    }
+
     fn ensure_pellets(&mut self) {
         if self.pellets.len() > MAX_PELLETS {
             let excess = self.pellets.len() - MAX_PELLETS;
@@ -1317,6 +1484,144 @@ impl RoomState {
         best.map(|(id, attractor, _)| (id, attractor))
     }
 
+    fn find_consuming_player(
+        pellet: Point,
+        consume_cos: f64,
+        attractors: &HashMap<String, HeadAttractor>,
+    ) -> Option<String> {
+        let mut best: Option<(String, f64)> = None;
+        for (player_id, attractor) in attractors {
+            let consume_dot = clamp(dot(pellet, attractor.mouth), -1.0, 1.0);
+            if consume_dot < consume_cos {
+                continue;
+            }
+            match best {
+                Some((_, best_dot)) if consume_dot <= best_dot => {}
+                _ => best = Some((player_id.clone(), consume_dot)),
+            }
+        }
+        best.map(|(player_id, _)| player_id)
+    }
+
+    fn find_suction_target(
+        pellet: Point,
+        suction_cos: f64,
+        attractors: &HashMap<String, HeadAttractor>,
+    ) -> Option<(String, HeadAttractor)> {
+        let mut best: Option<(String, HeadAttractor, f64)> = None;
+        for (player_id, attractor) in attractors {
+            let suction_dot = clamp(dot(pellet, attractor.mouth), -1.0, 1.0);
+            if suction_dot < suction_cos {
+                continue;
+            }
+            match best {
+                Some((_, _, best_dot)) if suction_dot <= best_dot => {}
+                _ => best = Some((player_id.clone(), *attractor, suction_dot)),
+            }
+        }
+        best.map(|(player_id, attractor, _)| (player_id, attractor))
+    }
+
+    fn evasive_speed_factor(owner_dot: f64) -> f64 {
+        let owner_angle = clamp(owner_dot, -1.0, 1.0).acos();
+        let full_angle = EVASIVE_PELLET_EVADE_RADIUS * EVASIVE_PELLET_EVADE_FULL_RADIUS_RATIO;
+        let fade_angle = EVASIVE_PELLET_EVADE_RADIUS * EVASIVE_PELLET_EVADE_FADE_RADIUS_RATIO;
+        let fade_span = (fade_angle - full_angle).max(1e-6);
+        let t = clamp((owner_angle - full_angle) / fade_span, 0.0, 1.0);
+        let smooth = t * t * (3.0 - 2.0 * t);
+        EVASIVE_PELLET_EVADE_MIN_FACTOR + (1.0 - EVASIVE_PELLET_EVADE_MIN_FACTOR) * (1.0 - smooth)
+    }
+
+    fn is_owner_chasing_evasive(owner_attractor: HeadAttractor, pellet: Point) -> bool {
+        let head_dot = clamp(dot(owner_attractor.head, pellet), -1.0, 1.0);
+        let head_angle = head_dot.acos();
+        if head_angle > EVASIVE_PELLET_EVADE_RADIUS * EVASIVE_PELLET_CHASE_MAX_ANGLE_RATIO {
+            return false;
+        }
+
+        let toward = Point {
+            x: pellet.x - owner_attractor.head.x * head_dot,
+            y: pellet.y - owner_attractor.head.y * head_dot,
+            z: pellet.z - owner_attractor.head.z * head_dot,
+        };
+        let toward_len = length(toward);
+        if toward_len <= 1e-6 {
+            return true;
+        }
+        let toward_dir = Point {
+            x: toward.x / toward_len,
+            y: toward.y / toward_len,
+            z: toward.z / toward_len,
+        };
+
+        dot(owner_attractor.forward, toward_dir) >= EVASIVE_PELLET_CHASE_CONE_ANGLE.cos()
+    }
+
+    fn evasive_tangent_direction(
+        pellet: &Pellet,
+        owner_attractor: HeadAttractor,
+        now_ms: i64,
+    ) -> Option<Point> {
+        let owner_dot = clamp(dot(pellet.normal, owner_attractor.head), -1.0, 1.0);
+        let toward_owner = Point {
+            x: owner_attractor.head.x - pellet.normal.x * owner_dot,
+            y: owner_attractor.head.y - pellet.normal.y * owner_dot,
+            z: owner_attractor.head.z - pellet.normal.z * owner_dot,
+        };
+        let mut away = Point {
+            x: -toward_owner.x,
+            y: -toward_owner.y,
+            z: -toward_owner.z,
+        };
+        if length(away) <= 1e-6 {
+            away = Point {
+                x: owner_attractor.forward.x
+                    - pellet.normal.x * dot(owner_attractor.forward, pellet.normal),
+                y: owner_attractor.forward.y
+                    - pellet.normal.y * dot(owner_attractor.forward, pellet.normal),
+                z: owner_attractor.forward.z
+                    - pellet.normal.z * dot(owner_attractor.forward, pellet.normal),
+            };
+        }
+        let away_len = length(away);
+        if away_len <= 1e-6 {
+            return None;
+        }
+        let away_dir = Point {
+            x: away.x / away_len,
+            y: away.y / away_len,
+            z: away.z / away_len,
+        };
+        let mut strafe = cross(pellet.normal, away_dir);
+        let strafe_len = length(strafe);
+        if strafe_len <= 1e-6 {
+            return Some(away_dir);
+        }
+        strafe = Point {
+            x: strafe.x / strafe_len,
+            y: strafe.y / strafe_len,
+            z: strafe.z / strafe_len,
+        };
+
+        let phase = now_ms as f64 * 0.001 * EVASIVE_PELLET_ZIGZAG_HZ * PI * 2.0
+            + pellet.id as f64 * 0.754_877_666_246_692_7;
+        let zigzag = phase.sin() * EVASIVE_PELLET_ZIGZAG_STRENGTH;
+        let desired = Point {
+            x: away_dir.x + strafe.x * zigzag,
+            y: away_dir.y + strafe.y * zigzag,
+            z: away_dir.z + strafe.z * zigzag,
+        };
+        let desired_len = length(desired);
+        if desired_len <= 1e-6 {
+            return Some(away_dir);
+        }
+        Some(Point {
+            x: desired.x / desired_len,
+            y: desired.y / desired_len,
+            z: desired.z / desired_len,
+        })
+    }
+
     fn consume_small_pellets(&mut self, consumed: HashMap<String, (usize, f64)>) {
         for (player_id, (count, growth_fraction_total)) in consumed {
             let Some(player) = self.players.get_mut(&player_id) else {
@@ -1352,25 +1657,98 @@ impl RoomState {
         if self.pellets.is_empty() {
             return;
         }
+        let now_ms = Self::now_millis();
         let attractors = self.build_head_attractors();
         let consume_cos = SMALL_PELLET_CONSUME_ANGLE.cos();
+        let suction_cos = EVASIVE_PELLET_SUCTION_RADIUS.cos();
         // Cap angular travel per tick so attracted pellets visibly move/shrink toward the mouth
         // instead of snapping directly into the consume angle in one update.
-        let step = (SMALL_PELLET_ATTRACT_SPEED * dt_seconds)
+        let attract_step = (SMALL_PELLET_ATTRACT_SPEED * dt_seconds)
             .min(SMALL_PELLET_ATTRACT_RADIUS * SMALL_PELLET_ATTRACT_STEP_MAX_RATIO);
+        let evasive_step = (EVASIVE_PELLET_EVADE_SPEED * dt_seconds)
+            .min(EVASIVE_PELLET_EVADE_STEP_MAX)
+            .min(EVASIVE_PELLET_MAX_STEP_PER_TICK);
+        let suction_step =
+            (EVASIVE_PELLET_SUCTION_SPEED * dt_seconds).min(EVASIVE_PELLET_SUCTION_STEP_MAX);
         let mut consumed_by: HashMap<String, (usize, f64)> = HashMap::new();
         let mut i = 0usize;
         while i < self.pellets.len() {
-            let target = {
-                let pellet = &self.pellets[i];
-                match &pellet.state {
-                    PelletState::Attracting { target_player_id } => attractors
-                        .get(target_player_id)
-                        .copied()
-                        .map(|attractor| (target_player_id.clone(), attractor))
-                        .or_else(|| Self::find_pellet_target(pellet.normal, &attractors)),
-                    PelletState::Idle => Self::find_pellet_target(pellet.normal, &attractors),
+            let pellet_state = self.pellets[i].state.clone();
+
+            if let PelletState::Evasive {
+                owner_player_id,
+                expires_at_ms,
+            } = pellet_state
+            {
+                if expires_at_ms <= now_ms {
+                    self.pellets.swap_remove(i);
+                    continue;
                 }
+
+                if let Some(player_id) =
+                    Self::find_consuming_player(self.pellets[i].normal, consume_cos, &attractors)
+                {
+                    let entry = consumed_by.entry(player_id).or_insert((0, 0.0));
+                    entry.0 += 1;
+                    entry.1 += self.pellets[i].growth_fraction;
+                    self.pellets.swap_remove(i);
+                    continue;
+                }
+
+                let Some(owner_attractor) = attractors.get(&owner_player_id).copied() else {
+                    self.pellets.swap_remove(i);
+                    continue;
+                };
+                let owner_is_chasing =
+                    Self::is_owner_chasing_evasive(owner_attractor, self.pellets[i].normal);
+                let suction_target =
+                    Self::find_suction_target(self.pellets[i].normal, suction_cos, &attractors);
+
+                {
+                    let pellet = &mut self.pellets[i];
+                    if let Some((_, suction_attractor)) = suction_target {
+                        pellet.normal =
+                            rotate_toward(pellet.normal, suction_attractor.mouth, suction_step);
+                    } else if owner_is_chasing {
+                        let owner_dot = clamp(dot(pellet.normal, owner_attractor.head), -1.0, 1.0);
+                        let speed_factor = Self::evasive_speed_factor(owner_dot);
+                        let step = (evasive_step * speed_factor).max(1e-4);
+                        if let Some(tangent_dir) =
+                            Self::evasive_tangent_direction(pellet, owner_attractor, now_ms)
+                        {
+                            let target = normalize(Point {
+                                x: pellet.normal.x + tangent_dir.x * step,
+                                y: pellet.normal.y + tangent_dir.y * step,
+                                z: pellet.normal.z + tangent_dir.z * step,
+                            });
+                            pellet.normal = rotate_toward(pellet.normal, target, step);
+                        }
+                    }
+                    pellet.current_size = pellet.base_size;
+                }
+
+                if let Some(player_id) =
+                    Self::find_consuming_player(self.pellets[i].normal, consume_cos, &attractors)
+                {
+                    let entry = consumed_by.entry(player_id).or_insert((0, 0.0));
+                    entry.0 += 1;
+                    entry.1 += self.pellets[i].growth_fraction;
+                    self.pellets.swap_remove(i);
+                    continue;
+                }
+
+                i += 1;
+                continue;
+            }
+
+            let target = match pellet_state {
+                PelletState::Attracting { target_player_id } => attractors
+                    .get(&target_player_id)
+                    .copied()
+                    .map(|attractor| (target_player_id, attractor))
+                    .or_else(|| Self::find_pellet_target(self.pellets[i].normal, &attractors)),
+                PelletState::Idle => Self::find_pellet_target(self.pellets[i].normal, &attractors),
+                PelletState::Evasive { .. } => None,
             };
 
             if let Some((target_id, attractor)) = target {
@@ -1388,7 +1766,7 @@ impl RoomState {
                     continue;
                 }
 
-                pellet.normal = rotate_toward(pellet.normal, attractor.mouth, step);
+                pellet.normal = rotate_toward(pellet.normal, attractor.mouth, attract_step);
                 let after_dot = clamp(dot(pellet.normal, attractor.mouth), -1.0, 1.0);
                 if after_dot >= consume_cos {
                     let entry = consumed_by.entry(target_id).or_insert((0, 0.0));
@@ -1545,7 +1923,10 @@ impl RoomState {
     }
 
     fn min_boost_start_score(player: &Player) -> i64 {
-        player.boost_floor_len.saturating_add(1).min(i64::MAX as usize) as i64
+        player
+            .boost_floor_len
+            .saturating_add(1)
+            .min(i64::MAX as usize) as i64
     }
 
     fn can_player_boost(player: &Player) -> bool {
@@ -1571,11 +1952,13 @@ impl RoomState {
                 now - player.last_seen <= PLAYER_TIMEOUT_MS
             }
         });
+        self.prune_evasive_spawn_timers();
 
         self.ensure_bots();
         self.ensure_pellets();
         self.update_bots();
         self.auto_respawn_players(now);
+        self.spawn_evasive_pellets(now);
 
         let player_ids: Vec<String> = self.players.keys().cloned().collect();
         for id in &player_ids {
@@ -2216,6 +2599,7 @@ mod tests {
             players: HashMap::new(),
             pellets: Vec::new(),
             next_pellet_id: 0,
+            next_evasive_spawn_at: HashMap::new(),
             environment: Environment::generate(),
         }
     }
@@ -2230,6 +2614,31 @@ mod tests {
             growth_fraction: SMALL_PELLET_GROWTH_FRACTION,
             state: PelletState::Idle,
         }
+    }
+
+    fn make_snake_with_head(head: Point, trailing: Point, len: usize) -> Vec<SnakeNode> {
+        let mut snake = Vec::with_capacity(len.max(2));
+        snake.push(SnakeNode {
+            x: head.x,
+            y: head.y,
+            z: head.z,
+            pos_queue: VecDeque::new(),
+        });
+        snake.push(SnakeNode {
+            x: trailing.x,
+            y: trailing.y,
+            z: trailing.z,
+            pos_queue: VecDeque::new(),
+        });
+        for _ in 2..len.max(2) {
+            snake.push(SnakeNode {
+                x: trailing.x,
+                y: trailing.y,
+                z: trailing.z,
+                pos_queue: VecDeque::new(),
+            });
+        }
+        snake
     }
 
     fn read_u8(bytes: &[u8], offset: &mut usize) -> u8 {
@@ -2338,7 +2747,10 @@ mod tests {
 
     #[test]
     fn boost_start_requires_next_whole_score_above_floor() {
-        let mut player = make_player("boost-start-threshold", make_snake(STARTING_LENGTH + 1, 0.0));
+        let mut player = make_player(
+            "boost-start-threshold",
+            make_snake(STARTING_LENGTH + 1, 0.0),
+        );
         player.boost_floor_len = STARTING_LENGTH;
         player.score = STARTING_LENGTH as i64;
         player.pellet_growth_fraction = 0.8;
@@ -2350,7 +2762,10 @@ mod tests {
 
     #[test]
     fn active_boost_can_continue_below_start_threshold_until_floor() {
-        let mut player = make_player("boost-continue-threshold", make_snake(STARTING_LENGTH + 1, 0.0));
+        let mut player = make_player(
+            "boost-continue-threshold",
+            make_snake(STARTING_LENGTH + 1, 0.0),
+        );
         player.boost_floor_len = STARTING_LENGTH;
         player.score = STARTING_LENGTH as i64;
         player.is_boosting = true;
@@ -2789,6 +3204,7 @@ mod tests {
                 assert_eq!(target_player_id, &player_id);
             }
             PelletState::Idle => panic!("pellet should lock to a nearby head"),
+            PelletState::Evasive { .. } => panic!("pellet should not become evasive"),
         }
         assert!(pellet.current_size < pellet.base_size);
     }
@@ -2839,6 +3255,7 @@ mod tests {
                 assert_eq!(target_player_id, &player_id);
             }
             PelletState::Idle => panic!("pellet should remain locked while approaching"),
+            PelletState::Evasive { .. } => panic!("pellet should not become evasive"),
         }
         assert!(pellet.current_size < pellet.base_size);
     }
@@ -2945,6 +3362,496 @@ mod tests {
             digestion.growth_amount >= BIG_PELLET_GROWTH_FRACTION - 1e-6
                 && digestion.growth_amount <= BIG_PELLET_GROWTH_FRACTION + 1e-6
         }));
+    }
+
+    #[test]
+    fn evasive_spawn_targets_only_eligible_humans() {
+        let mut state = make_state();
+        state.environment.lakes.clear();
+        state.environment.trees.clear();
+        state.environment.mountains.clear();
+
+        let eligible_id = "eligible-human".to_string();
+        let eligible_snake = make_snake_with_head(
+            Point {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            Point {
+                x: 0.9805806756909201,
+                y: -0.19611613513818402,
+                z: 0.0,
+            },
+            EVASIVE_PELLET_MIN_LEN,
+        );
+        state.players.insert(
+            eligible_id.clone(),
+            make_player(&eligible_id, eligible_snake),
+        );
+
+        let ineligible_id = "ineligible-human".to_string();
+        let ineligible_snake = make_snake_with_head(
+            Point {
+                x: 0.0,
+                y: 1.0,
+                z: 0.0,
+            },
+            Point {
+                x: 0.0,
+                y: 0.98,
+                z: -0.2,
+            },
+            EVASIVE_PELLET_MAX_LEN + 1,
+        );
+        state.players.insert(
+            ineligible_id.clone(),
+            make_player(&ineligible_id, ineligible_snake),
+        );
+
+        let bot_id = "eligible-bot".to_string();
+        let bot_snake = make_snake_with_head(
+            Point {
+                x: 0.0,
+                y: 0.0,
+                z: 1.0,
+            },
+            Point {
+                x: 0.0,
+                y: -0.2,
+                z: 0.98,
+            },
+            EVASIVE_PELLET_MIN_LEN,
+        );
+        let mut bot_player = make_player(&bot_id, bot_snake);
+        bot_player.is_bot = true;
+        state.players.insert(bot_id.clone(), bot_player);
+
+        state.next_evasive_spawn_at.insert(eligible_id.clone(), 0);
+        state.next_evasive_spawn_at.insert(ineligible_id, 0);
+        state.next_evasive_spawn_at.insert(bot_id, 0);
+
+        state.spawn_evasive_pellets(1);
+
+        assert_eq!(state.pellets.len(), 1);
+        let pellet = &state.pellets[0];
+        assert!((pellet.growth_fraction - BIG_PELLET_GROWTH_FRACTION).abs() < 1e-9);
+        match &pellet.state {
+            PelletState::Evasive {
+                owner_player_id, ..
+            } => assert_eq!(owner_player_id, &eligible_id),
+            _ => panic!("expected evasive pellet"),
+        }
+    }
+
+    #[test]
+    fn evasive_spawn_respects_cooldown_and_active_cap() {
+        let mut state = make_state();
+        state.environment.lakes.clear();
+        state.environment.trees.clear();
+        state.environment.mountains.clear();
+
+        let owner_id = "cooldown-owner".to_string();
+        let snake = make_snake_with_head(
+            Point {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            Point {
+                x: 0.9805806756909201,
+                y: -0.19611613513818402,
+                z: 0.0,
+            },
+            EVASIVE_PELLET_MIN_LEN,
+        );
+        state
+            .players
+            .insert(owner_id.clone(), make_player(&owner_id, snake));
+        state.next_evasive_spawn_at.insert(owner_id.clone(), 0);
+
+        state.spawn_evasive_pellets(1);
+        assert_eq!(state.pellets.len(), 1);
+
+        state.spawn_evasive_pellets(2);
+        assert_eq!(state.pellets.len(), 1);
+
+        let next_spawn_at = *state
+            .next_evasive_spawn_at
+            .get(&owner_id)
+            .expect("cooldown exists");
+        state.pellets.clear();
+        state.spawn_evasive_pellets(next_spawn_at - 1);
+        assert!(state.pellets.is_empty());
+
+        state.spawn_evasive_pellets(next_spawn_at);
+        assert_eq!(state.pellets.len(), 1);
+    }
+
+    #[test]
+    fn evasive_spawn_retries_when_no_safe_area_near_owner() {
+        let mut state = make_state();
+        state.environment.lakes.clear();
+        state.environment.trees.clear();
+        state.environment.mountains.clear();
+
+        let owner_id = "crowded-owner".to_string();
+        let owner_snake = make_snake_with_head(
+            Point {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            Point {
+                x: 0.9805806756909201,
+                y: -0.19611613513818402,
+                z: 0.0,
+            },
+            EVASIVE_PELLET_MIN_LEN,
+        );
+        state
+            .players
+            .insert(owner_id.clone(), make_player(&owner_id, owner_snake));
+
+        let blocker_id = "crowded-blocker".to_string();
+        let blocker_snake = make_snake_with_head(
+            Point {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            Point {
+                x: 0.9805806756909201,
+                y: -0.19611613513818402,
+                z: 0.0,
+            },
+            EVASIVE_PELLET_MIN_LEN,
+        );
+        state
+            .players
+            .insert(blocker_id.clone(), make_player(&blocker_id, blocker_snake));
+
+        state.next_evasive_spawn_at.insert(owner_id.clone(), 0);
+        state.next_evasive_spawn_at.insert(blocker_id.clone(), 0);
+
+        state.spawn_evasive_pellets(1234);
+
+        assert!(state.pellets.is_empty());
+        assert_eq!(
+            *state
+                .next_evasive_spawn_at
+                .get(&owner_id)
+                .expect("owner timer"),
+            1234 + EVASIVE_PELLET_RETRY_DELAY_MS
+        );
+    }
+
+    #[test]
+    fn evasive_pellet_moves_away_from_owner() {
+        let mut state = make_state();
+        let owner_id = "evasive-owner".to_string();
+        let snake = make_snake_with_head(
+            Point {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            Point {
+                x: 0.9805806756909201,
+                y: -0.19611613513818402,
+                z: 0.0,
+            },
+            EVASIVE_PELLET_MIN_LEN,
+        );
+        state
+            .players
+            .insert(owner_id.clone(), make_player(&owner_id, snake));
+
+        let start = normalize(Point {
+            x: 1.0,
+            y: 0.16,
+            z: 0.0,
+        });
+        state.pellets.push(Pellet {
+            id: 880,
+            normal: start,
+            color_index: 0,
+            base_size: EVASIVE_PELLET_SIZE_MIN,
+            current_size: EVASIVE_PELLET_SIZE_MIN,
+            growth_fraction: BIG_PELLET_GROWTH_FRACTION,
+            state: PelletState::Evasive {
+                owner_player_id: owner_id,
+                expires_at_ms: i64::MAX,
+            },
+        });
+
+        let before_dot = dot(
+            start,
+            Point {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        );
+        state.update_small_pellets(TICK_MS as f64 / 1000.0);
+        assert_eq!(state.pellets.len(), 1);
+        let after_dot = dot(
+            state.pellets[0].normal,
+            Point {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        );
+        assert!(after_dot < before_dot);
+    }
+
+    #[test]
+    fn evasive_pellet_motion_step_is_capped_for_smoothness() {
+        let mut state = make_state();
+        let owner_id = "evasive-owner-smooth".to_string();
+        let snake = make_snake_with_head(
+            Point {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            Point {
+                x: 0.9805806756909201,
+                y: -0.19611613513818402,
+                z: 0.0,
+            },
+            EVASIVE_PELLET_MIN_LEN,
+        );
+        state
+            .players
+            .insert(owner_id.clone(), make_player(&owner_id, snake));
+        state.pellets.push(Pellet {
+            id: 883,
+            normal: normalize(Point {
+                x: 1.0,
+                y: 0.2,
+                z: 0.0,
+            }),
+            color_index: 0,
+            base_size: EVASIVE_PELLET_SIZE_MIN,
+            current_size: EVASIVE_PELLET_SIZE_MIN,
+            growth_fraction: BIG_PELLET_GROWTH_FRACTION,
+            state: PelletState::Evasive {
+                owner_player_id: owner_id,
+                expires_at_ms: i64::MAX,
+            },
+        });
+
+        let dt = TICK_MS as f64 / 1000.0;
+        let mut max_step = 0.0f64;
+        for _ in 0..24 {
+            let before = state.pellets[0].normal;
+            state.update_small_pellets(dt);
+            let after = state.pellets[0].normal;
+            let step = clamp(dot(before, after), -1.0, 1.0).acos();
+            assert!(step <= EVASIVE_PELLET_MAX_STEP_PER_TICK + 1e-6);
+            max_step = max_step.max(step);
+        }
+        assert!(max_step > 1e-5);
+    }
+
+    #[test]
+    fn evasive_pellet_stays_put_when_owner_is_not_chasing() {
+        let mut state = make_state();
+        let owner_id = "evasive-owner-not-chasing".to_string();
+        let snake = make_snake_with_head(
+            Point {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            Point {
+                x: 0.9805806756909201,
+                y: -0.19611613513818402,
+                z: 0.0,
+            },
+            EVASIVE_PELLET_MIN_LEN,
+        );
+        state
+            .players
+            .insert(owner_id.clone(), make_player(&owner_id, snake));
+
+        let behind_owner = normalize(Point {
+            x: 1.0,
+            y: -0.2,
+            z: 0.0,
+        });
+        state.pellets.push(Pellet {
+            id: 884,
+            normal: behind_owner,
+            color_index: 0,
+            base_size: EVASIVE_PELLET_SIZE_MIN,
+            current_size: EVASIVE_PELLET_SIZE_MIN,
+            growth_fraction: BIG_PELLET_GROWTH_FRACTION,
+            state: PelletState::Evasive {
+                owner_player_id: owner_id,
+                expires_at_ms: i64::MAX,
+            },
+        });
+
+        let before = state.pellets[0].normal;
+        state.update_small_pellets(TICK_MS as f64 / 1000.0);
+        assert_eq!(state.pellets.len(), 1);
+        let after = state.pellets[0].normal;
+        let step = clamp(dot(before, after), -1.0, 1.0).acos();
+        assert!(step <= 1e-6);
+    }
+
+    #[test]
+    fn evasive_pellet_suction_allows_non_owner_capture() {
+        let mut state = make_state();
+        let owner_id = "evasive-owner-suction".to_string();
+        let owner_snake = make_snake_with_head(
+            Point {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            Point {
+                x: 0.9805806756909201,
+                y: -0.19611613513818402,
+                z: 0.0,
+            },
+            EVASIVE_PELLET_MIN_LEN,
+        );
+        state
+            .players
+            .insert(owner_id.clone(), make_player(&owner_id, owner_snake));
+
+        let rival_id = "evasive-rival-suction".to_string();
+        let rival_head = Point {
+            x: 0.0,
+            y: 1.0,
+            z: 0.0,
+        };
+        let rival_snake = make_snake_with_head(
+            rival_head,
+            Point {
+                x: -0.2,
+                y: 0.98,
+                z: 0.0,
+            },
+            EVASIVE_PELLET_MIN_LEN,
+        );
+        state
+            .players
+            .insert(rival_id.clone(), make_player(&rival_id, rival_snake));
+
+        let start = rotate_toward(
+            rival_head,
+            Point {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            EVASIVE_PELLET_SUCTION_RADIUS * 0.6,
+        );
+        state.pellets.push(Pellet {
+            id: 885,
+            normal: start,
+            color_index: 0,
+            base_size: EVASIVE_PELLET_SIZE_MIN,
+            current_size: EVASIVE_PELLET_SIZE_MIN,
+            growth_fraction: BIG_PELLET_GROWTH_FRACTION,
+            state: PelletState::Evasive {
+                owner_player_id: owner_id,
+                expires_at_ms: i64::MAX,
+            },
+        });
+
+        for _ in 0..16 {
+            state.update_small_pellets(TICK_MS as f64 / 1000.0);
+            if state.pellets.is_empty() {
+                break;
+            }
+        }
+        assert!(state.pellets.is_empty());
+        let rival_after = state.players.get(&rival_id).expect("rival");
+        assert_eq!(rival_after.score, 1);
+    }
+
+    #[test]
+    fn evasive_pellet_expires_and_is_consumable_by_non_owner() {
+        let mut state = make_state();
+        let owner_id = "evasive-owner".to_string();
+        let owner_snake = make_snake_with_head(
+            Point {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            Point {
+                x: 0.9805806756909201,
+                y: -0.19611613513818402,
+                z: 0.0,
+            },
+            EVASIVE_PELLET_MIN_LEN,
+        );
+        state
+            .players
+            .insert(owner_id.clone(), make_player(&owner_id, owner_snake));
+
+        state.pellets.push(Pellet {
+            id: 881,
+            normal: Point {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            color_index: 0,
+            base_size: EVASIVE_PELLET_SIZE_MIN,
+            current_size: EVASIVE_PELLET_SIZE_MIN,
+            growth_fraction: BIG_PELLET_GROWTH_FRACTION,
+            state: PelletState::Evasive {
+                owner_player_id: owner_id.clone(),
+                expires_at_ms: 0,
+            },
+        });
+        state.update_small_pellets(TICK_MS as f64 / 1000.0);
+        assert!(state.pellets.is_empty());
+
+        let rival_id = "evasive-rival".to_string();
+        let rival_head = Point {
+            x: 0.0,
+            y: 1.0,
+            z: 0.0,
+        };
+        let rival_snake = make_snake_with_head(
+            rival_head,
+            Point {
+                x: -0.2,
+                y: 0.98,
+                z: 0.0,
+            },
+            EVASIVE_PELLET_MIN_LEN,
+        );
+        state
+            .players
+            .insert(rival_id.clone(), make_player(&rival_id, rival_snake));
+
+        state.pellets.push(Pellet {
+            id: 882,
+            normal: rival_head,
+            color_index: 0,
+            base_size: EVASIVE_PELLET_SIZE_MIN,
+            current_size: EVASIVE_PELLET_SIZE_MIN,
+            growth_fraction: BIG_PELLET_GROWTH_FRACTION,
+            state: PelletState::Evasive {
+                owner_player_id: owner_id,
+                expires_at_ms: i64::MAX,
+            },
+        });
+
+        state.update_small_pellets(TICK_MS as f64 / 1000.0);
+        assert!(state.pellets.is_empty());
+        let rival_after = state.players.get(&rival_id).expect("rival");
+        assert_eq!(rival_after.score, 1);
     }
 
     #[test]
@@ -3386,6 +4293,8 @@ mod tests {
             }),
         );
         player.oxygen = 0.5;
+        player.connected = false;
+        player.last_seen = RoomState::now_millis();
         state.players.insert(player_id.clone(), player);
 
         state.tick();

@@ -380,10 +380,10 @@ mod tests {
             1,
             BoostDrainConfig {
                 active: true,
-            score_per_step: 0.35,
-            node_per_step: 0.35,
-            min_length: MIN_SURVIVAL_LENGTH,
-        },
+                score_per_step: 0.35,
+                node_per_step: 0.35,
+                min_length: MIN_SURVIVAL_LENGTH,
+            },
         );
 
         assert!(boost_active);
@@ -403,10 +403,10 @@ mod tests {
             2,
             BoostDrainConfig {
                 active: true,
-            score_per_step: 1.0,
-            node_per_step: 0.05,
-            min_length: MIN_SURVIVAL_LENGTH,
-        },
+                score_per_step: 1.0,
+                node_per_step: 0.05,
+                min_length: MIN_SURVIVAL_LENGTH,
+            },
         );
 
         assert!(!boost_active);

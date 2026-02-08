@@ -93,6 +93,10 @@ export default function App() {
     distance: 0,
     maxRange: 0,
   })
+  const boostInputRef = useRef({
+    keyboard: false,
+    pointerButton: false,
+  })
   const sendIntervalRef = useRef<number | null>(null)
   const snapshotBufferRef = useRef<TimedSnapshot[]>([])
   const serverOffsetRef = useRef<number | null>(null)
@@ -216,6 +220,21 @@ export default function App() {
     return `Renderer: ${activeRenderer.toUpperCase()}`
   }, [activeRenderer, rendererFallbackReason])
 
+  const syncBoostInput = () => {
+    pointerRef.current.boost = boostInputRef.current.keyboard || boostInputRef.current.pointerButton
+  }
+
+  const setPointerButtonBoostInput = (active: boolean) => {
+    boostInputRef.current.pointerButton = active
+    syncBoostInput()
+  }
+
+  const clearBoostInputs = () => {
+    boostInputRef.current.keyboard = false
+    boostInputRef.current.pointerButton = false
+    pointerRef.current.boost = false
+  }
+
   const resetBoostFxVisual = () => {
     resetBoostFx(boostFxRef.current, boostFxStateRef.current)
   }
@@ -273,7 +292,7 @@ export default function App() {
     inputEnabledRef.current = menuPhase === 'playing'
     if (menuPhase !== 'playing') {
       pointerRef.current.active = false
-      pointerRef.current.boost = false
+      clearBoostInputs()
     }
     if (menuPhase === 'preplay' && !allowPreplayAutoResumeRef.current) {
       const socket = socketRef.current
@@ -412,7 +431,7 @@ export default function App() {
             } else if (localLifeSpawnedRef.current && deathStartedAtMsRef.current === null) {
               deathStartedAtMsRef.current = nowMs
               pointerRef.current.active = false
-              pointerRef.current.boost = false
+              clearBoostInputs()
             }
 
             if (
@@ -516,7 +535,7 @@ export default function App() {
             localHeadRef.current = hasSpawnedSnake && localHead ? normalize(localHead) : MENU_CAMERA_TARGET
             if (!hasSpawnedSnake) {
               pointerRef.current.active = false
-              pointerRef.current.boost = false
+              clearBoostInputs()
             }
             boostActive =
               inputEnabledRef.current &&
@@ -775,7 +794,7 @@ export default function App() {
       }
       setMenuOverlayExiting(false)
       pointerRef.current.active = false
-      pointerRef.current.boost = false
+      clearBoostInputs()
       setConnectionStatus('Connecting')
       setGameState(null)
       setEnvironment(null)
@@ -830,14 +849,16 @@ export default function App() {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.code === 'Space' && inputEnabledRef.current) {
         event.preventDefault()
-        pointerRef.current.boost = true
+        boostInputRef.current.keyboard = true
+        syncBoostInput()
       }
     }
 
     const onKeyUp = (event: KeyboardEvent) => {
       if (event.code === 'Space') {
         event.preventDefault()
-        pointerRef.current.boost = false
+        boostInputRef.current.keyboard = false
+        syncBoostInput()
       }
     }
 
@@ -927,25 +948,39 @@ export default function App() {
     socket.send(encodeJoin(playerNameRef.current, playerIdRef.current, deferSpawn))
   }
 
+  const isPointerBoostButtonPressed = (event: React.PointerEvent<HTMLCanvasElement>) =>
+    (event.buttons & (1 | 2)) !== 0
+
   const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId)
     updatePointer(event)
+    setPointerButtonBoostInput(inputEnabledRef.current && isPointerBoostButtonPressed(event))
   }
 
   const handlePointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
     updatePointer(event)
+    setPointerButtonBoostInput(inputEnabledRef.current && isPointerBoostButtonPressed(event))
   }
 
   const handlePointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
+    setPointerButtonBoostInput(inputEnabledRef.current && isPointerBoostButtonPressed(event))
   }
 
   const handlePointerLeave = () => {
     pointerRef.current.active = false
     pointerRef.current.screenX = Number.NaN
     pointerRef.current.screenY = Number.NaN
+    setPointerButtonBoostInput(false)
+  }
+
+  const handlePointerCancel = () => {
+    pointerRef.current.active = false
+    pointerRef.current.screenX = Number.NaN
+    pointerRef.current.screenY = Number.NaN
+    setPointerButtonBoostInput(false)
   }
 
   const handleWheel = (event: WheelEvent) => {
@@ -1009,7 +1044,7 @@ export default function App() {
       }
 
       pointerRef.current.active = false
-      pointerRef.current.boost = false
+      clearBoostInputs()
       localHeadRef.current = MENU_CAMERA_TARGET
       cameraBlendRef.current = 0
       cameraBlendStartMsRef.current = null
@@ -1051,7 +1086,7 @@ export default function App() {
               onPointerMove={handlePointerMove}
               onPointerUp={handlePointerUp}
               onPointerLeave={handlePointerLeave}
-              onPointerCancel={handlePointerLeave}
+              onPointerCancel={handlePointerCancel}
               onContextMenu={(event) => event.preventDefault()}
             />
             <canvas ref={hudCanvasRef} className='hud-canvas' aria-hidden='true' />
