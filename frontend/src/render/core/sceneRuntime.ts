@@ -14,6 +14,8 @@ import type {
 type SnakeVisual = {
   group: THREE.Group
   tube: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
+  selfOverlapGlow: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>
+  selfOverlapGlowMaterial: THREE.MeshBasicMaterial
   head: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
   tail: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
   eyeLeft: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
@@ -586,6 +588,31 @@ type SnakeGroundingInfo = {
   sampleCount: number
 }
 
+type RenderPerfFrame = {
+  tMs: number
+  totalMs: number
+  setupMs: number
+  snakesMs: number
+  pelletsMs: number
+  visibilityMs: number
+  waterMs: number
+  passWorldMs: number
+  passOccludersMs: number
+  passPelletsMs: number
+  passDepthRebuildMs: number
+  passLakesMs: number
+}
+
+type RenderPerfInfo = {
+  enabled: boolean
+  thresholdMs: number
+  frameCount: number
+  slowFrameCount: number
+  maxTotalMs: number
+  lastFrame: RenderPerfFrame | null
+  slowFrames: RenderPerfFrame[]
+}
+
 export type RendererPreference = 'auto' | 'webgl' | 'webgpu'
 export type RendererBackend = 'webgl' | 'webgpu'
 export type DayNightDebugMode = 'auto' | 'accelerated'
@@ -731,6 +758,16 @@ const SNAKE_LIFT_FACTOR = 0.85
 const SNAKE_UNDERWATER_CLEARANCE = SNAKE_RADIUS * 0.18
 const SNAKE_MIN_TERRAIN_CLEARANCE = SNAKE_RADIUS * 0.1
 const SNAKE_CONTACT_CLEARANCE = SNAKE_RADIUS * 0.04
+const SNAKE_SELF_OVERLAP_GLOW_ENABLED = true
+const SNAKE_SELF_OVERLAP_MIN_POINTS = 18
+const SNAKE_SELF_OVERLAP_GRID_CELLS = 16
+const SNAKE_SELF_OVERLAP_MIN_ARC_MULT = 7.5
+const SNAKE_SELF_OVERLAP_DIST_FULL_MULT = 2.15
+const SNAKE_SELF_OVERLAP_DIST_START_MULT = 3.6
+const SNAKE_SELF_OVERLAP_BLUR_RADIUS = 2
+const SNAKE_SELF_OVERLAP_BLUR_PASSES = 1
+const SNAKE_SELF_OVERLAP_GLOW_OPACITY = 0.52
+const SNAKE_SELF_OVERLAP_GLOW_VISIBILITY_THRESHOLD = 0.06
 const SNAKE_CONTACT_ARC_SAMPLES = 7
 const SNAKE_CONTACT_LIFT_ITERATIONS = 2
 const SNAKE_CONTACT_LIFT_EPS = 1e-5
@@ -2275,6 +2312,13 @@ export const createScene = async (
   const tailFrameStates = new Map<string, TailFrameState>()
   const lastSnakeStarts = new Map<string, number>()
   const tongueStates = new Map<string, TongueState>()
+  const snakeSelfOverlapBucketPool = new Map<number, number[]>()
+  const snakeSelfOverlapUsedBuckets: number[] = []
+  let snakeSelfOverlapCellX = new Int16Array(0)
+  let snakeSelfOverlapCellY = new Int16Array(0)
+  let snakeSelfOverlapCellZ = new Int16Array(0)
+  let snakeSelfOverlapIntensityA = new Float32Array(0)
+  let snakeSelfOverlapIntensityB = new Float32Array(0)
   const tempVector = new THREE.Vector3()
   const tempVectorB = new THREE.Vector3()
   const tempVectorC = new THREE.Vector3()
@@ -2309,6 +2353,25 @@ export const createScene = async (
   const trailOffsetTemp = new THREE.Vector3()
   const tongueUp = new THREE.Vector3(0, 1, 0)
   const debugEnabled = import.meta.env.DEV || import.meta.env.VITE_E2E_DEBUG === '1'
+  const perfDebugEnabled = (() => {
+    if (typeof window === 'undefined') return false
+    try {
+      const url = new URL(window.location.href)
+      return url.searchParams.get('rafPerf') === '1'
+    } catch {
+      return false
+    }
+  })()
+  const renderPerfSlowFramesMax = 24
+  const renderPerfInfo: RenderPerfInfo = {
+    enabled: perfDebugEnabled,
+    thresholdMs: 50,
+    frameCount: 0,
+    slowFrameCount: 0,
+    maxTotalMs: 0,
+    lastFrame: null,
+    slowFrames: [],
+  }
   let debugApi:
     | {
         getSnakeOpacity: (id: string) => number | null
@@ -2320,6 +2383,7 @@ export const createScene = async (
           fallbackReason: string | null
           webglShaderHooksEnabled: boolean
         }
+        getRenderPerfInfo: () => RenderPerfInfo
         getTerrainPatchInfo: () => {
           totalPatches: number
           visiblePatches: number
@@ -2365,7 +2429,7 @@ export const createScene = async (
     | null = null
 
   const attachDebugApi = () => {
-    if (!debugEnabled || typeof window === 'undefined') return
+    if ((!debugEnabled && !perfDebugEnabled) || typeof window === 'undefined') return
     const debugWindow = window as Window & {
       __SNAKE_DEBUG__?: {
         getSnakeOpacity: (id: string) => number | null
@@ -2440,6 +2504,11 @@ export const createScene = async (
         activeBackend,
         fallbackReason,
         webglShaderHooksEnabled,
+      }),
+      getRenderPerfInfo: () => ({
+        ...renderPerfInfo,
+        lastFrame: renderPerfInfo.lastFrame ? { ...renderPerfInfo.lastFrame } : null,
+        slowFrames: renderPerfInfo.slowFrames.map((frame) => ({ ...frame })),
       }),
       getTerrainPatchInfo: () => ({
         totalPatches: planetPatches.length,
@@ -4289,6 +4358,20 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
     const tube = new THREE.Mesh(new THREE.BufferGeometry(), tubeMaterial)
     group.add(tube)
 
+    const selfOverlapGlowMaterial = new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      vertexColors: true,
+    })
+    selfOverlapGlowMaterial.depthWrite = false
+    selfOverlapGlowMaterial.depthTest = true
+    const selfOverlapGlow = new THREE.Mesh(new THREE.BufferGeometry(), selfOverlapGlowMaterial)
+    selfOverlapGlow.visible = false
+    selfOverlapGlow.renderOrder = 1
+    group.add(selfOverlapGlow)
+
     const headMaterial = new THREE.MeshStandardMaterial({
       color,
       roughness: 0.25,
@@ -4386,6 +4469,8 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
     return {
       group,
       tube,
+      selfOverlapGlow,
+      selfOverlapGlowMaterial,
       head,
       tail,
       eyeLeft,
@@ -6050,6 +6135,192 @@ diffuseColor.a *= retireEdge;`,
     return override
   }
 
+  const ensureSnakeSelfOverlapScratch = (pointCount: number) => {
+    if (snakeSelfOverlapIntensityA.length >= pointCount) return
+    const next = Math.max(64, pointCount, Math.ceil(snakeSelfOverlapIntensityA.length * 1.5))
+    snakeSelfOverlapCellX = new Int16Array(next)
+    snakeSelfOverlapCellY = new Int16Array(next)
+    snakeSelfOverlapCellZ = new Int16Array(next)
+    snakeSelfOverlapIntensityA = new Float32Array(next)
+    snakeSelfOverlapIntensityB = new Float32Array(next)
+  }
+
+  const computeSnakeSelfOverlapPointIntensities = (
+    curvePoints: THREE.Vector3[],
+    radius: number,
+  ): { intensities: Float32Array; maxIntensity: number } => {
+    const pointCount = curvePoints.length
+    ensureSnakeSelfOverlapScratch(pointCount)
+
+    for (let i = 0; i < snakeSelfOverlapUsedBuckets.length; i += 1) {
+      const key = snakeSelfOverlapUsedBuckets[i]
+      const bucket = snakeSelfOverlapBucketPool.get(key)
+      if (bucket) bucket.length = 0
+    }
+    snakeSelfOverlapUsedBuckets.length = 0
+
+    if (!Number.isFinite(radius) || radius <= 1e-6 || pointCount < 3) {
+      snakeSelfOverlapIntensityA.fill(0, 0, pointCount)
+      return { intensities: snakeSelfOverlapIntensityA, maxIntensity: 0 }
+    }
+
+    let segmentSum = 0
+    for (let i = 1; i < pointCount; i += 1) {
+      segmentSum += curvePoints[i].distanceTo(curvePoints[i - 1])
+    }
+    const avgSegmentLen = segmentSum / Math.max(1, pointCount - 1)
+    const minArc = radius * SNAKE_SELF_OVERLAP_MIN_ARC_MULT
+    const minIndexGap = clamp(
+      Math.ceil(minArc / Math.max(1e-6, avgSegmentLen)),
+      4,
+      Math.max(4, pointCount - 1),
+    )
+
+    const cellCount = SNAKE_SELF_OVERLAP_GRID_CELLS
+    const distFull = radius * SNAKE_SELF_OVERLAP_DIST_FULL_MULT
+    const distStart = radius * SNAKE_SELF_OVERLAP_DIST_START_MULT
+    const distFullSq = distFull * distFull
+    const distStartSq = distStart * distStart
+
+    for (let i = 0; i < pointCount; i += 1) {
+      const p = curvePoints[i]
+      const lenSq = p.x * p.x + p.y * p.y + p.z * p.z
+      let nx = 0
+      let ny = 1
+      let nz = 0
+      if (lenSq > 1e-10) {
+        const invLen = 1 / Math.sqrt(lenSq)
+        nx = p.x * invLen
+        ny = p.y * invLen
+        nz = p.z * invLen
+      }
+      let ix = Math.floor((nx * 0.5 + 0.5) * cellCount)
+      let iy = Math.floor((ny * 0.5 + 0.5) * cellCount)
+      let iz = Math.floor((nz * 0.5 + 0.5) * cellCount)
+      ix = clamp(ix, 0, cellCount - 1)
+      iy = clamp(iy, 0, cellCount - 1)
+      iz = clamp(iz, 0, cellCount - 1)
+      snakeSelfOverlapCellX[i] = ix
+      snakeSelfOverlapCellY[i] = iy
+      snakeSelfOverlapCellZ[i] = iz
+      const key = ix + cellCount * (iy + cellCount * iz)
+      let bucket = snakeSelfOverlapBucketPool.get(key)
+      if (!bucket) {
+        bucket = []
+        snakeSelfOverlapBucketPool.set(key, bucket)
+      }
+      if (bucket.length === 0) {
+        snakeSelfOverlapUsedBuckets.push(key)
+      }
+      bucket.push(i)
+    }
+
+    const intensities = snakeSelfOverlapIntensityA
+    for (let i = 0; i < pointCount; i += 1) {
+      const ix = snakeSelfOverlapCellX[i]
+      const iy = snakeSelfOverlapCellY[i]
+      const iz = snakeSelfOverlapCellZ[i]
+      const p = curvePoints[i]
+      let minDistSq = Number.POSITIVE_INFINITY
+      for (let dz = -1; dz <= 1; dz += 1) {
+        const z = iz + dz
+        if (z < 0 || z >= cellCount) continue
+        for (let dy = -1; dy <= 1; dy += 1) {
+          const y = iy + dy
+          if (y < 0 || y >= cellCount) continue
+          for (let dx = -1; dx <= 1; dx += 1) {
+            const x = ix + dx
+            if (x < 0 || x >= cellCount) continue
+            const key = x + cellCount * (y + cellCount * z)
+            const bucket = snakeSelfOverlapBucketPool.get(key)
+            if (!bucket || bucket.length === 0) continue
+            for (let k = 0; k < bucket.length; k += 1) {
+              const j = bucket[k]
+              const gap = Math.abs(i - j)
+              if (gap <= minIndexGap) continue
+              const q = curvePoints[j]
+              const dx = p.x - q.x
+              const dy = p.y - q.y
+              const dz = p.z - q.z
+              const distSq = dx * dx + dy * dy + dz * dz
+              if (distSq < minDistSq) {
+                minDistSq = distSq
+                if (minDistSq <= distFullSq) break
+              }
+            }
+            if (minDistSq <= distFullSq) break
+          }
+          if (minDistSq <= distFullSq) break
+        }
+        if (minDistSq <= distFullSq) break
+      }
+
+      let intensity = 0
+      if (minDistSq < distStartSq) {
+        intensity = 1 - smoothstep(distFullSq, distStartSq, minDistSq)
+      }
+      intensities[i] = intensity
+    }
+
+    let blurred = intensities
+    if (SNAKE_SELF_OVERLAP_BLUR_PASSES > 0 && SNAKE_SELF_OVERLAP_BLUR_RADIUS > 0 && pointCount >= 3) {
+      let a = intensities
+      let b = snakeSelfOverlapIntensityB
+      const radiusSamples = Math.floor(SNAKE_SELF_OVERLAP_BLUR_RADIUS)
+      const passes = Math.floor(SNAKE_SELF_OVERLAP_BLUR_PASSES)
+      for (let pass = 0; pass < passes; pass += 1) {
+        for (let i = 0; i < pointCount; i += 1) {
+          let sum = 0
+          let weight = 0
+          for (let offset = -radiusSamples; offset <= radiusSamples; offset += 1) {
+            const j = i + offset
+            if (j < 0 || j >= pointCount) continue
+            const w = radiusSamples + 1 - Math.abs(offset)
+            sum += a[j] * w
+            weight += w
+          }
+          b[i] = weight > 0 ? sum / weight : 0
+        }
+        const tmp = a
+        a = b
+        b = tmp
+      }
+      blurred = a
+    }
+
+    let maxIntensity = 0
+    for (let i = 0; i < pointCount; i += 1) {
+      maxIntensity = Math.max(maxIntensity, blurred[i] ?? 0)
+    }
+    return { intensities: blurred, maxIntensity }
+  }
+
+  const applySnakeSelfOverlapColors = (
+    geometry: THREE.BufferGeometry,
+    intensities: Float32Array,
+    pointCount: number,
+  ) => {
+    const positionAttr = geometry.getAttribute('position')
+    const uvAttr = geometry.getAttribute('uv')
+    if (!(positionAttr instanceof THREE.BufferAttribute) || !(uvAttr instanceof THREE.BufferAttribute)) {
+      return
+    }
+    const vertexCount = positionAttr.count
+    const uv = uvAttr.array as ArrayLike<number>
+    const colors = new Float32Array(vertexCount * 3)
+    const scale = pointCount > 1 ? pointCount - 1 : 0
+    for (let v = 0; v < vertexCount; v += 1) {
+      const u = (uv[v * 2] as number) ?? 0
+      const idx = clamp(Math.round(u * scale), 0, scale)
+      const intensity = intensities[idx] ?? 0
+      const out = v * 3
+      colors[out] = intensity
+      colors[out + 1] = intensity
+      colors[out + 2] = intensity
+    }
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+  }
+
 
   const updateSnake = (
     player: PlayerSnapshot,
@@ -6118,6 +6389,7 @@ diffuseColor.a *= retireEdge;`,
       resetSnakeTransientState(player.id)
       lastTailContactNormals.delete(player.id)
       visual.tube.visible = false
+      visual.selfOverlapGlow.visible = false
       visual.tail.visible = false
       visual.head.visible = false
       visual.eyeLeft.visible = false
@@ -6162,6 +6434,7 @@ diffuseColor.a *= retireEdge;`,
     let tailDirMinLen = 0
     if (nodes.length < 2) {
       visual.tube.visible = false
+      visual.selfOverlapGlow.visible = false
       visual.tail.visible = false
       lastTailDirections.delete(player.id)
       lastTailContactNormals.delete(player.id)
@@ -6263,8 +6536,28 @@ diffuseColor.a *= retireEdge;`,
       if (digestionVisuals.length) {
         applyDigestionBulges(tubeGeometry, digestionVisuals, digestionStartOffset, digestionBulgeScale)
       }
-      visual.tube.geometry.dispose()
+      let overlapMax = 0
+      if (SNAKE_SELF_OVERLAP_GLOW_ENABLED && curvePoints.length >= SNAKE_SELF_OVERLAP_MIN_POINTS) {
+        const overlap = computeSnakeSelfOverlapPointIntensities(curvePoints, radius)
+        overlapMax = overlap.maxIntensity
+        if (overlapMax > SNAKE_SELF_OVERLAP_GLOW_VISIBILITY_THRESHOLD) {
+          applySnakeSelfOverlapColors(tubeGeometry, overlap.intensities, curvePoints.length)
+        }
+      }
+
+      const oldTubeGeometry = visual.tube.geometry
+      const oldGlowGeometry = visual.selfOverlapGlow.geometry
       visual.tube.geometry = tubeGeometry
+      visual.selfOverlapGlow.geometry = tubeGeometry
+      if (oldGlowGeometry !== oldTubeGeometry) {
+        oldGlowGeometry.dispose()
+      }
+      oldTubeGeometry.dispose()
+
+      visual.selfOverlapGlowMaterial.opacity = opacity * SNAKE_SELF_OVERLAP_GLOW_OPACITY
+      visual.selfOverlapGlowMaterial.color.copy(visual.tube.material.color)
+      visual.selfOverlapGlow.visible =
+        visual.group.visible && overlapMax > SNAKE_SELF_OVERLAP_GLOW_VISIBILITY_THRESHOLD
     }
 
     if (nodes.length === 0) {
@@ -6626,11 +6919,17 @@ diffuseColor.a *= retireEdge;`,
 
   const removeSnake = (visual: SnakeVisual, id: string) => {
     snakesGroup.remove(visual.group)
-    visual.tube.geometry.dispose()
+    const tubeGeometry = visual.tube.geometry
+    const glowGeometry = visual.selfOverlapGlow.geometry
+    tubeGeometry.dispose()
+    if (glowGeometry !== tubeGeometry) {
+      glowGeometry.dispose()
+    }
     if (visual.tail.geometry !== tailGeometry) {
       visual.tail.geometry.dispose()
     }
     visual.tube.material.dispose()
+    visual.selfOverlapGlowMaterial.dispose()
     visual.head.material.dispose()
     visual.eyeLeft.material.dispose()
     visual.eyeRight.material.dispose()
@@ -7275,6 +7574,7 @@ diffuseColor.a *= retireEdge;`,
         continue
       }
       hideForDepth(visual.bowl)
+      hideForDepth(visual.selfOverlapGlow)
       hideForDepth(visual.boostDraft)
       hideForDepth(visual.nameplate)
     }
@@ -7293,15 +7593,27 @@ diffuseColor.a *= retireEdge;`,
     localPlayerId: string | null,
     cameraDistance: number,
     cameraVerticalOffset = 0,
-  ) => {
-    const now = performance.now()
-    const deltaSeconds = Math.min(0.1, Math.max(0, (now - lastFrameTime) / 1000))
-    lastFrameTime = now
+	  ) => {
+	    const now = performance.now()
+	    const deltaSeconds = Math.min(0.1, Math.max(0, (now - lastFrameTime) / 1000))
+	    lastFrameTime = now
+	    const perfEnabled = renderPerfInfo.enabled
+	    const perfStartMs = perfEnabled ? now : 0
+	    let afterSetupMs = perfStartMs
+	    let afterSnakesMs = perfStartMs
+	    let afterPelletsMs = perfStartMs
+	    let afterVisibilityMs = perfStartMs
+	    let afterWaterMs = perfStartMs
+	    let passWorldMs = 0
+	    let passOccludersMs = 0
+	    let passPelletsMs = 0
+	    let passDepthRebuildMs = 0
+	    let passLakesMs = 0
 
-    if (cameraState.active) {
-      world.quaternion.set(cameraState.q.x, cameraState.q.y, cameraState.q.z, cameraState.q.w)
-    } else {
-      world.quaternion.identity()
+	    if (cameraState.active) {
+	      world.quaternion.set(cameraState.q.x, cameraState.q.y, cameraState.q.z, cameraState.q.w)
+	    } else {
+	      world.quaternion.identity()
     }
     if (Number.isFinite(cameraDistance)) {
       camera.position.set(
@@ -7380,68 +7692,153 @@ diffuseColor.a *= retireEdge;`,
     } else {
       cameraLocalDirTemp.copy(cameraLocalPosTemp).multiplyScalar(1 / cameraLocalDistance)
     }
-    const aspect = viewportHeight > 0 ? viewportWidth / viewportHeight : 1
-    const viewAngle = computeVisibleSurfaceAngle(cameraLocalDistance, aspect)
+	    const aspect = viewportHeight > 0 ? viewportWidth / viewportHeight : 1
+	    const viewAngle = computeVisibleSurfaceAngle(cameraLocalDistance, aspect)
+	    if (perfEnabled) {
+	      afterSetupMs = performance.now()
+	    }
 
-    if (snapshot) {
-      const pelletOverride = updateSnakes(
-        snapshot.players,
-        localPlayerId,
-        deltaSeconds,
-        snapshot.pellets,
-        now,
-      )
-      updatePellets(snapshot.pellets, pelletOverride, now * 0.001, cameraLocalDirTemp, viewAngle)
-    } else {
-      updateSnakes([], localPlayerId, deltaSeconds, null, now)
-      updatePellets([], null, now * 0.001, cameraLocalDirTemp, viewAngle)
-    }
+	    if (snapshot) {
+	      const pelletOverride = updateSnakes(
+	        snapshot.players,
+	        localPlayerId,
+	        deltaSeconds,
+	        snapshot.pellets,
+	        now,
+	      )
+	      if (perfEnabled) {
+	        afterSnakesMs = performance.now()
+	      }
+	      updatePellets(snapshot.pellets, pelletOverride, now * 0.001, cameraLocalDirTemp, viewAngle)
+	      if (perfEnabled) {
+	        afterPelletsMs = performance.now()
+	      }
+	    } else {
+	      updateSnakes([], localPlayerId, deltaSeconds, null, now)
+	      if (perfEnabled) {
+	        afterSnakesMs = performance.now()
+	      }
+	      updatePellets([], null, now * 0.001, cameraLocalDirTemp, viewAngle)
+	      if (perfEnabled) {
+	        afterPelletsMs = performance.now()
+	      }
+	    }
 
-    if (PLANET_PATCH_ENABLED) {
-      updatePlanetPatchVisibility(cameraLocalDirTemp, viewAngle)
-    }
-    updateLakeVisibility(cameraLocalDirTemp, viewAngle)
-    updateEnvironmentVisibility(cameraLocalPosTemp, cameraLocalDirTemp, viewAngle)
+	    if (PLANET_PATCH_ENABLED) {
+	      updatePlanetPatchVisibility(cameraLocalDirTemp, viewAngle)
+	    }
+	    updateLakeVisibility(cameraLocalDirTemp, viewAngle)
+	    updateEnvironmentVisibility(cameraLocalPosTemp, cameraLocalDirTemp, viewAngle)
+	    if (perfEnabled) {
+	      afterVisibilityMs = performance.now()
+	    }
 
-    const lakeTimeSeconds = now * 0.001
-    for (let i = 0; i < lakeMaterials.length; i += 1) {
-      const material = lakeMaterials[i]
+	    const lakeTimeSeconds = now * 0.001
+	    for (let i = 0; i < lakeMaterials.length; i += 1) {
+	      const material = lakeMaterials[i]
       const uniforms = (material.userData as LakeMaterialUserData).lakeWaterUniforms
       if (uniforms) {
         uniforms.time.value = lakeTimeSeconds
       } else {
-        material.emissiveIntensity =
-          LAKE_WATER_EMISSIVE_BASE +
-          Math.sin(lakeTimeSeconds * LAKE_WATER_WAVE_SPEED + i * 0.73) * LAKE_WATER_EMISSIVE_PULSE
-      }
-    }
-    updatePelletGlow(lakeTimeSeconds)
+	        material.emissiveIntensity =
+	          LAKE_WATER_EMISSIVE_BASE +
+	          Math.sin(lakeTimeSeconds * LAKE_WATER_WAVE_SPEED + i * 0.73) * LAKE_WATER_EMISSIVE_PULSE
+	      }
+	    }
+	    updatePelletGlow(lakeTimeSeconds)
+	    if (perfEnabled) {
+	      afterWaterMs = performance.now()
+	    }
 
-    const savedAutoClear = renderer.autoClear
-    renderer.autoClear = false
-    renderer.clear()
-    try {
-      // Pass 1: Render the main world without pellets/lakes so pellet occlusion can be composited separately.
-      renderWorldPass(RENDER_PASS_WORLD_NO_PELLETS_LAKES, true)
-      // Passes 2-4 share the same snake-depth occluder mask to avoid duplicate snake scans.
-      beginOpaqueSnakeDepthOccluders()
-      try {
-        // Pass 2: Build depth from terrain objects + opaque snakes (not planet) to occlude pellet glow.
-        renderWorldPass(RENDER_PASS_PELLET_OCCLUDERS, false, occluderDepthMaterial, true)
-        // Pass 3: Render pellets against occluder depth for partial occlusion.
-        renderWorldPass(RENDER_PASS_PELLETS_ONLY, false)
-        // Pass 4: Rebuild full depth (including planet) so lake overlays depth-test correctly.
-        renderWorldPass(RENDER_PASS_WORLD_NO_PELLETS_LAKES, false, occluderDepthMaterial, true)
-      } finally {
-        endOpaqueSnakeDepthOccluders()
-      }
-      // Pass 5: Render lakes last so underwater pellets still read through the water surface overlay.
-      renderWorldPass(RENDER_PASS_LAKES_ONLY, false)
-    } finally {
-      renderer.autoClear = savedAutoClear
-    }
-    return localHeadScreen
-  }
+	    const savedAutoClear = renderer.autoClear
+	    renderer.autoClear = false
+	    renderer.clear()
+	    try {
+	      // Pass 1: Render the main world without pellets/lakes so pellet occlusion can be composited separately.
+	      let passStartMs = 0
+	      if (perfEnabled) {
+	        passStartMs = performance.now()
+	      }
+	      renderWorldPass(RENDER_PASS_WORLD_NO_PELLETS_LAKES, true)
+	      if (perfEnabled) {
+	        passWorldMs = performance.now() - passStartMs
+	      }
+	      // Passes 2-4 share the same snake-depth occluder mask to avoid duplicate snake scans.
+	      beginOpaqueSnakeDepthOccluders()
+	      try {
+	        // Pass 2: Build depth from terrain objects + opaque snakes (not planet) to occlude pellet glow.
+	        if (perfEnabled) {
+	          passStartMs = performance.now()
+	        }
+	        renderWorldPass(RENDER_PASS_PELLET_OCCLUDERS, false, occluderDepthMaterial, true)
+	        if (perfEnabled) {
+	          passOccludersMs = performance.now() - passStartMs
+	        }
+	        // Pass 3: Render pellets against occluder depth for partial occlusion.
+	        if (perfEnabled) {
+	          passStartMs = performance.now()
+	        }
+	        renderWorldPass(RENDER_PASS_PELLETS_ONLY, false)
+	        if (perfEnabled) {
+	          passPelletsMs = performance.now() - passStartMs
+	        }
+	        // Pass 4: Rebuild full depth (including planet) so lake overlays depth-test correctly.
+	        if (perfEnabled) {
+	          passStartMs = performance.now()
+	        }
+	        renderWorldPass(RENDER_PASS_WORLD_NO_PELLETS_LAKES, false, occluderDepthMaterial, true)
+	        if (perfEnabled) {
+	          passDepthRebuildMs = performance.now() - passStartMs
+	        }
+	      } finally {
+	        endOpaqueSnakeDepthOccluders()
+	      }
+	      // Pass 5: Render lakes last so underwater pellets still read through the water surface overlay.
+	      if (perfEnabled) {
+	        passStartMs = performance.now()
+	      }
+	      renderWorldPass(RENDER_PASS_LAKES_ONLY, false)
+	      if (perfEnabled) {
+	        passLakesMs = performance.now() - passStartMs
+	      }
+	    } finally {
+	      renderer.autoClear = savedAutoClear
+	    }
+	    if (perfEnabled) {
+	      const frameEndMs = performance.now()
+	      const totalMs = frameEndMs - perfStartMs
+	      const frame: RenderPerfFrame = {
+	        tMs: now,
+	        totalMs,
+	        setupMs: afterSetupMs - perfStartMs,
+	        snakesMs: afterSnakesMs - afterSetupMs,
+	        pelletsMs: afterPelletsMs - afterSnakesMs,
+	        visibilityMs: afterVisibilityMs - afterPelletsMs,
+	        waterMs: afterWaterMs - afterVisibilityMs,
+	        passWorldMs,
+	        passOccludersMs,
+	        passPelletsMs,
+	        passDepthRebuildMs,
+	        passLakesMs,
+	      }
+
+	      renderPerfInfo.frameCount += 1
+	      renderPerfInfo.maxTotalMs = Math.max(renderPerfInfo.maxTotalMs, totalMs)
+	      renderPerfInfo.lastFrame = frame
+
+	      if (totalMs >= renderPerfInfo.thresholdMs) {
+	        renderPerfInfo.slowFrameCount += 1
+	        renderPerfInfo.slowFrames.push(frame)
+	        if (renderPerfInfo.slowFrames.length > renderPerfSlowFramesMax) {
+	          renderPerfInfo.slowFrames.splice(
+	            0,
+	            renderPerfInfo.slowFrames.length - renderPerfSlowFramesMax,
+	          )
+	        }
+	      }
+	    }
+	    return localHeadScreen
+	  }
 
   const setEnvironment = (environment: Environment) => {
     buildEnvironment(environment)
@@ -7568,7 +7965,7 @@ diffuseColor.a *= retireEdge;`,
     boostTrails.clear()
     boostTrailAlphaTexture?.dispose()
 
-    if (debugEnabled && typeof window !== 'undefined') {
+    if ((debugEnabled || perfDebugEnabled) && typeof window !== 'undefined') {
       const debugWindow = window as Window & { __SNAKE_DEBUG__?: unknown }
       if (debugWindow.__SNAKE_DEBUG__ === debugApi) {
         delete debugWindow.__SNAKE_DEBUG__

@@ -20,6 +20,7 @@ const parseArgs = () => {
     headless: true,
     tuningOverridesJson: '',
     requirePass: false,
+    cpuProfileJson: '',
   }
 
   for (let i = 0; i < args.length; i += 1) {
@@ -63,6 +64,9 @@ const parseArgs = () => {
       case '--require-pass':
         parsed.requirePass = true
         break
+      case '--cpu-profile-json':
+        parsed.cpuProfileJson = next()
+        break
       default:
         throw new Error(`unknown argument: ${arg}`)
     }
@@ -80,6 +84,42 @@ const parseArgs = () => {
 const ensureDir = async (filePath) => {
   const dir = path.dirname(filePath)
   await fs.mkdir(dir, { recursive: true })
+}
+
+const summarizeCpuProfile = (profile, maxRows = 30) => {
+  if (!profile || !Array.isArray(profile.nodes) || !Array.isArray(profile.samples) || !Array.isArray(profile.timeDeltas)) {
+    return null
+  }
+
+  const nodesById = new Map(profile.nodes.map((node) => [node.id, node]))
+  const totalsUs = new Map()
+  let totalUs = 0
+
+  for (let i = 0; i < profile.samples.length && i < profile.timeDeltas.length; i += 1) {
+    const nodeId = profile.samples[i]
+    const deltaUs = profile.timeDeltas[i]
+    if (!Number.isFinite(deltaUs) || deltaUs <= 0) continue
+    totalUs += deltaUs
+
+    const node = nodesById.get(nodeId)
+    const frame = node?.callFrame
+    const fn = frame?.functionName || '(anonymous)'
+    const url = frame?.url || ''
+    const line = Number.isFinite(frame?.lineNumber) ? frame.lineNumber + 1 : 0
+    const col = Number.isFinite(frame?.columnNumber) ? frame.columnNumber + 1 : 0
+    const key = `${fn} @ ${url || '(no-url)'}:${line}:${col}`
+    totalsUs.set(key, (totalsUs.get(key) ?? 0) + deltaUs)
+  }
+
+  const rows = [...totalsUs.entries()]
+    .map(([key, us]) => ({ key, ms: us / 1000, pct: totalUs > 0 ? (us / totalUs) * 100 : 0 }))
+    .sort((a, b) => b.ms - a.ms)
+    .slice(0, maxRows)
+
+  return {
+    totalMs: totalUs / 1000,
+    top: rows,
+  }
 }
 
 const quantile = (values, percentile) => {
@@ -341,14 +381,30 @@ const run = async () => {
   if (options.screenshotPath) {
     await ensureDir(options.screenshotPath)
   }
+  if (options.cpuProfileJson) {
+    await ensureDir(options.cpuProfileJson)
+  }
 
   const { chromium } = await loadPlaywright()
   const browser = await chromium.launch({ headless: options.headless })
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } })
   const page = await context.newPage()
+  const violations = []
 
   let report = null
   try {
+    page.on('console', (msg) => {
+      const text = msg.text?.() ?? ''
+      if (!text.includes('requestAnimationFrame') || !text.includes('[Violation]')) return
+      const location = typeof msg.location === 'function' ? msg.location() : {}
+      violations.push({
+        atIso: new Date().toISOString(),
+        type: msg.type?.() ?? 'log',
+        text,
+        location,
+      })
+    })
+
     await page.goto(options.appUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 })
 
     const playButton = page.getByRole('button', { name: /Play/ })
@@ -406,6 +462,17 @@ const run = async () => {
 
     const canvas = page.locator('.game-canvas')
     await canvas.waitFor({ state: 'visible', timeout: 15_000 })
+
+    let cpuProfile = null
+    let cpuProfileSummary = null
+    let cdp = null
+    if (options.cpuProfileJson) {
+      cdp = await context.newCDPSession(page)
+      await cdp.send('Profiler.enable')
+      // microseconds between samples; 1000us ~= 1ms.
+      await cdp.send('Profiler.setSamplingInterval', { interval: 1000 })
+      await cdp.send('Profiler.start')
+    }
 
     let bounds = await canvas.boundingBox()
     if (!bounds) {
@@ -476,6 +543,14 @@ const run = async () => {
       boostDown = false
     }
 
+    if (cdp) {
+      const stopped = await cdp.send('Profiler.stop')
+      cpuProfile = stopped?.profile ?? null
+      cpuProfileSummary = summarizeCpuProfile(cpuProfile, 40)
+      await cdp.send('Profiler.disable').catch(() => {})
+      await fs.writeFile(options.cpuProfileJson, `${JSON.stringify(cpuProfile, null, 2)}\n`, 'utf8')
+    }
+
     const finalDebug = await page.evaluate(() => {
       const debugApi = window.__SNAKE_DEBUG__
       if (!debugApi) {
@@ -487,6 +562,12 @@ const run = async () => {
           : null,
         motion: typeof debugApi.getMotionStabilityInfo === 'function'
           ? debugApi.getMotionStabilityInfo()
+          : null,
+        rafPerf: typeof debugApi.getRafPerfInfo === 'function'
+          ? debugApi.getRafPerfInfo()
+          : null,
+        renderPerf: typeof debugApi.getRenderPerfInfo === 'function'
+          ? debugApi.getRenderPerfInfo()
           : null,
         events: typeof debugApi.getNetLagEvents === 'function'
           ? debugApi.getNetLagEvents()
@@ -525,6 +606,13 @@ const run = async () => {
         score: verdict.score,
         failedChecks: verdict.failedChecks,
       },
+      perf: {
+        rafViolationCount: violations.length,
+        rafViolations: violations,
+        cpuProfileSummary,
+        rafPerf: finalDebug.rafPerf,
+        renderPerf: finalDebug.renderPerf,
+      },
       samples,
       events: finalDebug.events,
       debugReport: finalDebug.report,
@@ -546,6 +634,10 @@ const run = async () => {
       mismatchMaxMs: report.aggregates.mismatchMaxMs,
       backwardCorrectionRate: report.motion.backwardCorrectionRate,
       minHeadDot: report.motion.minHeadDot,
+      rafSlowFrameCount: report.perf.rafPerf?.slowFrameCount ?? null,
+      rafMaxTotalMs: report.perf.rafPerf?.maxTotalMs ?? null,
+      renderSlowFrameCount: report.perf.renderPerf?.slowFrameCount ?? null,
+      renderMaxTotalMs: report.perf.renderPerf?.maxTotalMs ?? null,
       outputJson: options.outputJson,
     }
 

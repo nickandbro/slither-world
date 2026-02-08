@@ -106,6 +106,28 @@ type MotionStabilityDebugInfo = {
   sampleCount: number
 }
 
+type RafPerfFrame = {
+  tMs: number
+  totalMs: number
+  snapshotMs: number
+  cameraMs: number
+  renderMs: number
+  hudMs: number
+  debugMs: number
+  tailMs: number
+}
+
+type RafPerfInfo = {
+  enabled: boolean
+  thresholdMs: number
+  frameCount: number
+  slowFrameCount: number
+  maxTotalMs: number
+  lastFrame: RafPerfFrame | null
+  slowFrames: RafPerfFrame[]
+  lastSlowLogMs: number
+}
+
 type NetLagEvent = {
   id: number
   atIso: string
@@ -157,6 +179,9 @@ const seqGapSize = (next: number, current: number) => {
 }
 
 export default function App() {
+  const RAF_SLOW_FRAME_THRESHOLD_MS = 50
+  const RAF_SLOW_FRAMES_MAX = 24
+
   const glCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const hudCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const boostFxRef = useRef<HTMLDivElement | null>(null)
@@ -254,6 +279,16 @@ export default function App() {
     minHeadDot: 1,
     sampleCount: 0,
   })
+  const rafPerfRef = useRef<RafPerfInfo>({
+    enabled: false,
+    thresholdMs: RAF_SLOW_FRAME_THRESHOLD_MS,
+    frameCount: 0,
+    slowFrameCount: 0,
+    maxTotalMs: 0,
+    lastFrame: null,
+    slowFrames: [],
+    lastSlowLogMs: 0,
+  })
   const localSnakeDisplayRef = useRef<Point[] | null>(null)
   const lastRenderFrameMsRef = useRef<number | null>(null)
   const netLagEventsRef = useRef<NetLagEvent[]>([])
@@ -298,6 +333,21 @@ export default function App() {
   const netDebugEnabled = useMemo(getNetDebugEnabled, [])
   const isPlaying = menuPhase === 'playing'
   const showMenuOverlay = menuPhase === 'preplay' || menuOverlayExiting
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try {
+      const url = new URL(window.location.href)
+      const value = url.searchParams.get('rafPerf')
+      if (value === '1') {
+        rafPerfRef.current.enabled = true
+      } else if (value === '0') {
+        rafPerfRef.current.enabled = false
+      }
+    } catch {
+      // ignore URL parsing errors
+    }
+  }, [])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -1014,19 +1064,34 @@ export default function App() {
         window.addEventListener('resize', handleResize)
         glCanvas.addEventListener('wheel', handleWheel, { passive: false })
 
-        const renderLoop = () => {
-          const config = renderConfigRef.current
-          let boostActive = false
-          if (config && webgl) {
-            const nowMs = performance.now()
-            const lastRenderFrameMs = lastRenderFrameMsRef.current
-            const frameDeltaSeconds =
-              lastRenderFrameMs !== null ? Math.max(0, Math.min(0.1, (nowMs - lastRenderFrameMs) / 1000)) : 1 / 60
-            lastRenderFrameMsRef.current = nowMs
-            const localId = playerIdRef.current
-            const snapshot = stabilizeLocalSnapshot(getRenderSnapshot(), localId, frameDeltaSeconds)
-            const localSnapshotPlayer =
-              snapshot?.players.find((player) => player.id === localId) ?? null
+	        const renderLoop = () => {
+	          const config = renderConfigRef.current
+	          let boostActive = false
+	          const rafPerf = rafPerfRef.current
+	          const rafPerfEnabled = rafPerf.enabled
+	          let frameStartMs = 0
+	          let nowMs = 0
+	          let afterSnapshotMs = 0
+	          let afterCameraMs = 0
+	          let afterRenderMs = 0
+	          let afterHudMs = 0
+	          let afterDebugMs = 0
+	          if (config && webgl) {
+	            nowMs = performance.now()
+	            if (rafPerfEnabled) {
+	              frameStartMs = nowMs
+	            }
+	            const lastRenderFrameMs = lastRenderFrameMsRef.current
+	            const frameDeltaSeconds =
+	              lastRenderFrameMs !== null ? Math.max(0, Math.min(0.1, (nowMs - lastRenderFrameMs) / 1000)) : 1 / 60
+	            lastRenderFrameMsRef.current = nowMs
+	            const localId = playerIdRef.current
+	            const snapshot = stabilizeLocalSnapshot(getRenderSnapshot(), localId, frameDeltaSeconds)
+	            if (rafPerfEnabled) {
+	              afterSnapshotMs = performance.now()
+	            }
+	            const localSnapshotPlayer =
+	              snapshot?.players.find((player) => player.id === localId) ?? null
             const localHead = localSnapshotPlayer?.snake[0] ?? null
             const hasSpawnedSnake =
               !!localSnapshotPlayer && localSnapshotPlayer.alive && localSnapshotPlayer.snake.length > 0
@@ -1229,20 +1294,27 @@ export default function App() {
               pointerRef.current.active = false
               clearBoostInputs()
             }
-            boostActive =
-              inputEnabledRef.current &&
-              !!localSnapshotPlayer &&
-              localSnapshotPlayer.alive &&
-              localSnapshotPlayer.isBoosting
+	            boostActive =
+	              inputEnabledRef.current &&
+	              !!localSnapshotPlayer &&
+	              localSnapshotPlayer.alive &&
+	              localSnapshotPlayer.isBoosting
 
-            const headScreen = webgl.render(
-              snapshot,
-              renderCamera,
-              localId,
-              renderDistance,
-              renderVerticalOffset,
-            )
-            headScreenRef.current = headScreen
+	            if (rafPerfEnabled) {
+	              afterCameraMs = performance.now()
+	            }
+
+	            const headScreen = webgl.render(
+	              snapshot,
+	              renderCamera,
+	              localId,
+	              renderDistance,
+	              renderVerticalOffset,
+	            )
+	            if (rafPerfEnabled) {
+	              afterRenderMs = performance.now()
+	            }
+	            headScreenRef.current = headScreen
 
             if (inputEnabledRef.current) {
               const oxygenPct = localSnapshotPlayer
@@ -1398,14 +1470,18 @@ export default function App() {
                   anchor: headScreen,
                 },
               )
-            } else {
-              hudCtx.clearRect(0, 0, config.width, config.height)
-            }
+	            } else {
+	              hudCtx.clearRect(0, 0, config.width, config.height)
+	            }
 
-            menuDebugInfoRef.current = {
-              phase,
-              hasSpawned: hasSpawnedSnake,
-              cameraBlend: phase === 'playing' ? 1 : blend,
+	            if (rafPerfEnabled) {
+	              afterHudMs = performance.now()
+	            }
+
+	            menuDebugInfoRef.current = {
+	              phase,
+	              hasSpawned: hasSpawnedSnake,
+	              cameraBlend: phase === 'playing' ? 1 : blend,
               cameraDistance: Math.hypot(renderDistance, renderVerticalOffset),
             }
             if (netDebugEnabled && phase === 'playing') {
@@ -1503,12 +1579,88 @@ export default function App() {
                   }
                 ).resetNetTuningOverrides = () =>
                   applyNetTuningOverrides({}, { announce: true })
+                ;(
+                  rootDebugApi as {
+                    getRafPerfInfo?: () => RafPerfInfo
+                  }
+                ).getRafPerfInfo = () => ({
+                  ...rafPerfRef.current,
+                  lastFrame: rafPerfRef.current.lastFrame
+                    ? { ...rafPerfRef.current.lastFrame }
+                    : null,
+                  slowFrames: rafPerfRef.current.slowFrames.map((frame) => ({ ...frame })),
+                })
+                ;(
+                  rootDebugApi as {
+                    clearRafPerf?: () => void
+                  }
+                ).clearRafPerf = () => {
+                  const enabled = rafPerfRef.current.enabled
+                  const thresholdMs = rafPerfRef.current.thresholdMs
+                  rafPerfRef.current = {
+                    enabled,
+                    thresholdMs,
+                    frameCount: 0,
+                    slowFrameCount: 0,
+                    maxTotalMs: 0,
+                    lastFrame: null,
+                    slowFrames: [],
+                    lastSlowLogMs: 0,
+                  }
+                }
               }
             }
-          }
-          updateBoostFxVisual(boostActive)
-          frameId = window.requestAnimationFrame(renderLoop)
-        }
+	          }
+	          if (rafPerfEnabled && frameStartMs > 0) {
+	            afterDebugMs = performance.now()
+	          }
+	          updateBoostFxVisual(boostActive)
+	          if (rafPerfEnabled && frameStartMs > 0 && afterSnapshotMs > 0) {
+	            const frameEndMs = performance.now()
+	            const totalMs = frameEndMs - frameStartMs
+	            const threshold = rafPerf.thresholdMs
+	            const snapshotMs = afterSnapshotMs - frameStartMs
+	            const cameraMs = afterCameraMs - afterSnapshotMs
+	            const renderMs = afterRenderMs - afterCameraMs
+	            const hudMs = afterHudMs - afterRenderMs
+	            const debugMs = afterDebugMs - afterHudMs
+	            const tailMs = frameEndMs - afterDebugMs
+
+	            rafPerf.frameCount += 1
+	            rafPerf.maxTotalMs = Math.max(rafPerf.maxTotalMs, totalMs)
+	            rafPerf.lastFrame = {
+	              tMs: nowMs,
+	              totalMs,
+	              snapshotMs,
+	              cameraMs,
+	              renderMs,
+	              hudMs,
+	              debugMs,
+	              tailMs,
+	            }
+
+	            if (totalMs >= threshold) {
+	              rafPerf.slowFrameCount += 1
+	              rafPerf.slowFrames.push({ ...rafPerf.lastFrame })
+	              if (rafPerf.slowFrames.length > RAF_SLOW_FRAMES_MAX) {
+	                rafPerf.slowFrames.splice(0, rafPerf.slowFrames.length - RAF_SLOW_FRAMES_MAX)
+	              }
+
+	              // Throttle warnings to avoid turning perf debugging into the perf problem.
+	              if (nowMs - rafPerf.lastSlowLogMs >= 1000) {
+	                rafPerf.lastSlowLogMs = nowMs
+	                console.warn(
+	                  `[raf] slow frame ${totalMs.toFixed(1)}ms (snapshot ${snapshotMs.toFixed(
+	                    1,
+	                  )}ms camera ${cameraMs.toFixed(1)}ms render ${renderMs.toFixed(
+	                    1,
+	                  )}ms hud ${hudMs.toFixed(1)}ms debug ${debugMs.toFixed(1)}ms tail ${tailMs.toFixed(1)}ms)`,
+	                )
+	              }
+	            }
+	          }
+	          frameId = window.requestAnimationFrame(renderLoop)
+	        }
 
         renderLoop()
       } catch (error) {

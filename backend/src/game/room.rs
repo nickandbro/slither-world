@@ -13,7 +13,7 @@ use super::constants::{
     EVASIVE_PELLET_SIZE_MIN, EVASIVE_PELLET_SPAWN_ATTEMPTS, EVASIVE_PELLET_SUCTION_RADIUS,
     EVASIVE_PELLET_SUCTION_SPEED, EVASIVE_PELLET_SUCTION_STEP_MAX, EVASIVE_PELLET_ZIGZAG_HZ,
     EVASIVE_PELLET_ZIGZAG_STRENGTH, MAX_PELLETS, MAX_SPAWN_ATTEMPTS, MIN_SURVIVAL_LENGTH,
-    NODE_QUEUE_SIZE, OXYGEN_DRAIN_PER_SEC, OXYGEN_MAX, PELLET_SIZE_ENCODE_MAX,
+    OXYGEN_DRAIN_PER_SEC, OXYGEN_MAX, PELLET_SIZE_ENCODE_MAX,
     PELLET_SIZE_ENCODE_MIN, PLAYER_TIMEOUT_MS, RESPAWN_COOLDOWN_MS, RESPAWN_RETRY_MS,
     SMALL_PELLET_ATTRACT_RADIUS, SMALL_PELLET_ATTRACT_SPEED, SMALL_PELLET_ATTRACT_STEP_MAX_RATIO,
     SMALL_PELLET_CONSUME_ANGLE, SMALL_PELLET_DIGESTION_STRENGTH,
@@ -1960,15 +1960,39 @@ impl RoomState {
         Some(fallback)
     }
 
-    fn self_collision_start_index(body_angular_radius: f64) -> usize {
-        let boost_steps = (BOOST_MULTIPLIER.round() as i32).max(1) as f64;
-        let min_step_velocity = (BASE_SPEED * BOOST_MULTIPLIER) / boost_steps;
-        let min_node_spacing = (NODE_QUEUE_SIZE as f64) * min_step_velocity;
-        if !min_node_spacing.is_finite() || min_node_spacing <= 1e-9 {
-            return 2;
+    fn detect_snake_head_body_collisions(
+        player_snapshots: &[PlayerCollisionSnapshot],
+        dead: &mut HashSet<String>,
+        death_reasons: &mut HashMap<String, &'static str>,
+    ) {
+        for snapshot in player_snapshots {
+            if dead.contains(&snapshot.id) || !snapshot.alive || snapshot.snake.len() < 3 {
+                continue;
+            }
+            let head = snapshot.snake[0];
+            for other_snapshot in player_snapshots {
+                if !other_snapshot.alive || other_snapshot.id == snapshot.id {
+                    continue;
+                }
+                for node in &other_snapshot.snake {
+                    if collision_with_angular_radii(
+                        head,
+                        *node,
+                        snapshot.body_angular_radius,
+                        other_snapshot.body_angular_radius,
+                    ) {
+                        dead.insert(snapshot.id.clone());
+                        death_reasons
+                            .entry(snapshot.id.clone())
+                            .or_insert("snake_collision");
+                        break;
+                    }
+                }
+                if dead.contains(&snapshot.id) {
+                    break;
+                }
+            }
         }
-        let required = ((2.0 * body_angular_radius.max(0.0)) / min_node_spacing).ceil() as usize;
-        required.max(2)
     }
 
     fn can_player_continue_boost(player: &Player) -> bool {
@@ -2125,53 +2149,7 @@ impl RoomState {
             }
         }
 
-        for snapshot in &player_snapshots {
-            if dead.contains(&snapshot.id) || !snapshot.alive || snapshot.snake.len() < 3 {
-                continue;
-            }
-            let head = snapshot.snake[0];
-            let self_collision_start =
-                Self::self_collision_start_index(snapshot.body_angular_radius);
-            for node in snapshot.snake.iter().skip(self_collision_start) {
-                if collision_with_angular_radii(
-                    head,
-                    *node,
-                    snapshot.body_angular_radius,
-                    snapshot.body_angular_radius,
-                ) {
-                    dead.insert(snapshot.id.clone());
-                    death_reasons
-                        .entry(snapshot.id.clone())
-                        .or_insert("self_collision");
-                    break;
-                }
-            }
-            if dead.contains(&snapshot.id) {
-                continue;
-            }
-            for other_snapshot in &player_snapshots {
-                if !other_snapshot.alive || other_snapshot.id == snapshot.id {
-                    continue;
-                }
-                for node in &other_snapshot.snake {
-                    if collision_with_angular_radii(
-                        head,
-                        *node,
-                        snapshot.body_angular_radius,
-                        other_snapshot.body_angular_radius,
-                    ) {
-                        dead.insert(snapshot.id.clone());
-                        death_reasons
-                            .entry(snapshot.id.clone())
-                            .or_insert("snake_collision");
-                        break;
-                    }
-                }
-                if dead.contains(&snapshot.id) {
-                    break;
-                }
-            }
-        }
+        Self::detect_snake_head_body_collisions(&player_snapshots, &mut dead, &mut death_reasons);
 
         dead.extend(oxygen_dead);
         for id in dead {
@@ -2593,7 +2571,7 @@ struct SpawnedSnake {
 mod tests {
     use super::*;
     use crate::game::types::Digestion;
-    use std::collections::{HashMap, VecDeque};
+    use std::collections::{HashMap, HashSet, VecDeque};
     use tokio::sync::mpsc::unbounded_channel;
 
     fn make_snake(len: usize, start: f64) -> Vec<SnakeNode> {
@@ -2809,11 +2787,57 @@ mod tests {
     }
 
     #[test]
-    fn self_collision_skip_count_increases_with_girth() {
-        let base_radius = RoomState::snake_body_angular_radius_for_scale(1.0);
-        let capped_radius = RoomState::snake_body_angular_radius_for_scale(SNAKE_GIRTH_MAX_SCALE);
-        assert_eq!(RoomState::self_collision_start_index(base_radius), 2);
-        assert!(RoomState::self_collision_start_index(capped_radius) >= 3);
+    fn self_overlap_does_not_kill_player() {
+        let radius = RoomState::snake_body_angular_radius_for_scale(1.0);
+        let snapshot = PlayerCollisionSnapshot {
+            id: "self-overlap".to_string(),
+            alive: true,
+            snake: vec![
+                Point { x: 0.0, y: 0.0, z: 1.0 },
+                Point { x: 0.0, y: 1.0, z: 0.0 },
+                Point { x: 0.0, y: 0.0, z: 1.0 },
+            ],
+            contact_angular_radius: radius,
+            body_angular_radius: radius,
+        };
+        let mut dead = HashSet::new();
+        let mut death_reasons = HashMap::new();
+        RoomState::detect_snake_head_body_collisions(&[snapshot], &mut dead, &mut death_reasons);
+        assert!(dead.is_empty());
+        assert!(death_reasons.is_empty());
+    }
+
+    #[test]
+    fn snake_collision_still_kills_on_head_body_overlap() {
+        let radius = RoomState::snake_body_angular_radius_for_scale(1.0);
+        let a = PlayerCollisionSnapshot {
+            id: "a".to_string(),
+            alive: true,
+            snake: vec![
+                Point { x: 0.0, y: 0.0, z: 1.0 },
+                Point { x: 0.0, y: 1.0, z: 0.0 },
+                Point { x: -1.0, y: 0.0, z: 0.0 },
+            ],
+            contact_angular_radius: radius,
+            body_angular_radius: radius,
+        };
+        let b = PlayerCollisionSnapshot {
+            id: "b".to_string(),
+            alive: true,
+            snake: vec![
+                Point { x: 1.0, y: 0.0, z: 0.0 },
+                Point { x: 0.0, y: 0.0, z: 1.0 },
+                Point { x: 0.0, y: -1.0, z: 0.0 },
+            ],
+            contact_angular_radius: radius,
+            body_angular_radius: radius,
+        };
+        let mut dead = HashSet::new();
+        let mut death_reasons = HashMap::new();
+        RoomState::detect_snake_head_body_collisions(&[a, b], &mut dead, &mut death_reasons);
+        assert!(dead.contains("a"));
+        assert_eq!(death_reasons.get("a"), Some(&"snake_collision"));
+        assert!(!dead.contains("b"));
     }
 
     #[test]
