@@ -16,11 +16,9 @@ import {
   createRandomPlayerName,
   DEFAULT_ROOM,
   getInitialName,
-  getStoredBestScore,
   getStoredPlayerId,
   getInitialRendererPreference,
   sanitizeRoomName,
-  storeBestScore,
   storePlayerId,
   storePlayerName,
   storeRoomName,
@@ -127,7 +125,6 @@ export default function App() {
   const [roomName, setRoomName] = useState(DEFAULT_ROOM)
   const [roomInput, setRoomInput] = useState(DEFAULT_ROOM)
   const [rendererPreference] = useState<RendererPreference>(getInitialRendererPreference)
-  const [bestScore, setBestScore] = useState(getStoredBestScore)
   const [connectionStatus, setConnectionStatus] = useState('Connecting')
   const [activeRenderer, setActiveRenderer] = useState<RendererBackend | null>(null)
   const [rendererFallbackReason, setRendererFallbackReason] = useState<string | null>(null)
@@ -183,6 +180,11 @@ export default function App() {
       })
       .slice(0, REALTIME_LEADERBOARD_LIMIT)
   }, [gameState])
+  const localRealtimeRank = useMemo(() => {
+    if (!playerId) return null
+    const rankIndex = realtimeLeaderboard.findIndex((entry) => entry.id === playerId)
+    return rankIndex >= 0 ? rankIndex + 1 : null
+  }, [playerId, realtimeLeaderboard])
 
   useEffect(() => {
     if (menuPhase !== 'preplay') return
@@ -291,13 +293,6 @@ export default function App() {
     dayNightDebugModeRef.current = dayNightDebugMode
     webglRef.current?.setDayNightDebugMode?.(dayNightDebugModeRef.current)
   }, [dayNightDebugMode])
-
-  useEffect(() => {
-    if (score > bestScore) {
-      setBestScore(score)
-      storeBestScore(score)
-    }
-  }, [score, bestScore])
 
   useEffect(() => {
     storePlayerName(playerName)
@@ -911,15 +906,6 @@ export default function App() {
   return (
     <div className={`app ${isPlaying ? 'app--playing' : 'app--menu'}`}>
       <div className='game-card'>
-        {isPlaying && (
-          <div className='scorebar'>
-            <div className='score'>Score: {score}</div>
-            <div className='status'>
-              Room {roomName} · {connectionStatus} · {playersOnline} online
-            </div>
-          </div>
-        )}
-
         <div className='play-area'>
           <div className='game-surface'>
             <canvas
@@ -975,9 +961,17 @@ export default function App() {
         )}
 
         {isPlaying && (
-          <div className='info-panel'>
-            <div className='info-line'>Point to steer. Scroll to zoom. Press space to boost.</div>
-            <div className='info-line'>Best this run: {bestScore}</div>
+          <div className='player-stats-card' aria-live='polite'>
+            <div className='player-stats-line'>
+              <span>Your length: </span>
+              <span className='player-stats-value'>{Math.max(0, score)}</span>
+            </div>
+            <div className='player-stats-line'>
+              <span>Your rank: </span>
+              <span className='player-stats-value'>
+                {localRealtimeRank ?? '-'} of {playersOnline}
+              </span>
+            </div>
           </div>
         )}
       </div>
