@@ -13,6 +13,7 @@ HEADLESS=1
 NO_STACK_START=0
 NO_LAG_CONTROL=0
 REQUIRE_PASS=0
+NO_SCREENSHOT=0
 TUNING_OVERRIDES_JSON="${TUNING_OVERRIDES_JSON:-}"
 
 STACK_PID=""
@@ -37,6 +38,7 @@ Options:
   --no-lag-control                 Do not start/stop lag simulation
   --headed                         Run browser in headed mode
   --require-pass                   Exit non-zero if verdict fails
+  --no-screenshot                  Do not capture end-of-run screenshot
   -h, --help                       Show this help
 USAGE
 }
@@ -166,6 +168,10 @@ parse_args() {
         REQUIRE_PASS=1
         shift
         ;;
+      --no-screenshot)
+        NO_SCREENSHOT=1
+        shift
+        ;;
       -h|--help)
         usage
         exit 0
@@ -252,8 +258,11 @@ main() {
     --duration-secs "$DURATION_SECS"
     --output-json "$REPORT_JSON"
     --scenario-name "$PROFILE"
-    --screenshot "${RUN_DIR}/snapshot.png"
   )
+
+  if [[ "$NO_SCREENSHOT" -eq 0 ]]; then
+    BOT_CMD+=(--screenshot "${RUN_DIR}/snapshot.png")
+  fi
 
   if [[ "$HEADLESS" -eq 0 ]]; then
     BOT_CMD+=(--headed)

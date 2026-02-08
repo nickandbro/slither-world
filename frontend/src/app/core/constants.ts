@@ -4,25 +4,26 @@ export const MAX_EXTRAPOLATION_MS = 70
 export const SERVER_OFFSET_SMOOTHING = 0.12
 export const NET_INTERVAL_SMOOTHING = 0.15
 export const NET_JITTER_SMOOTHING = 0.12
-export const NET_BASE_DELAY_TICKS = 2.5
-export const NET_MIN_DELAY_TICKS = 2
-export const NET_MAX_DELAY_TICKS = 7
-export const NET_JITTER_DELAY_MULTIPLIER = 2.2
+export const NET_BASE_DELAY_TICKS = 1.85
+export const NET_MIN_DELAY_TICKS = 1.8
+export const NET_MAX_DELAY_TICKS = 4.6
+export const NET_JITTER_DELAY_MULTIPLIER = 1.2
+export const NET_JITTER_DELAY_MAX_TICKS = 0.9
 export const NET_SPIKE_STALE_TICKS = 2.2
 export const NET_SPIKE_INTERVAL_FACTOR = 2.1
 export const NET_SPIKE_INTERVAL_MARGIN_MS = 28
-export const NET_SPIKE_IMPAIRMENT_HOLD_MS = 520
-export const NET_SPIKE_IMPAIRMENT_MAX_HOLD_MS = 2200
-export const NET_SPIKE_DELAY_BOOST_TICKS = 2.8
-export const NET_DELAY_BOOST_DECAY_PER_SEC = 65
-export const NET_STABLE_RECOVERY_SECS = 0.45
-export const NET_SPIKE_ENTER_CONFIRM_MS = 170
-export const NET_SPIKE_EXIT_CONFIRM_MS = 320
-export const NET_CAMERA_RECOVERY_MS = 240
-export const NET_CAMERA_SPIKE_FOLLOW_RATE = 2.6
+export const NET_SPIKE_IMPAIRMENT_HOLD_MS = 250
+export const NET_SPIKE_IMPAIRMENT_MAX_HOLD_MS = 850
+export const NET_SPIKE_DELAY_BOOST_TICKS = 1.35
+export const NET_DELAY_BOOST_DECAY_PER_SEC = 220
+export const NET_STABLE_RECOVERY_SECS = 0.4
+export const NET_SPIKE_ENTER_CONFIRM_MS = 100
+export const NET_SPIKE_EXIT_CONFIRM_MS = 210
+export const NET_CAMERA_RECOVERY_MS = 210
+export const NET_CAMERA_SPIKE_FOLLOW_RATE = 4.8
 export const MOTION_BACKWARD_DOT_THRESHOLD = 0.996
 export const LOCAL_SNAKE_STABILIZER_RATE_NORMAL = 12
-export const LOCAL_SNAKE_STABILIZER_RATE_SPIKE = 2.6
+export const LOCAL_SNAKE_STABILIZER_RATE_SPIKE = 4.2
 export const CAMERA_DISTANCE_DEFAULT = 5.2
 export const CAMERA_DISTANCE_MIN = 4.2
 export const CAMERA_DISTANCE_MAX = 9
@@ -59,6 +60,7 @@ export type NetTuning = {
   netMinDelayTicks: number
   netMaxDelayTicks: number
   netJitterDelayMultiplier: number
+  netJitterDelayMaxTicks: number
   netSpikeStaleTicks: number
   netSpikeIntervalFactor: number
   netSpikeIntervalMarginMs: number
@@ -85,6 +87,7 @@ export const DEFAULT_NET_TUNING: NetTuning = {
   netMinDelayTicks: NET_MIN_DELAY_TICKS,
   netMaxDelayTicks: NET_MAX_DELAY_TICKS,
   netJitterDelayMultiplier: NET_JITTER_DELAY_MULTIPLIER,
+  netJitterDelayMaxTicks: NET_JITTER_DELAY_MAX_TICKS,
   netSpikeStaleTicks: NET_SPIKE_STALE_TICKS,
   netSpikeIntervalFactor: NET_SPIKE_INTERVAL_FACTOR,
   netSpikeIntervalMarginMs: NET_SPIKE_INTERVAL_MARGIN_MS,
@@ -162,6 +165,12 @@ export const resolveNetTuning = (overrides?: NetTuningOverrides | null): NetTuni
     netJitterDelayMultiplier: withRange(
       merged.netJitterDelayMultiplier,
       DEFAULT_NET_TUNING.netJitterDelayMultiplier,
+      0,
+      20,
+    ),
+    netJitterDelayMaxTicks: withRange(
+      merged.netJitterDelayMaxTicks,
+      DEFAULT_NET_TUNING.netJitterDelayMaxTicks,
       0,
       20,
     ),

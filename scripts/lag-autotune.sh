@@ -283,18 +283,26 @@ main() {
 
   declare -a CANDIDATES=(
     'baseline|{}'
-    'enter-fast|{"netSpikeEnterConfirmMs":120}'
-    'enter-mid|{"netSpikeEnterConfirmMs":150}'
-    'exit-long|{"netSpikeExitConfirmMs":380}'
-    'hold-short|{"netSpikeImpairmentHoldMs":380}'
-    'hold-long|{"netSpikeImpairmentHoldMs":700}'
-    'decay-fast|{"netDelayBoostDecayPerSec":115}'
-    'decay-slow|{"netDelayBoostDecayPerSec":70}'
-    'spike-rate-low|{"localSnakeStabilizerRateSpike":2.2}'
-    'spike-rate-high|{"localSnakeStabilizerRateSpike":3.4}'
-    'camera-follow-low|{"netCameraSpikeFollowRate":2.0}'
-    'camera-follow-high|{"netCameraSpikeFollowRate":3.6}'
-    'interval-margin-high|{"netSpikeIntervalMarginMs":40}'
+    'max-delay-5p5|{"netMaxDelayTicks":5.5}'
+    'max-delay-5|{"netMaxDelayTicks":5.0}'
+    'max-delay-4p5|{"netMaxDelayTicks":4.5}'
+    'base-delay-2|{"netBaseDelayTicks":2.0}'
+    'base-delay-1p9|{"netBaseDelayTicks":1.9}'
+    'jitter-mult-1p4|{"netJitterDelayMultiplier":1.4}'
+    'jitter-mult-1p2|{"netJitterDelayMultiplier":1.2}'
+    'jitter-cap-1p3|{"netJitterDelayMaxTicks":1.3}'
+    'jitter-cap-0p9|{"netJitterDelayMaxTicks":0.9}'
+    'boost-ticks-1p8|{"netSpikeDelayBoostTicks":1.8}'
+    'boost-ticks-1p4|{"netSpikeDelayBoostTicks":1.4}'
+    'decay-160|{"netDelayBoostDecayPerSec":160}'
+    'decay-220|{"netDelayBoostDecayPerSec":220}'
+    'impair-hold-320|{"netSpikeImpairmentHoldMs":320}'
+    'impair-hold-260|{"netSpikeImpairmentHoldMs":260}'
+    'impair-max-1000|{"netSpikeImpairmentMaxHoldMs":1000}'
+    'confirm-faster|{"netSpikeEnterConfirmMs":110,"netSpikeExitConfirmMs":220}'
+    'combo-arrival-calm|{"netMaxDelayTicks":4.8,"netBaseDelayTicks":1.9,"netJitterDelayMultiplier":1.25,"netJitterDelayMaxTicks":0.95,"netSpikeDelayBoostTicks":1.4,"netDelayBoostDecayPerSec":200,"netSpikeImpairmentHoldMs":280,"netSpikeImpairmentMaxHoldMs":900,"netSpikeEnterConfirmMs":120,"netSpikeExitConfirmMs":230,"localSnakeStabilizerRateSpike":4.0}'
+    'combo-smooth-spike|{"netMaxDelayTicks":5.0,"netBaseDelayTicks":2.1,"netJitterDelayMultiplier":1.35,"netJitterDelayMaxTicks":1.05,"netSpikeDelayBoostTicks":1.6,"netDelayBoostDecayPerSec":180,"netSpikeImpairmentHoldMs":300,"netSpikeImpairmentMaxHoldMs":1000,"netSpikeEnterConfirmMs":120,"netSpikeExitConfirmMs":250,"netCameraSpikeFollowRate":4.4,"localSnakeStabilizerRateSpike":3.8}'
+    'combo-low-latency-stable|{"netMaxDelayTicks":4.6,"netBaseDelayTicks":1.85,"netJitterDelayMultiplier":1.2,"netJitterDelayMaxTicks":0.9,"netSpikeDelayBoostTicks":1.35,"netDelayBoostDecayPerSec":220,"netSpikeImpairmentHoldMs":250,"netSpikeImpairmentMaxHoldMs":850,"netSpikeEnterConfirmMs":100,"netSpikeExitConfirmMs":210,"netCameraSpikeFollowRate":4.8,"localSnakeStabilizerRateSpike":4.2}'
   )
 
   local idx=0
@@ -316,6 +324,7 @@ main() {
       --profile "$PROFILE"
       --output-dir "$RUNS_DIR"
       --run-label "$label"
+      --no-screenshot
     )
 
     if [[ "$HEADLESS" -eq 0 ]]; then

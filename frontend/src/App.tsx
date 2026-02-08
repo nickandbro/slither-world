@@ -87,6 +87,8 @@ type NetSmoothingDebugInfo = {
   lagSpikeActive: boolean
   lagSpikeCause: LagSpikeCause
   playoutDelayMs: number
+  delayBoostMs: number
+  jitterDelayMs: number
   jitterMs: number
   receiveIntervalMs: number
   staleMs: number
@@ -113,6 +115,8 @@ type NetLagEvent = {
   lagSpikeActive: boolean
   lagSpikeCause: LagSpikeCause
   playoutDelayMs: number
+  delayBoostMs: number
+  jitterDelayMs: number
   jitterMs: number
   receiveIntervalMs: number
   staleMs: number
@@ -139,6 +143,7 @@ type NetLagReport = {
 
 const SEQ_HALF_RANGE = 0x8000_0000
 const NET_EVENT_LOG_LIMIT = 240
+const ARRIVAL_GAP_REENTRY_COOLDOWN_MS = 480
 
 const isSeqNewer = (next: number, current: number) => {
   const delta = (next - current) >>> 0
@@ -180,6 +185,7 @@ export default function App() {
   const lastSnapshotReceivedAtRef = useRef<number | null>(null)
   const receiveIntervalMsRef = useRef(50)
   const receiveJitterMsRef = useRef(0)
+  const receiveJitterDelayMsRef = useRef(0)
   const playoutDelayMsRef = useRef(100)
   const delayBoostMsRef = useRef(0)
   const lastDelayUpdateMsRef = useRef<number | null>(null)
@@ -190,6 +196,7 @@ export default function App() {
   const lagSpikeCauseRef = useRef<LagSpikeCause>('none')
   const lagSpikeEnterCandidateAtMsRef = useRef<number | null>(null)
   const lagSpikeExitCandidateAtMsRef = useRef<number | null>(null)
+  const lagSpikeArrivalGapCooldownUntilMsRef = useRef(0)
   const lagImpairmentUntilMsRef = useRef(0)
   const netTuningOverridesRef = useRef<NetTuningOverrides>({})
   const netTuningRef = useRef(resolveNetTuning(DEFAULT_NET_TUNING))
@@ -230,6 +237,8 @@ export default function App() {
     lagSpikeActive: false,
     lagSpikeCause: 'none',
     playoutDelayMs: 100,
+    delayBoostMs: 0,
+    jitterDelayMs: 0,
     jitterMs: 0,
     receiveIntervalMs: 50,
     staleMs: 0,
@@ -391,6 +400,8 @@ export default function App() {
         lagSpikeActive: net.lagSpikeActive,
         lagSpikeCause: net.lagSpikeCause,
         playoutDelayMs: net.playoutDelayMs,
+        delayBoostMs: net.delayBoostMs,
+        jitterDelayMs: net.jitterDelayMs,
         jitterMs: net.jitterMs,
         receiveIntervalMs: net.receiveIntervalMs,
         staleMs: net.staleMs,
@@ -465,21 +476,29 @@ export default function App() {
   )
 
   const setLagSpikeState = useCallback((active: boolean, cause: LagSpikeCause) => {
+    const wasActive = lagSpikeActiveRef.current
+    const previousCause = lagSpikeCauseRef.current
     const normalizedCause: LagSpikeCause = active ? cause : 'none'
-    const changed =
-      lagSpikeActiveRef.current !== active ||
-      (active && lagSpikeCauseRef.current !== normalizedCause)
-    if (!changed) return
+    const becameActive = !wasActive && active
+    const becameInactive = wasActive && !active
+    const causeChangedWhileActive = wasActive && active && previousCause !== normalizedCause
+    if (!becameActive && !becameInactive && !causeChangedWhileActive) return
 
     lagSpikeActiveRef.current = active
     lagSpikeCauseRef.current = normalizedCause
     netDebugInfoRef.current.lagSpikeActive = active
     netDebugInfoRef.current.lagSpikeCause = normalizedCause
 
-    if (active) {
+    if (causeChangedWhileActive) {
+      return
+    }
+
+    if (becameActive) {
       const tuning = netTuningRef.current
       const tickMs = Math.max(16, serverTickMsRef.current)
-      const spikeBoost = tickMs * tuning.netSpikeDelayBoostTicks
+      const causeBoostScale =
+        normalizedCause === 'arrival-gap' ? 0.45 : normalizedCause === 'stale' ? 1 : 1.2
+      const spikeBoost = tickMs * tuning.netSpikeDelayBoostTicks * causeBoostScale
       delayBoostMsRef.current = Math.max(delayBoostMsRef.current, spikeBoost)
       appendNetLagEvent(
         'spike_start',
@@ -491,6 +510,10 @@ export default function App() {
         )
       }
       return
+    }
+
+    if (previousCause === 'arrival-gap') {
+      lagSpikeArrivalGapCooldownUntilMsRef.current = performance.now() + ARRIVAL_GAP_REENTRY_COOLDOWN_MS
     }
 
     appendNetLagEvent(
@@ -579,8 +602,13 @@ export default function App() {
         const jitterEwma = receiveJitterMsRef.current
         receiveJitterMsRef.current =
           jitterEwma + (jitterSample - jitterEwma) * tuning.netJitterSmoothing
-
         const tickMs = Math.max(16, serverTickMsRef.current)
+        const jitterDelaySampleCapMs = tickMs * tuning.netJitterDelayMaxTicks
+        const jitterDelaySample = Math.min(jitterSample, jitterDelaySampleCapMs)
+        const jitterDelayEwma = receiveJitterDelayMsRef.current
+        receiveJitterDelayMsRef.current =
+          jitterDelayEwma + (jitterDelaySample - jitterDelayEwma) * tuning.netJitterSmoothing
+
         const intervalSpikeThreshold = Math.max(
           tickMs * tuning.netSpikeIntervalFactor,
           nextIntervalEwma +
@@ -589,16 +617,19 @@ export default function App() {
         )
         if (interval > intervalSpikeThreshold) {
           const lateBy = interval - intervalSpikeThreshold
-          const holdMs = clamp(
-            tuning.netSpikeImpairmentHoldMs + lateBy * 5,
-            tuning.netSpikeImpairmentHoldMs,
-            tuning.netSpikeImpairmentMaxHoldMs,
-          )
-          lagImpairmentUntilMsRef.current = Math.max(lagImpairmentUntilMsRef.current, nowMs + holdMs)
-          delayBoostMsRef.current = Math.max(
-            delayBoostMsRef.current,
-            Math.min(tickMs * (tuning.netSpikeDelayBoostTicks * 1.8), lateBy * 1.25),
-          )
+          if (lateBy > tickMs * 0.45) {
+            const lateByScale = clamp(lateBy / tickMs, 0, 6)
+            const holdMs = clamp(
+              tuning.netSpikeImpairmentHoldMs + lateBy * (1.8 + lateByScale * 0.6),
+              tuning.netSpikeImpairmentHoldMs,
+              tuning.netSpikeImpairmentMaxHoldMs,
+            )
+            lagImpairmentUntilMsRef.current = Math.max(lagImpairmentUntilMsRef.current, nowMs + holdMs)
+            delayBoostMsRef.current = Math.max(
+              delayBoostMsRef.current,
+              Math.min(tickMs * (tuning.netSpikeDelayBoostTicks * 1.25), lateBy * 0.7),
+            )
+          }
         }
       }
     }
@@ -622,6 +653,8 @@ export default function App() {
     netDebugInfoRef.current = {
       ...netDebugInfoRef.current,
       latestSeq: latestSeqRef.current,
+      delayBoostMs: delayBoostMsRef.current,
+      jitterDelayMs: receiveJitterDelayMsRef.current,
       jitterMs: receiveJitterMsRef.current,
       receiveIntervalMs: latestIntervalMs,
       seqGapDetected: seqGapDetectedRef.current,
@@ -642,8 +675,9 @@ export default function App() {
     const tickMs = Math.max(16, serverTickMsRef.current)
 
     const lastDelayUpdateMs = lastDelayUpdateMsRef.current
+    const dtSeconds =
+      lastDelayUpdateMs !== null ? Math.max(0, Math.min(0.1, (nowMs - lastDelayUpdateMs) / 1000)) : 1 / 60
     if (lastDelayUpdateMs !== null) {
-      const dtSeconds = Math.max(0, Math.min(0.1, (nowMs - lastDelayUpdateMs) / 1000))
       if (dtSeconds > 0 && !lagSpikeActiveRef.current) {
         delayBoostMsRef.current = Math.max(
           0,
@@ -684,7 +718,10 @@ export default function App() {
         if (lagSpikeEnterCandidateAtMsRef.current === null) {
           lagSpikeEnterCandidateAtMsRef.current = nowMs
         }
+        const blockArrivalGapReentry =
+          instantCause === 'arrival-gap' && nowMs < lagSpikeArrivalGapCooldownUntilMsRef.current
         const enterConfirmed =
+          !blockArrivalGapReentry &&
           nowMs - (lagSpikeEnterCandidateAtMsRef.current ?? nowMs) >= tuning.netSpikeEnterConfirmMs
         if (enterConfirmed) {
           lagSpikeEnterCandidateAtMsRef.current = null
@@ -708,8 +745,12 @@ export default function App() {
       if (lagSpikeExitCandidateAtMsRef.current === null) {
         lagSpikeExitCandidateAtMsRef.current = nowMs
       }
+      const exitConfirmMs =
+        lagSpikeCauseRef.current === 'arrival-gap'
+          ? Math.max(tuning.netSpikeExitConfirmMs, 420)
+          : tuning.netSpikeExitConfirmMs
       const exitConfirmed =
-        nowMs - (lagSpikeExitCandidateAtMsRef.current ?? nowMs) >= tuning.netSpikeExitConfirmMs
+        nowMs - (lagSpikeExitCandidateAtMsRef.current ?? nowMs) >= exitConfirmMs
       if (exitConfirmed) {
         lagSpikeExitCandidateAtMsRef.current = null
         nextSpikeActive = false
@@ -724,19 +765,32 @@ export default function App() {
     const baseDelayMs = tickMs * tuning.netBaseDelayTicks
     const minDelayMs = tickMs * tuning.netMinDelayTicks
     const maxDelayMs = tickMs * tuning.netMaxDelayTicks
-    const jitterDelayMs = receiveJitterMsRef.current * tuning.netJitterDelayMultiplier
-    const delay = clamp(baseDelayMs + jitterDelayMs + delayBoostMsRef.current, minDelayMs, maxDelayMs)
+    const jitterDelayMs = receiveJitterDelayMsRef.current * tuning.netJitterDelayMultiplier
+    const targetDelay = clamp(baseDelayMs + jitterDelayMs + delayBoostMsRef.current, minDelayMs, maxDelayMs)
+    const currentDelay = playoutDelayMsRef.current
+    const delayRatePerSec =
+      targetDelay >= currentDelay
+        ? lagSpikeActiveRef.current
+          ? 12
+          : 8
+        : lagSpikeActiveRef.current
+          ? 8
+          : 5
+    const delayAlpha = clamp(1 - Math.exp(-delayRatePerSec * dtSeconds), 0, 1)
+    const delay = currentDelay + (targetDelay - currentDelay) * delayAlpha
     playoutDelayMsRef.current = delay
 
     const maxExtrapolationMs = lagSpikeActiveRef.current
-      ? clamp(tickMs * 0.5, 10, 28)
-      : clamp(tickMs * 0.4, 8, MAX_EXTRAPOLATION_MS)
+      ? clamp(tickMs * 0.95, 14, 48)
+      : clamp(tickMs * 0.5, 10, MAX_EXTRAPOLATION_MS)
     const renderTime = now + offset - delay
     const snapshot = buildInterpolatedSnapshot(buffer, renderTime, maxExtrapolationMs)
     netDebugInfoRef.current = {
       lagSpikeActive: lagSpikeActiveRef.current,
       lagSpikeCause: lagSpikeCauseRef.current,
       playoutDelayMs: delay,
+      delayBoostMs: delayBoostMsRef.current,
+      jitterDelayMs: jitterDelayMs,
       jitterMs: receiveJitterMsRef.current,
       receiveIntervalMs: receiveIntervalMsRef.current,
       staleMs,
@@ -780,15 +834,25 @@ export default function App() {
         return snapshot
       }
 
+      const tuning = netTuningRef.current
+      const hardSpikeActive =
+        lagSpikeActiveRef.current && lagSpikeCauseRef.current !== 'arrival-gap'
+      const mildArrivalSpikeActive =
+        lagSpikeActiveRef.current && lagSpikeCauseRef.current === 'arrival-gap'
       const nearSpike =
-        lagSpikeActiveRef.current ||
+        hardSpikeActive ||
         lagCameraHoldActiveRef.current ||
         lagCameraRecoveryStartMsRef.current !== null ||
-        delayBoostMsRef.current > 0.5
-      const tuning = netTuningRef.current
+        delayBoostMsRef.current > serverTickMsRef.current * 0.85
+      const mildArrivalRate = Math.max(
+        tuning.localSnakeStabilizerRateSpike * 1.35,
+        tuning.localSnakeStabilizerRateNormal * 0.55,
+      )
       const rate = nearSpike
         ? tuning.localSnakeStabilizerRateSpike
-        : tuning.localSnakeStabilizerRateNormal
+        : mildArrivalSpikeActive
+          ? mildArrivalRate
+          : tuning.localSnakeStabilizerRateNormal
       const dt = clamp(frameDeltaSeconds, 0, 0.1)
       const alpha = 1 - Math.exp(-rate * dt)
 
@@ -1027,7 +1091,9 @@ export default function App() {
             let gameplayCamera = rawGameplayCamera
             if (phase === 'playing' && hasSpawnedSnake && rawGameplayCamera.active) {
               const tuning = netTuningRef.current
-              if (lagSpikeActiveRef.current) {
+              const hardSpikeActive =
+                lagSpikeActiveRef.current && lagSpikeCauseRef.current !== 'arrival-gap'
+              if (hardSpikeActive) {
                 lagCameraRecoveryStartMsRef.current = null
                 if (!lagCameraHoldActiveRef.current) {
                   const stableCamera = stableGameplayCameraRef.current
@@ -1070,7 +1136,7 @@ export default function App() {
                 }
               }
 
-              if (gameplayCamera.active && !lagSpikeActiveRef.current) {
+              if (gameplayCamera.active && !hardSpikeActive) {
                 stableGameplayCameraRef.current = {
                   active: true,
                   q: { ...gameplayCamera.q },
@@ -1349,10 +1415,10 @@ export default function App() {
                 const motionInfo = motionDebugInfoRef.current
                 appendNetLagEvent(
                   'summary',
-                  `summary lag=${netInfo.lagSpikeActive ? '1' : '0'} cause=${netInfo.lagSpikeCause} delay=${netInfo.playoutDelayMs.toFixed(1)}ms jitter=${netInfo.jitterMs.toFixed(1)}ms interval=${netInfo.receiveIntervalMs.toFixed(1)}ms stale=${netInfo.staleMs.toFixed(1)}ms impair=${netInfo.impairmentMsRemaining.toFixed(0)}ms tuningRev=${netInfo.tuningRevision} backward=${motionInfo.backwardCorrectionCount}/${motionInfo.sampleCount} minDot=${motionInfo.minHeadDot.toFixed(4)}`,
+                  `summary lag=${netInfo.lagSpikeActive ? '1' : '0'} cause=${netInfo.lagSpikeCause} delay=${netInfo.playoutDelayMs.toFixed(1)}ms boost=${netInfo.delayBoostMs.toFixed(1)}ms jitter=${netInfo.jitterMs.toFixed(1)}ms jitterDelay=${netInfo.jitterDelayMs.toFixed(1)}ms interval=${netInfo.receiveIntervalMs.toFixed(1)}ms stale=${netInfo.staleMs.toFixed(1)}ms impair=${netInfo.impairmentMsRemaining.toFixed(0)}ms tuningRev=${netInfo.tuningRevision} backward=${motionInfo.backwardCorrectionCount}/${motionInfo.sampleCount} minDot=${motionInfo.minHeadDot.toFixed(4)}`,
                 )
                 console.info(
-                  `[net] summary lag=${netInfo.lagSpikeActive} cause=${netInfo.lagSpikeCause} delay=${netInfo.playoutDelayMs.toFixed(1)}ms jitter=${netInfo.jitterMs.toFixed(1)}ms interval=${netInfo.receiveIntervalMs.toFixed(1)}ms stale=${netInfo.staleMs.toFixed(1)}ms impair=${netInfo.impairmentMsRemaining.toFixed(0)}ms tuningRev=${netInfo.tuningRevision} backward=${motionInfo.backwardCorrectionCount}/${motionInfo.sampleCount} minDot=${motionInfo.minHeadDot.toFixed(4)}`,
+                  `[net] summary lag=${netInfo.lagSpikeActive} cause=${netInfo.lagSpikeCause} delay=${netInfo.playoutDelayMs.toFixed(1)}ms boost=${netInfo.delayBoostMs.toFixed(1)}ms jitter=${netInfo.jitterMs.toFixed(1)}ms jitterDelay=${netInfo.jitterDelayMs.toFixed(1)}ms interval=${netInfo.receiveIntervalMs.toFixed(1)}ms stale=${netInfo.staleMs.toFixed(1)}ms impair=${netInfo.impairmentMsRemaining.toFixed(0)}ms tuningRev=${netInfo.tuningRevision} backward=${motionInfo.backwardCorrectionCount}/${motionInfo.sampleCount} minDot=${motionInfo.minHeadDot.toFixed(4)}`,
                 )
                 lastNetSummaryLogMsRef.current = nowMs
               }
@@ -1494,6 +1560,7 @@ export default function App() {
       lastSnapshotReceivedAtRef.current = null
       receiveIntervalMsRef.current = 50
       receiveJitterMsRef.current = 0
+      receiveJitterDelayMsRef.current = 0
       playoutDelayMsRef.current = 100
       delayBoostMsRef.current = 0
       lastDelayUpdateMsRef.current = null
@@ -1504,6 +1571,7 @@ export default function App() {
       lagSpikeCauseRef.current = 'none'
       lagSpikeEnterCandidateAtMsRef.current = null
       lagSpikeExitCandidateAtMsRef.current = null
+      lagSpikeArrivalGapCooldownUntilMsRef.current = 0
       lagImpairmentUntilMsRef.current = 0
       netTuningRef.current = resolveNetTuning(netTuningOverridesRef.current)
       tickIntervalRef.current = 50
@@ -1513,6 +1581,8 @@ export default function App() {
         lagSpikeActive: false,
         lagSpikeCause: 'none',
         playoutDelayMs: 100,
+        delayBoostMs: 0,
+        jitterDelayMs: 0,
         jitterMs: 0,
         receiveIntervalMs: 50,
         staleMs: 0,
