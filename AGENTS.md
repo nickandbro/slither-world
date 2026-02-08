@@ -38,7 +38,9 @@ Repo root (recommended for full stack):
 
 ## Configuration & Deployment Notes
 - Production deployment specifics (as of February 8, 2026):
-  - Cloudflare entrypoint: `https://snake-game.nickbrooks085.workers.dev`.
+  - Cloudflare production hostnames: `https://slitherworld.com` and `https://www.slitherworld.com`.
+  - Workers.dev fallback hostname remains available: `https://snake-game.nickbrooks085.workers.dev`.
+  - Worker routes are managed as zone routes: `slitherworld.com/*` and `www.slitherworld.com/*` -> service `snake-game`.
   - Hetzner control-plane host: `snake-control-prod` (`178.156.136.148`) running backend image `ghcr.io/nickandbro/slither-world-backend:prod-20260208-firewall-amd64-022020`.
   - Hetzner firewalls are in place:
     - Control-plane firewall `snake-control-fw`: allow inbound `80/tcp` from internet and `22/tcp` only from trusted admin IPs.

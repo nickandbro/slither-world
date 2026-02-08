@@ -2,7 +2,9 @@
 
 ## Current Production Topology
 - Cloudflare worker + static client:
-  - `https://snake-game.nickbrooks085.workers.dev`
+  - Primary hostnames: `https://slitherworld.com`, `https://www.slitherworld.com`
+  - Workers.dev fallback: `https://snake-game.nickbrooks085.workers.dev`
+  - Zone routes: `slitherworld.com/*` and `www.slitherworld.com/*` -> `snake-game`
 - Hetzner control-plane VM:
   - `snake-control-prod`
   - IPv4: `178.156.136.148`

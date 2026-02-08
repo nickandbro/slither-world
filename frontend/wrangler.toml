@@ -1,9 +1,14 @@
 name = "snake-game"
 main = "worker/index.ts"
 compatibility_date = "2026-02-03"
+workers_dev = true
+routes = [
+  { pattern = "slitherworld.com/*", zone_name = "slitherworld.com" },
+  { pattern = "www.slitherworld.com/*", zone_name = "slitherworld.com" }
+]
 
 [assets]
-directory = "./dist"
+directory = "./dist/client"
 not_found_handling = "single-page-application"
 binding = "ASSETS"
 
