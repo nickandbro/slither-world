@@ -9,7 +9,7 @@
 		"build:obfuscated": "OBFUSCATE_CLIENT=1 npm run build",
 		"lint": "eslint .",
 		"preview": "npm run build && vite preview",
-		"deploy": "npm run build:obfuscated && wrangler deploy",
+		"deploy": "npm run build:obfuscated && wrangler deploy -c wrangler.toml",
 		"cf-typegen": "wrangler types",
 		"test:e2e": "playwright test --config playwright.config.ts"
 	},

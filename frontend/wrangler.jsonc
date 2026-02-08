@@ -24,7 +24,7 @@
 		"binding": "ASSETS"
 	},
 	"vars": {
-		"CONTROL_PLANE_ORIGIN": "http://127.0.0.1:8787"
+		"CONTROL_PLANE_ORIGIN": "http://static.148.136.156.178.clients.your-server.de"
 	},
 	"placement": {
 		"mode": "smart"

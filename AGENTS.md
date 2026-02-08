@@ -32,7 +32,7 @@ Repo root (recommended for full stack):
 - `./scripts/simulate-lag-spikes.sh start|stop|status` — macOS-only PF/dummynet lag simulation helper. Defaults to backend-only shaping (`BACKEND_PORT`, default `8788`); use `PORTS=...` only when intentionally shaping additional ports.
 - `./scripts/run-lag-automation.sh` — single automated lag scenario run (bot drives movement/boost while lag shaping is active). Writes `report.json` under `output/lag-tests/<run-label>/`.
 - `./scripts/lag-autotune.sh` — multi-candidate lag tuning sweep. Runs repeated `run-lag-automation.sh` scenarios and ranks candidates by motion stability + delay metrics.
-- Frontend production deploy script (`frontend/package.json`) uses an obfuscated client build (`npm run build:obfuscated`) before `wrangler deploy`.
+- Frontend production deploy script (`frontend/package.json`) uses an obfuscated client build (`npm run build:obfuscated`) before `wrangler deploy -c wrangler.toml`.
 
 ## Testing Expectations
 - Default validation should be lightweight: prefer targeted checks such as `npm run build`, `npm run lint`, and focused backend/frontend tests relevant to the change.
@@ -48,7 +48,7 @@ Repo root (recommended for full stack):
   - Cloudflare production hostnames: `https://slitherworld.com` and `https://www.slitherworld.com`.
   - Workers.dev fallback hostname remains available: `https://snake-game.nickbrooks085.workers.dev`.
   - Worker routes are managed as zone routes: `slitherworld.com/*` and `www.slitherworld.com/*` -> service `snake-game`.
-  - Hetzner control-plane host: `snake-control-prod` (`178.156.136.148`) running backend image `ghcr.io/nickandbro/slither-world-backend:prod-20260208-firewall-amd64-022020`.
+  - Hetzner control-plane host: `snake-control-prod` (`178.156.136.148`) running backend image `ghcr.io/nickandbro/slither-world-backend:prod-20260208-lag-autotune-73d9c68`.
   - Hetzner firewalls are in place:
     - Control-plane firewall `snake-control-fw`: allow inbound `80/tcp` from internet and `22/tcp` only from trusted admin IPs.
     - Room firewall `snake-room-fw`: allow inbound `80/tcp` from internet and block SSH ingress.
@@ -111,7 +111,7 @@ Repo root (recommended for full stack):
   - `window.__SNAKE_DEBUG__.getNetLagEvents()` / `getNetLagReport()` expose event timelines; `clearNetLagEvents()` resets them.
   - `window.__SNAKE_DEBUG__.setNetTuningOverrides(overrides)` / `resetNetTuningOverrides()` apply runtime net-tuning changes for local testing; `getNetTuningOverrides()` and `getResolvedNetTuning()` expose current tuning.
 - Spawning is collision-safe: new spawns are rejected if any node overlaps existing alive snakes. Respawn retries are delayed if no safe spot is found.
-- Multiplayer WebSocket payloads are custom binary frames (versioned header). Current protocol version is `11`; when the protocol changes, deploy frontend and backend together. Join frames include `FLAG_JOIN_DEFER_SPAWN` so clients can connect/update identity without immediate spawn (used by the pre-spawn menu flow). The server still accepts JSON `Text` frames for backwards compatibility, but always sends binary. Client codec lives in `frontend/src/game/wsProtocol.ts`. State/init snapshots include `u16 total_players` plus a per-session view-scoped player list; the server always includes the local player and includes remote players only when they have a visible non-stub snake window for that session view. Player payload entries include `f32 score_fraction` (after `score`), then `f32 oxygen` + `u8 is_boosting` + `f32 girth_scale` + `f32 tail_extension`, and pellet payload entries are encoded as `u32 pellet_id` + quantized normal (`i16 x/y/z`) + `u8 color_index` + `u8 size`.
+- Multiplayer WebSocket payloads are custom binary frames (versioned header). Current protocol version is `12`; when the protocol changes, deploy frontend and backend together. Join frames include `FLAG_JOIN_DEFER_SPAWN` so clients can connect/update identity without immediate spawn (used by the pre-spawn menu flow). The server still accepts JSON `Text` frames for backwards compatibility, but always sends binary. Client codec lives in `frontend/src/game/wsProtocol.ts`. State/init snapshots include `u16 total_players` plus a per-session view-scoped player list; the server always includes the local player and includes remote players only when they have a visible non-stub snake window for that session view. Player payload entries include `f32 score_fraction` (after `score`), then `f32 oxygen` + `u8 is_boosting` + `f32 girth_scale` + `f32 tail_extension`, and pellet payload entries are encoded as `u32 pellet_id` + quantized normal (`i16 x/y/z`) + `u8 color_index` + `u8 size`.
 - Player digestion payload entries are encoded as `u32 digestion_id` + `f32 progress` + `f32 strength` in the binary stream (count remains `u8`).
 - Small pellet digestion behavior is merged per player per tick: consumed pellet growth fractions are aggregated into one digestion event with weighted bump strength; growth is applied authoritatively at tail arrival (including fractional tail extension before full-node commits).
 - Tail node commits from digestion are paced at a maximum of one node per movement substep; excess fractional growth stays in `tail_extension` for later substeps to avoid burst tail jumps.

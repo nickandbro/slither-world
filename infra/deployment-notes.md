@@ -16,7 +16,7 @@
 
 ## Current Runtime Image
 - Backend image in use:
-  - `ghcr.io/nickandbro/slither-world-backend:prod-20260208-firewall-amd64-022020`
+  - `ghcr.io/nickandbro/slither-world-backend:prod-20260208-lag-autotune-73d9c68`
 
 ## Firewall Posture (2026-02-08)
 - Control-plane firewall:
@@ -40,6 +40,7 @@
 - `7d6e7e9`: fixed room cloud-init startup script generation and worker room-origin normalization for WS proxying.
 - `6a7a591`: fixed idle room scale-down heartbeat activity tracking.
 - `prod-20260208-firewall-amd64-022020`: added control-plane create-time firewall assignment (`HETZNER_ROOM_FIREWALL_IDS`) for autoscaled room VMs.
+- `prod-20260208-lag-autotune-73d9c68`: lag-spike mitigation improvements (client playout buffering, camera hold/recovery) and WS protocol bump to `12`.
 - Room ID truncation fix (WS token mismatch):
   - Frontend no longer truncates server-assigned room IDs before websocket connect.
   - Frontend room sanitization length increased to `64`.
@@ -87,7 +88,7 @@
 ## Firewall Rollout Verification (2026-02-08)
 - Control-plane container env includes:
   - `HETZNER_ROOM_FIREWALL_IDS=10502342`
-  - `ROOM_IMAGE=ghcr.io/nickandbro/slither-world-backend:prod-20260208-firewall-amd64-022020`
+  - `ROOM_IMAGE=ghcr.io/nickandbro/slither-world-backend:prod-20260208-lag-autotune-73d9c68`
 - Autoscale validation created a fresh room VM:
   - Room ID: `room-b771b8625e774b2bac5e5a1a26218f34`
   - Hetzner server ID: `120348252`
