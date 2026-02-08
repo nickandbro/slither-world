@@ -25,6 +25,7 @@ mod shared;
 
 use game::room::DebugKillTarget;
 use game::room::Room;
+use shared::room_token::{sign_room_token, RoomTokenClaims};
 
 const MAX_SCORE: i64 = 1_000_000;
 const DEFAULT_LIMIT: i64 = 10;
@@ -35,6 +36,15 @@ struct AppState {
     rooms: DashMap<String, Arc<Room>>,
     db: SqlitePool,
     debug_commands: bool,
+    standalone_matchmake: StandaloneMatchmakeConfig,
+}
+
+#[derive(Clone)]
+struct StandaloneMatchmakeConfig {
+    capacity: usize,
+    token_ttl_secs: i64,
+    room_origin: String,
+    room_token_secret: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -77,6 +87,23 @@ struct DebugKillResponse {
 struct DebugKillQuery {
     room: Option<String>,
     target: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct MatchmakeRequest {
+    #[serde(rename = "preferredRoom")]
+    preferred_room: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MatchmakeResponse {
+    #[serde(rename = "roomId")]
+    room_id: String,
+    #[serde(rename = "roomToken")]
+    room_token: String,
+    capacity: usize,
+    #[serde(rename = "expiresAt")]
+    expires_at: i64,
 }
 
 #[tokio::main]
@@ -242,6 +269,11 @@ async fn room_mode_ws_handler(
 }
 
 async fn run_standalone() -> anyhow::Result<()> {
+    let port: u16 = env::var("PORT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(8787);
+
     let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
         let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let default_path = base.join("data").join("leaderboard.db");
@@ -259,10 +291,35 @@ async fn run_standalone() -> anyhow::Result<()> {
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
         .unwrap_or(false);
 
+    let matchmake_capacity = env::var("STANDALONE_MATCHMAKE_CAPACITY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(25);
+    let matchmake_token_ttl_secs = env::var("STANDALONE_ROOM_TOKEN_TTL_SECS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(90);
+    let room_origin = env::var("STANDALONE_ROOM_ORIGIN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("http://localhost:{port}"));
+    let room_token_secret = env::var("ROOM_TOKEN_SECRET")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "dev-room-token-secret".to_string());
+
     let state = Arc::new(AppState {
         rooms: DashMap::new(),
         db,
         debug_commands,
+        standalone_matchmake: StandaloneMatchmakeConfig {
+            capacity: matchmake_capacity,
+            token_ttl_secs: matchmake_token_ttl_secs,
+            room_origin,
+            room_token_secret,
+        },
     });
 
     let cors = CorsLayer::new()
@@ -272,6 +329,7 @@ async fn run_standalone() -> anyhow::Result<()> {
 
     let mut app: Router<Arc<AppState>> = Router::new()
         .route("/api/health", get(health))
+        .route("/api/matchmake", post(matchmake_standalone))
         .route(
             "/api/leaderboard",
             get(leaderboard_get).post(leaderboard_post),
@@ -284,11 +342,6 @@ async fn run_standalone() -> anyhow::Result<()> {
     }
 
     let app: Router = app.with_state(state);
-
-    let port: u16 = env::var("PORT")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(8787);
 
     let address = format!("0.0.0.0:{port}");
     tracing::info!("listening on {address}");
@@ -339,6 +392,65 @@ fn ensure_db_dir(database_url: &str) -> anyhow::Result<()> {
 
 async fn health() -> impl IntoResponse {
     Json(OkResponse { ok: true })
+}
+
+async fn matchmake_standalone(
+    State(state): State<Arc<AppState>>,
+    payload: Result<Json<MatchmakeRequest>, axum::extract::rejection::JsonRejection>,
+) -> impl IntoResponse {
+    let Json(payload) = match payload {
+        Ok(payload) => payload,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    ok: false,
+                    error: "Invalid JSON".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let room_id = payload
+        .preferred_room
+        .as_deref()
+        .map(sanitize_room_name)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "main".to_string());
+
+    let expires_at = current_time_millis() + state.standalone_matchmake.token_ttl_secs * 1000;
+    let claims = RoomTokenClaims {
+        room_id: room_id.clone(),
+        origin: state.standalone_matchmake.room_origin.clone(),
+        expires_at_ms: expires_at,
+    };
+    let room_token = match sign_room_token(&claims, &state.standalone_matchmake.room_token_secret)
+    {
+        Ok(token) => token,
+        Err(error) => {
+            tracing::error!(?error, "standalone matchmake token signing failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    ok: false,
+                    error: "Failed to issue room token".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    (
+        StatusCode::OK,
+        Json(MatchmakeResponse {
+            room_id,
+            room_token,
+            capacity: state.standalone_matchmake.capacity,
+            expires_at,
+        }),
+    )
+        .into_response()
 }
 
 async fn leaderboard_get(
@@ -544,6 +656,19 @@ async fn handle_socket(socket: WebSocket, room: Arc<Room>) {
 
     room.remove_session(&session_id).await;
     send_task.abort();
+}
+
+fn sanitize_room_name(value: &str) -> String {
+    let mut cleaned = String::with_capacity(value.len().min(64));
+    for ch in value.chars() {
+        if cleaned.len() >= 64 {
+            break;
+        }
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            cleaned.push(ch);
+        }
+    }
+    cleaned
 }
 
 fn current_time_millis() -> i64 {

@@ -1,19 +1,19 @@
 # Repository Guidelines
 
-This repo is split into a Vite + React + TypeScript frontend and a Rust (Tokio) backend. Cloudflare Workers now only serve the static frontend build; multiplayer and leaderboard traffic goes to the Rust server.
+This repo is split into a Vite + React + TypeScript frontend and a Rust (Tokio) backend. Cloudflare Workers serve the static frontend build and proxy matchmaking/room traffic to the Rust server; gameplay authority and leaderboard persistence remain on the Rust backend.
 
 ## Project Gist
 Spherical Snake is a multiplayer, slither-style snake game where players steer glowing snakes across a tiny planet. The React/Three.js client renders a static planet patch atlas (fixed topology) with camera/view-based patch + environment culling and an HUD (including compact head-anchored oxygen depletion meters plus a radial score interval gauge) with selectable WebGL/WebGPU backends. A Rust server (Tokio + Axum) runs the authoritative game loop and sends per-session, view-scoped snapshots over WebSockets. The in-game leaderboard panel is a realtime room scorecard driven by snapshot player data (top 5 alive snakes). Persisted leaderboard entries are still stored in SQLite on the backend via API routes.
 
 ## Project Structure & Module Organization
-- `frontend/` — Vite + React client and Cloudflare Worker for static asset serving.
+- `frontend/` — Vite + React client and Cloudflare Worker for static asset serving plus matchmaking/room proxying.
 - `frontend/src/` — React UI source (`App.tsx`, `main.tsx`, CSS, and `assets/`).
 - `frontend/src/app/` — app-level UI decomposition (`components/`) and shared app runtime helpers (`core/`).
 - `frontend/src/game/` — client gameplay helpers (math, camera, snapshots, HUD, storage).
 - `frontend/src/game/wsProtocol.ts` — binary WebSocket codec (ArrayBuffer/DataView).
 - `frontend/src/render/` — Three.js renderer entrypoint (`webglScene.ts`) plus runtime internals (`render/core/sceneRuntime.ts`).
 - `frontend/src/services/` — client API wrappers (leaderboard + backend URL helpers).
-- `frontend/worker/` — minimal Cloudflare Worker entry (`worker/index.ts`) that serves `dist/`.
+- `frontend/worker/` — Cloudflare Worker entry (`worker/index.ts`) that serves `dist/client` assets and proxies `/api/matchmake` + `/api/room/:room`.
 - `frontend/public/` — static assets copied as-is.
 - `frontend/docs/` — Cloudflare Workers reference notes.
 - `frontend/dist/` — production build output.
@@ -21,7 +21,7 @@ Spherical Snake is a multiplayer, slither-style snake game where players steer g
 - `backend/` — Rust server (Tokio runtime) for multiplayer + leaderboard.
 - `backend/src/game/` — authoritative game loop, math, digestion, snake logic, room handling.
 - `backend/src/protocol.rs` — binary WebSocket protocol codec + constants.
-- `backend/src/shared/` — shared helpers (name sanitization).
+- `backend/src/shared/` — shared helpers (name sanitization + room token signing).
 - `backend/migrations/` — SQLite schema migrations.
 - `backend/data/` — default SQLite database location.
 
@@ -29,6 +29,7 @@ Spherical Snake is a multiplayer, slither-style snake game where players steer g
 Repo root (recommended for full stack):
 - `./run-dev.sh` — run backend + frontend for local dev (ports 8788 + 5177 by default). Uses `cargo watch` for backend hot reload when available and falls back to `cargo run` if install fails.
 - `./run-e2e.sh` — start backend + frontend for Playwright E2E (ports 8790 + 5177 by default).
+- `./run-local-dev-copy.sh` — run a localhost production-like copy (standalone backend + local Wrangler Worker) on ports 8788 + 8818 by default. Requires `ROOM_TOKEN_SECRET` and `ROOM_PROXY_SECRET` in `.env` or shell env.
 
 ## Testing Expectations
 - Default validation should be lightweight: prefer targeted checks such as `npm run build`, `npm run lint`, and focused backend/frontend tests relevant to the change.
@@ -56,8 +57,11 @@ Repo root (recommended for full stack):
   - Room IDs are not short aliases. Treat server-assigned `roomId` values as opaque IDs (length up to 64) and do not truncate before websocket connect; token `roomId` and websocket path room must match exactly.
   - Operational runbook/details should also be kept in `infra/deployment-notes.md` whenever production deployment settings change.
 - Backend API routes:
+  - `POST /api/matchmake` (JSON, room token issuance for worker-mediated room joins).
   - `GET /api/leaderboard` and `POST /api/leaderboard` (JSON).
   - `GET /api/room/:room` WebSocket endpoint for multiplayer (binary frames).
+- Standalone backend mode also serves `POST /api/matchmake` and is configurable with `STANDALONE_MATCHMAKE_CAPACITY`, `STANDALONE_ROOM_TOKEN_TTL_SECS`, and `STANDALONE_ROOM_ORIGIN`.
+- For localhost worker testing, `STANDALONE_ROOM_ORIGIN` should use `http://localhost:<port>` (not raw IPv4) so worker room-origin normalization does not rewrite it to a Hetzner hostname.
 - Debug-only route (guarded by `ENABLE_DEBUG_COMMANDS=1`):
   - `POST /api/debug/kill?room=<room>&target=bot|human|any` — force-kill a player for tests.
 - Frontend can target the backend with `VITE_BACKEND_URL` (e.g. `http://localhost:8787`). When unset, it uses same-origin.
@@ -80,7 +84,7 @@ Repo root (recommended for full stack):
 - Debug collider toggles (mountain outlines, lake collider boundary, cactus collider rings) are surfaced in the control panel in dev/e2e only and persist to localStorage keys `spherical_snake_mountain_debug`, `spherical_snake_lake_debug`, `spherical_snake_tree_debug` (legacy `treeCollider`/key naming is still used internally for cactus collider debug state).
 - Terrain wireframe toggle is surfaced in dev/e2e and persists to `spherical_snake_terrain_wireframe_debug` (legacy read fallback: `spherical_snake_terrain_tessellation_debug`).
 - Backend SQLite uses `DATABASE_URL` (default: `sqlite://data/leaderboard.db`). Migrations run at startup.
-- Cloudflare Worker serves static assets only; no Durable Objects or D1 bindings remain.
+- Cloudflare Worker serves static assets and proxies matchmaking/room websocket traffic; no Durable Objects or D1 bindings remain.
 - The client renders interpolated snapshots from the server tick; avoid bypassing the snapshot buffer when changing netcode or visuals.
 - Digestion bumps are identity-tracked across snapshots: each digestion item includes a stable `id` plus `progress`, and interpolation is ID-based to prevent bump jumps when older digestions complete during tail growth.
 - Boosting is length-backed on the server. While boosting, snakes drain tail length smoothly over time and auto-stop at a per-life boost floor set from the spawned snake length (never below `MIN_SURVIVAL_LENGTH`); on spawn/respawn, score initializes to the spawned snake length. Boost start is gated by whole-score threshold (`spawn floor + 1`, so default spawn length `8` requires score `9` to begin boosting; fractional `8.x` cannot start). `PlayerSnapshot` includes `scoreFraction` for the radial score interval HUD. The in-game text HUD shows bottom-left `Your length` (integer score) and `Your rank` (`1-5` only when present in the realtime top-5 list, otherwise `-`, always rendered as `of <total players>`). The head-anchored radial gauge depletes the spendable reserve above that life's spawn floor (empty at spawn-length floor), uses whole-number center text, and applies a green->yellow->red fill ramp by remaining reserve. Gauge capacity is seeded from reserve at boost start, can grow mid-boost if reserve exceeds the current cap (pellet gains), and the displayed fill smoothly retargets to cap/reserve changes instead of snapping. The red crossed-circle lockout overlay is shown only when the player is actively trying to boost while below the start threshold, plus a brief post-depletion flash while boost input is still held; during lockout rendering, only the crossed-circle is drawn (no gauge ring/fill/text), and fade-out keeps the lockout visual held until opacity reaches zero to avoid gauge glimmer.

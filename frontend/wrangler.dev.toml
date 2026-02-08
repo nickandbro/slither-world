@@ -3,7 +3,7 @@ main = "worker/index.ts"
 compatibility_date = "2026-02-03"
 
 [assets]
-directory = "./dist"
+directory = "./dist/client"
 not_found_handling = "single-page-application"
 binding = "ASSETS"
 
