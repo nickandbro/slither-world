@@ -29,6 +29,9 @@ Spherical Snake is a multiplayer, slither-style snake game where players steer g
 Repo root (recommended for full stack):
 - `./run-e2e.sh` — start backend + frontend for Playwright E2E (ports 8790 + 5177 by default).
 - `./run-local-dev-copy.sh` — run a localhost production-like copy (standalone backend + local Wrangler Worker) on ports 8788 + 8818 by default. Requires `ROOM_TOKEN_SECRET` and `ROOM_PROXY_SECRET` in `.env` or shell env.
+- `./scripts/simulate-lag-spikes.sh start|stop|status` — macOS-only PF/dummynet lag simulation helper. Defaults to backend-only shaping (`BACKEND_PORT`, default `8788`); use `PORTS=...` only when intentionally shaping additional ports.
+- `./scripts/run-lag-automation.sh` — single automated lag scenario run (bot drives movement/boost while lag shaping is active). Writes `report.json` under `output/lag-tests/<run-label>/`.
+- `./scripts/lag-autotune.sh` — multi-candidate lag tuning sweep. Runs repeated `run-lag-automation.sh` scenarios and ranks candidates by motion stability + delay metrics.
 - Frontend production deploy script (`frontend/package.json`) uses an obfuscated client build (`npm run build:obfuscated`) before `wrangler deploy`.
 
 ## Testing Expectations
@@ -36,6 +39,9 @@ Repo root (recommended for full stack):
 - Do **not** create new Playwright E2E specs for every change by default.
 - Do **not** run `npm run test:e2e` unless the user explicitly asks for E2E execution.
 - Only add or run E2E coverage when explicitly requested by the user (or when the task is explicitly E2E-focused).
+- For lag-handling changes, prefer script-based validation over ad hoc manual checks:
+  - Run at least one automated baseline pass (`./scripts/run-lag-automation.sh --profile harsh --duration-secs 45 --no-screenshot`).
+  - For tuning work, run `./scripts/lag-autotune.sh` and compare `best-candidate.json` + per-run `report.json` outputs.
 
 ## Configuration & Deployment Notes
 - Production deployment specifics (as of February 8, 2026):
@@ -65,7 +71,8 @@ Repo root (recommended for full stack):
 - Debug-only route (guarded by `ENABLE_DEBUG_COMMANDS=1`):
   - `POST /api/debug/kill?room=<room>&target=bot|human|any` — force-kill a player for tests.
 - Frontend can target the backend with `VITE_BACKEND_URL` (e.g. `http://localhost:8787`). When unset, it uses same-origin.
-- Frontend debug hooks are enabled when `VITE_E2E_DEBUG=1` (exposes `window.__SNAKE_DEBUG__` for Playwright).
+- Debug UI controls (renderer/collider/day-night/debug panel toggles) are enabled in `import.meta.env.DEV` or when `VITE_E2E_DEBUG=1`.
+- `window.__SNAKE_DEBUG__` runtime hooks are exposed during local runs (including `run-local-dev-copy.sh`). Network debug logging defaults on localhost and can be toggled via `?netDebug=1|0` or localStorage key `spherical_snake_net_debug`.
 - Frontend renderer selection is controlled by URL query param `renderer=auto|webgpu|webgl` and persisted to localStorage key `spherical_snake_renderer`.
 - Default renderer mode is `auto`: it attempts WebGPU first and falls back to WebGL with a status note if WebGPU is unavailable or init fails.
 - Changing renderer mode from the control panel performs a full page reload (required because canvas context type cannot be switched in-place).
@@ -86,6 +93,8 @@ Repo root (recommended for full stack):
 - Backend SQLite uses `DATABASE_URL` (default: `sqlite://data/leaderboard.db`). Migrations run at startup.
 - Cloudflare Worker serves static assets and proxies matchmaking/room websocket traffic; no Durable Objects or D1 bindings remain.
 - The client renders interpolated snapshots from the server tick; avoid bypassing the snapshot buffer when changing netcode or visuals.
+- Client lag-spike mitigation is playout-buffer based and currently includes: capped jitter-derived delay (`netJitterDelayMaxTicks`), arrival-gap reentry cooldown/hysteresis, smooth playout-delay retargeting, and spike-class camera behavior (camera hold/recovery for harder spikes like `stale`/`seq-gap`, milder handling for `arrival-gap`).
+- Current default lag-tuning baseline (`frontend/src/app/core/constants.ts`): `netBaseDelayTicks=1.85`, `netMinDelayTicks=1.8`, `netMaxDelayTicks=4.6`, `netJitterDelayMultiplier=1.2`, `netJitterDelayMaxTicks=0.9`, `netSpikeDelayBoostTicks=1.35`, `netDelayBoostDecayPerSec=220`, `netSpikeImpairmentHoldMs=250`, `netSpikeImpairmentMaxHoldMs=850`.
 - Digestion bumps are identity-tracked across snapshots: each digestion item includes a stable `id` plus `progress`, and interpolation is ID-based to prevent bump jumps when older digestions complete during tail growth.
 - Boosting is length-backed on the server. While boosting, snakes drain tail length smoothly over time and auto-stop at a per-life boost floor set from the spawned snake length (never below `MIN_SURVIVAL_LENGTH`); on spawn/respawn, score initializes to the spawned snake length. Boost start is gated by whole-score threshold (`spawn floor + 1`, so default spawn length `8` requires score `9` to begin boosting; fractional `8.x` cannot start). `PlayerSnapshot` includes `scoreFraction` for the radial score interval HUD. The in-game text HUD shows bottom-left `Your length` (integer score) and `Your rank` (`1-5` only when present in the realtime top-5 list, otherwise `-`, always rendered as `of <total players>`). The head-anchored radial gauge depletes the spendable reserve above that life's spawn floor (empty at spawn-length floor), uses whole-number center text, and applies a green->yellow->red fill ramp by remaining reserve. Gauge capacity is seeded from reserve at boost start, can grow mid-boost if reserve exceeds the current cap (pellet gains), and the displayed fill smoothly retargets to cap/reserve changes instead of snapping. The red crossed-circle lockout overlay is shown only when the player is actively trying to boost while below the start threshold, plus a brief post-depletion flash while boost input is still held; during lockout rendering, only the crossed-circle is drawn (no gauge ring/fill/text), and fade-out keeps the lockout visual held until opacity reaches zero to avoid gauge glimmer.
 - Client boost visuals are split intentionally: the viewport speed-line overlay (`.boost-fx`) remains a local screen-space effect, while world-space boost visuals include ground skid marks and a front-of-head draft hemisphere.
@@ -96,6 +105,11 @@ Repo root (recommended for full stack):
 - In dev/e2e, terrain/culling assertions use `window.__SNAKE_DEBUG__.getTerrainPatchInfo()` and `window.__SNAKE_DEBUG__.getEnvironmentCullInfo()`.
 - In dev/e2e, snake-grounding assertions use `window.__SNAKE_DEBUG__.getSnakeGroundingInfo()` and read `{ minClearance, maxPenetration, maxAppliedLift, sampleCount }`.
 - In dev/e2e, boost-draft assertions can use `window.__SNAKE_DEBUG__.getBoostDraftInfo(id)` and read `{ visible, opacity, planeCount }` (`planeCount` is currently `1` for the hemispherical draft mesh).
+- Net smoothing/motion debug hooks:
+  - `window.__SNAKE_DEBUG__.getNetSmoothingInfo()` returns `{ lagSpikeActive, lagSpikeCause, playoutDelayMs, delayBoostMs, jitterMs, jitterDelayMs, receiveIntervalMs, staleMs, impairmentMsRemaining, maxExtrapolationMs, latestSeq, seqGapDetected, tuningRevision, tuningOverrides }`.
+  - `window.__SNAKE_DEBUG__.getMotionStabilityInfo()` returns `{ backwardCorrectionCount, minHeadDot, sampleCount }`.
+  - `window.__SNAKE_DEBUG__.getNetLagEvents()` / `getNetLagReport()` expose event timelines; `clearNetLagEvents()` resets them.
+  - `window.__SNAKE_DEBUG__.setNetTuningOverrides(overrides)` / `resetNetTuningOverrides()` apply runtime net-tuning changes for local testing; `getNetTuningOverrides()` and `getResolvedNetTuning()` expose current tuning.
 - Spawning is collision-safe: new spawns are rejected if any node overlaps existing alive snakes. Respawn retries are delayed if no safe spot is found.
 - Multiplayer WebSocket payloads are custom binary frames (versioned header). Current protocol version is `11`; when the protocol changes, deploy frontend and backend together. Join frames include `FLAG_JOIN_DEFER_SPAWN` so clients can connect/update identity without immediate spawn (used by the pre-spawn menu flow). The server still accepts JSON `Text` frames for backwards compatibility, but always sends binary. Client codec lives in `frontend/src/game/wsProtocol.ts`. State/init snapshots include `u16 total_players` plus a per-session view-scoped player list; the server always includes the local player and includes remote players only when they have a visible non-stub snake window for that session view. Player payload entries include `f32 score_fraction` (after `score`), then `f32 oxygen` + `u8 is_boosting` + `f32 girth_scale` + `f32 tail_extension`, and pellet payload entries are encoded as `u32 pellet_id` + quantized normal (`i16 x/y/z`) + `u8 color_index` + `u8 size`.
 - Player digestion payload entries are encoded as `u32 digestion_id` + `f32 progress` + `f32 strength` in the binary stream (count remains `u8`).
@@ -106,6 +120,24 @@ Repo root (recommended for full stack):
 
 ## Debug / Test Utilities
 - `scripts/debug-kill.sh` — helper to hit the debug kill endpoint (defaults to room `main`, target `bot`).
+- `scripts/simulate-lag-spikes.sh` — macOS lag simulator wrapper (`start|stop|status`) over `pfctl` + `dnctl`.
+  - Default mode is backend-only shaping via `BACKEND_PORT` (`8788` by default).
+  - Use `PORTS=8818,8788` only when intentionally shaping both worker and backend.
+- `scripts/run-lag-automation.sh` — launches local stack (unless `--no-stack-start`), enables lag shaping (unless `--no-lag-control`), runs an automated bot driver, and writes a run report.
+  - Common flags: `--profile harsh|balanced|extreme`, `--duration-secs <n>`, `--tuning-overrides-json '<json>'`, `--no-screenshot`.
+- `scripts/lag-autotune.sh` — runs a multi-candidate tuning sweep and writes:
+  - `autotune-summary.json` (all candidates),
+  - `best-candidate.json` (ranked result set + best candidate),
+  - per-candidate `runs/<label>/report.json`.
+- Recommended lag regression workflow:
+  1. `./scripts/run-lag-automation.sh --profile harsh --duration-secs 45 --no-screenshot`
+  2. Inspect `output/lag-tests/<run-label>/report.json`:
+     - `p95NonSpikeDelayMs <= 170`
+     - `p95SpikeDelayMs <= 240`
+     - `maxSpikeStartsIn5s <= 3`
+     - `mismatchMaxMs <= 350`
+     - `backwardCorrectionRate <= 0.002` and `minHeadDot >= 0.995`
+  3. If tuning is needed, run `./scripts/lag-autotune.sh --profile harsh --duration-secs 30` and apply/verify the winning override set.
 
 ## Planet Rendering Notes
 - Default terrain path is a fixed-topology patch atlas (`PLANET_PATCH_ENABLED`): a full deformed icosphere is built once, partitioned into static spherical bins (`buildPlanetPatchAtlas`), and each patch mesh visibility is toggled per-frame (`updatePlanetPatchVisibility`) based on camera view angle + hysteresis.
