@@ -117,7 +117,6 @@ export default function App() {
   const deathStartedAtMsRef = useRef<number | null>(null)
   const returnToMenuCommittedRef = useRef(false)
   const allowPreplayAutoResumeRef = useRef(true)
-  const hasSpawnedOnceRef = useRef(false)
   const menuDebugInfoRef = useRef<MenuFlowDebugInfo>({
     phase: 'preplay',
     hasSpawned: false,
@@ -138,7 +137,7 @@ export default function App() {
   const [activeRenderer, setActiveRenderer] = useState<RendererBackend | null>(null)
   const [rendererFallbackReason, setRendererFallbackReason] = useState<string | null>(null)
   const [menuPhase, setMenuPhase] = useState<MenuPhase>('preplay')
-  const [hasSpawnedOnce, setHasSpawnedOnce] = useState(false)
+  const [showPlayAgain, setShowPlayAgain] = useState(false)
   const [mountainDebug, setMountainDebug] = useState(getMountainDebug)
   const [lakeDebug, setLakeDebug] = useState(getLakeDebug)
   const [treeDebug, setTreeDebug] = useState(getTreeDebug)
@@ -406,10 +405,6 @@ export default function App() {
               deathStartedAtMsRef.current = null
               if (!localLifeSpawnedRef.current) {
                 localLifeSpawnedRef.current = true
-                if (!hasSpawnedOnceRef.current) {
-                  hasSpawnedOnceRef.current = true
-                  setHasSpawnedOnce(true)
-                }
               }
             } else if (localLifeSpawnedRef.current && deathStartedAtMsRef.current === null) {
               deathStartedAtMsRef.current = nowMs
@@ -507,6 +502,7 @@ export default function App() {
                 if (socket && socket.readyState === WebSocket.OPEN) {
                   socket.send(encodeJoin(playerNameRef.current, playerIdRef.current, true))
                 }
+                setShowPlayAgain(true)
                 setMenuPhase('preplay')
               }
             }
@@ -1027,7 +1023,7 @@ export default function App() {
           {showMenuOverlay && (
             <MenuOverlay
               playerName={playerName}
-              playLabel={hasSpawnedOnce ? 'Play again' : 'Play'}
+              playLabel={showPlayAgain ? 'Play again' : 'Play'}
               connectionStatus={connectionStatus}
               menuPhase={menuPhase}
               onPlayerNameChange={setPlayerName}
