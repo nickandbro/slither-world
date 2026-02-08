@@ -240,6 +240,47 @@ const createBoostDraftTexture = () => {
   return texture
 }
 
+const createSnakeStripeTexture = () => {
+  const width = Math.max(8, Math.floor(SNAKE_STRIPE_TEXTURE_WIDTH))
+  const height = Math.max(1, Math.floor(SNAKE_STRIPE_TEXTURE_HEIGHT))
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+
+  const dark = clamp(SNAKE_STRIPE_DARK, 0, 1)
+  const edge = clamp(SNAKE_STRIPE_EDGE, 0.001, 0.49)
+  const imageData = ctx.createImageData(width, height)
+
+  for (let x = 0; x < width; x += 1) {
+    // One seamless bright/dark cycle across the texture width.
+    // Repeat frequency is controlled by the texture repeat on the material/texture.
+    const u = width > 0 ? x / width : 0
+    const wave = Math.cos(u * Math.PI * 2)
+    const t = smoothstep(-edge, edge, wave)
+    const value = dark + (1 - dark) * t
+    const byte = Math.round(clamp(value, 0, 1) * 255)
+    for (let y = 0; y < height; y += 1) {
+      const offset = (y * width + x) * 4
+      imageData.data[offset] = byte
+      imageData.data[offset + 1] = byte
+      imageData.data[offset + 2] = byte
+      imageData.data[offset + 3] = 255
+    }
+  }
+
+  ctx.putImageData(imageData, 0, 0)
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.wrapS = THREE.RepeatWrapping
+  texture.wrapT = THREE.RepeatWrapping
+  texture.magFilter = THREE.LinearFilter
+  texture.minFilter = THREE.LinearMipmapLinearFilter
+  texture.colorSpace = THREE.NoColorSpace
+  texture.needsUpdate = true
+  return texture
+}
+
 const createHorizonScatteringTexture = () => {
   return createPelletRadialTexture(256, [
     { offset: 0, color: 'rgba(255,255,255,0)' },
@@ -734,6 +775,13 @@ const SHORE_SAND_COLOR = '#d8c48a'
 const SNAKE_RADIUS = 0.045
 const SNAKE_GIRTH_SCALE_MIN = 1
 const SNAKE_GIRTH_SCALE_MAX = 2
+const SNAKE_TUBE_RADIAL_SEGMENTS = 16
+const SNAKE_STRIPE_TEXTURE_WIDTH = 256
+const SNAKE_STRIPE_TEXTURE_HEIGHT = 32
+const SNAKE_STRIPE_REPEAT = 12
+const SNAKE_STRIPE_DARK = 0.55
+const SNAKE_STRIPE_EDGE = 0.12
+const SNAKE_TAIL_CAP_U_SPAN = 0.09
 const HEAD_RADIUS = SNAKE_RADIUS * 1.35
 const NAMEPLATE_CANVAS_WIDTH = 256
 const NAMEPLATE_CANVAS_HEIGHT = 92
@@ -2224,6 +2272,13 @@ export const createScene = async (
   })
   const boostDraftGeometry = new THREE.SphereGeometry(1, 24, 16, 0, Math.PI * 2, 0, Math.PI * 0.5)
   const boostDraftTexture = createBoostDraftTexture()
+  const snakeStripeTexture = createSnakeStripeTexture()
+  if (snakeStripeTexture) {
+    snakeStripeTexture.repeat.set(SNAKE_STRIPE_REPEAT, 1)
+    if (renderer instanceof THREE.WebGLRenderer) {
+      snakeStripeTexture.anisotropy = renderer.capabilities.getMaxAnisotropy()
+    }
+  }
 
   const PELLET_COLOR_BUCKET_COUNT = PELLET_COLORS.length
   const PELLET_BUCKET_COUNT = PELLET_COLOR_BUCKET_COUNT * PELLET_SIZE_TIER_MULTIPLIERS.length
@@ -4353,8 +4408,13 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
       color,
       roughness: 0.35,
       metalness: 0.1,
-      flatShading: true,
+      flatShading: false,
     })
+    if (snakeStripeTexture) {
+      tubeMaterial.map = snakeStripeTexture
+      tubeMaterial.emissiveMap = snakeStripeTexture
+      tubeMaterial.needsUpdate = true
+    }
     const tube = new THREE.Mesh(new THREE.BufferGeometry(), tubeMaterial)
     group.add(tube)
 
@@ -5418,6 +5478,7 @@ diffuseColor.a *= retireEdge;`,
     const ringVertexCount = radialSegments + 1
     const ringStart = tubularSegments * ringVertexCount
     const positions = tubeGeometry.attributes.position
+    const uvs = tubeGeometry.attributes.uv
     if (!positions || positions.count < ringStart + radialSegments) return null
 
     const ringPoints: THREE.Vector3[] = []
@@ -5457,11 +5518,21 @@ diffuseColor.a *= retireEdge;`,
     const rings = Math.max(2, TAIL_CAP_SEGMENTS)
     const vertexCount = rings * radialSegments + 1
     const capPositions = new Float32Array(vertexCount * 3)
+    const capUvs = new Float32Array(vertexCount * 2)
+
+    let baseU = 1
+    if (uvs && uvs.count > ringStart) {
+      const candidate = uvs.getX(ringStart)
+      if (Number.isFinite(candidate)) baseU = candidate
+    }
+    const uSpan = Math.max(0, SNAKE_TAIL_CAP_U_SPAN)
+    const ringDenom = Math.max(1, rings - 1)
 
     for (let s = 0; s < rings; s += 1) {
       const theta = (s / rings) * (Math.PI / 2)
       const scale = Math.cos(theta)
       const offset = Math.sin(theta) * radius
+      const u = baseU + (s / ringDenom) * uSpan
       for (let i = 0; i < radialSegments; i += 1) {
         const vector = ringVectors[i]
         const point = center
@@ -5472,6 +5543,10 @@ diffuseColor.a *= retireEdge;`,
         capPositions[index] = point.x
         capPositions[index + 1] = point.y
         capPositions[index + 2] = point.z
+
+        const uvIndex = (s * radialSegments + i) * 2
+        capUvs[uvIndex] = u
+        capUvs[uvIndex + 1] = radialSegments > 0 ? i / radialSegments : 0
       }
     }
 
@@ -5480,6 +5555,9 @@ diffuseColor.a *= retireEdge;`,
     capPositions[tipOffset] = tip.x
     capPositions[tipOffset + 1] = tip.y
     capPositions[tipOffset + 2] = tip.z
+    const tipUvOffset = rings * radialSegments * 2
+    capUvs[tipUvOffset] = baseU + uSpan
+    capUvs[tipUvOffset + 1] = 0
 
     const indices: number[] = []
     const pushTri = (a: number, b: number, c: number) => {
@@ -5513,6 +5591,7 @@ diffuseColor.a *= retireEdge;`,
 
     const capGeometry = new THREE.BufferGeometry()
     capGeometry.setAttribute('position', new THREE.BufferAttribute(capPositions, 3))
+    capGeometry.setAttribute('uv', new THREE.BufferAttribute(capUvs, 2))
     capGeometry.setIndex(indices)
     capGeometry.computeVertexNormals()
     capGeometry.computeBoundingSphere()
@@ -6531,7 +6610,13 @@ diffuseColor.a *= retireEdge;`,
       }
       const baseCurve = new THREE.CatmullRomCurve3(curvePoints, false, 'centripetal')
       const tubularSegments = Math.max(8, curvePoints.length * 4)
-      const tubeGeometry = new THREE.TubeGeometry(baseCurve, tubularSegments, radius, 10, false)
+      const tubeGeometry = new THREE.TubeGeometry(
+        baseCurve,
+        tubularSegments,
+        radius,
+        SNAKE_TUBE_RADIAL_SEGMENTS,
+        false,
+      )
       const digestionStartOffset = computeDigestionStartOffset(curvePoints)
       if (digestionVisuals.length) {
         applyDigestionBulges(tubeGeometry, digestionVisuals, digestionStartOffset, digestionBulgeScale)
@@ -7930,6 +8015,7 @@ diffuseColor.a *= retireEdge;`,
     tongueMaterial.dispose()
     boostDraftGeometry.dispose()
     boostDraftTexture?.dispose()
+    snakeStripeTexture?.dispose()
     for (let i = 0; i < pelletBuckets.length; i += 1) {
       const bucket = pelletBuckets[i]
       if (!bucket) continue
