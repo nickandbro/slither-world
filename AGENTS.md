@@ -42,6 +42,7 @@ Repo root (recommended for full stack):
 - For lag-handling changes, prefer script-based validation over ad hoc manual checks:
   - Run at least one automated baseline pass (`./scripts/run-lag-automation.sh --profile harsh --duration-secs 45 --no-screenshot`).
   - For tuning work, run `./scripts/lag-autotune.sh` and compare `best-candidate.json` + per-run `report.json` outputs.
+- If you see Chrome console warnings like `[Violation] 'requestAnimationFrame' handler took <N>ms` (visible stutter), enable the optional rAF perf instrumentation (`?rafPerf=1`) and capture `window.__SNAKE_DEBUG__.getRafPerfInfo()`. During investigation, slow frames were dominated by `renderMs` (time spent inside `webgl.render()`), which points to renderer/GPU stalls (often shader/pipeline warm-up). The issue resolved after the renderer warmed up (a short run or a reload), with no evidence that snapshot interpolation/HUD work was the source.
 
 ## Configuration & Deployment Notes
 - Production deployment specifics (as of February 8, 2026):
@@ -110,6 +111,9 @@ Repo root (recommended for full stack):
   - `window.__SNAKE_DEBUG__.getMotionStabilityInfo()` returns `{ backwardCorrectionCount, minHeadDot, sampleCount }`.
   - `window.__SNAKE_DEBUG__.getNetLagEvents()` / `getNetLagReport()` expose event timelines; `clearNetLagEvents()` resets them.
   - `window.__SNAKE_DEBUG__.setNetTuningOverrides(overrides)` / `resetNetTuningOverrides()` apply runtime net-tuning changes for local testing; `getNetTuningOverrides()` and `getResolvedNetTuning()` expose current tuning.
+- rAF perf debug hooks (opt-in via `?rafPerf=1`):
+  - `window.__SNAKE_DEBUG__.getRafPerfInfo()` returns `{ frameCount, slowFrameCount, maxTotalMs, lastFrame, slowFrames, ... }` with per-frame phase timings including `renderMs`.
+  - `window.__SNAKE_DEBUG__.clearRafPerf()` resets the collected rAF perf samples.
 - Spawning is collision-safe: new spawns are rejected if any node overlaps existing alive snakes. Respawn retries are delayed if no safe spot is found.
 - Multiplayer WebSocket payloads are custom binary frames (versioned header). Current protocol version is `12`; when the protocol changes, deploy frontend and backend together. Join frames include `FLAG_JOIN_DEFER_SPAWN` so clients can connect/update identity without immediate spawn (used by the pre-spawn menu flow). The server still accepts JSON `Text` frames for backwards compatibility, but always sends binary. Client codec lives in `frontend/src/game/wsProtocol.ts`. State/init snapshots include `u16 total_players` plus a per-session view-scoped player list; the server always includes the local player and includes remote players only when they have a visible non-stub snake window for that session view. Player payload entries include `f32 score_fraction` (after `score`), then `f32 oxygen` + `u8 is_boosting` + `f32 girth_scale` + `f32 tail_extension`, and pellet payload entries are encoded as `u32 pellet_id` + quantized normal (`i16 x/y/z`) + `u8 color_index` + `u8 size`.
 - Player digestion payload entries are encoded as `u32 digestion_id` + `f32 progress` + `f32 strength` in the binary stream (count remains `u8`).

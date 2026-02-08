@@ -12,6 +12,19 @@ export default defineConfig({
     cloudflare({ configPath: 'wrangler.dev.toml' }),
     clientObfuscationPlugin(isTruthyEnv(readBuildEnv('OBFUSCATE_CLIENT'))),
   ],
+  build: {
+    rollupOptions: {
+      output: {
+        // Keep vendor libraries (notably three.js) in a separate chunk so client obfuscation
+        // can target only our app code without touching performance-critical dependencies.
+        manualChunks(id) {
+          if (id.replaceAll('\\', '/').includes('/node_modules/')) {
+            return 'vendor'
+          }
+        },
+      },
+    },
+  },
 })
 
 function clientObfuscationPlugin(enabled: boolean): Plugin {
@@ -33,17 +46,26 @@ function clientObfuscationPlugin(enabled: boolean): Plugin {
           continue
         }
 
+        // The goal is minimal obfuscation that doesn't risk perturbing WebGL/WebGPU
+        // performance-critical library code. Only obfuscate chunks that are pure app (`src/`)
+        // code and contain no `node_modules/` modules.
+        const moduleIds = item.moduleIds ?? []
+        const hasAppSrcModule = moduleIds.some((id) => id.replaceAll('\\', '/').includes('/src/'))
+        const hasNodeModules = moduleIds.some((id) => id.replaceAll('\\', '/').includes('/node_modules/'))
+        if (!hasAppSrcModule || hasNodeModules) {
+          continue
+        }
+
         const result = JavaScriptObfuscator.obfuscate(item.code, {
           compact: true,
           controlFlowFlattening: false,
           deadCodeInjection: false,
           identifierNamesGenerator: 'hexadecimal',
           renameGlobals: false,
-          splitStrings: true,
-          splitStringsChunkLength: 8,
-          stringArray: true,
-          stringArrayEncoding: ['base64'],
-          stringArrayThreshold: 0.8,
+          // Keep runtime behavior and performance as close as possible to the non-obfuscated build.
+          // These transforms can introduce runtime overhead and hamper JIT optimizations.
+          splitStrings: false,
+          stringArray: false,
           target: 'browser-no-eval',
           transformObjectKeys: false,
         })
