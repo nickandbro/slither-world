@@ -2114,6 +2114,12 @@ export const createScene = async (
   occluderDepthMaterial.depthTest = true
   occluderDepthMaterial.depthWrite = true
   occluderDepthMaterial.colorWrite = false
+  const RENDER_PASS_WORLD_NO_PELLETS_LAKES = 0
+  const RENDER_PASS_PELLET_OCCLUDERS = 1
+  const RENDER_PASS_PELLETS_ONLY = 2
+  const RENDER_PASS_LAKES_ONLY = 3
+  const worldChildVisibilityScratch: boolean[] = []
+  const hiddenSnakeDepthObjects: THREE.Object3D[] = []
   let treeTierGeometries: THREE.BufferGeometry[] = []
   let treeTierMeshes: THREE.InstancedMesh[] = []
   let treeTrunkGeometry: THREE.BufferGeometry | null = null
@@ -7102,27 +7108,45 @@ diffuseColor.a *= retireEdge;`,
     moonGroup.visible = moonOpacity > 0.001
   }
 
+  const isLakeMesh = (child: THREE.Object3D) => {
+    for (let i = 0; i < lakeMeshes.length; i += 1) {
+      if (lakeMeshes[i] === child) return true
+    }
+    return false
+  }
+
   const renderWorldPass = (
-    includeWorldChild: (child: THREE.Object3D) => boolean,
-    options: {
-      skyVisible: boolean
-      overrideMaterial?: THREE.Material | null
-      clearDepth?: boolean
-    },
+    mode: number,
+    skyVisible: boolean,
+    overrideMaterial: THREE.Material | null = null,
+    clearDepth = false,
   ) => {
     const savedSkyVisible = skyGroup.visible
     const savedOverrideMaterial = scene.overrideMaterial
     const worldChildCount = world.children.length
-    const worldChildVisibility = new Array<boolean>(worldChildCount)
+    if (worldChildVisibilityScratch.length < worldChildCount) {
+      worldChildVisibilityScratch.length = worldChildCount
+    }
     for (let i = 0; i < worldChildCount; i += 1) {
       const child = world.children[i]
-      worldChildVisibility[i] = child.visible
-      child.visible = worldChildVisibility[i] && includeWorldChild(child)
+      const wasVisible = child.visible
+      worldChildVisibilityScratch[i] = wasVisible
+      let includeChild = false
+      if (mode === RENDER_PASS_WORLD_NO_PELLETS_LAKES) {
+        includeChild = child !== pelletsGroup && !isLakeMesh(child)
+      } else if (mode === RENDER_PASS_PELLET_OCCLUDERS) {
+        includeChild = child === environmentGroup || child === snakesGroup
+      } else if (mode === RENDER_PASS_PELLETS_ONLY) {
+        includeChild = child === pelletsGroup
+      } else if (mode === RENDER_PASS_LAKES_ONLY) {
+        includeChild = isLakeMesh(child)
+      }
+      child.visible = wasVisible && includeChild
     }
 
-    skyGroup.visible = savedSkyVisible && options.skyVisible
-    scene.overrideMaterial = options.overrideMaterial ?? null
-    if (options.clearDepth) {
+    skyGroup.visible = savedSkyVisible && skyVisible
+    scene.overrideMaterial = overrideMaterial ?? null
+    if (clearDepth) {
       renderer.clearDepth()
     }
     renderer.render(scene, camera)
@@ -7131,21 +7155,16 @@ diffuseColor.a *= retireEdge;`,
 
     for (let i = 0; i < worldChildCount; i += 1) {
       const child = world.children[i]
-      child.visible = worldChildVisibility[i]
+      child.visible = worldChildVisibilityScratch[i]
     }
   }
 
-  const withOpaqueSnakeDepthOccluders = (renderPass: () => void) => {
-    const visibilitySnapshot: Array<{
-      object: THREE.Object3D
-      visible: boolean
-    }> = []
+  const beginOpaqueSnakeDepthOccluders = () => {
+    hiddenSnakeDepthObjects.length = 0
     const hideForDepth = (object: THREE.Object3D) => {
-      visibilitySnapshot.push({
-        object,
-        visible: object.visible,
-      })
+      if (!object.visible) return
       object.visible = false
+      hiddenSnakeDepthObjects.push(object)
     }
 
     for (const visual of snakes.values()) {
@@ -7158,19 +7177,17 @@ diffuseColor.a *= retireEdge;`,
         hideForDepth(visual.group)
         continue
       }
-      if (visual.bowl.visible) hideForDepth(visual.bowl)
-      if (visual.boostDraft.visible) hideForDepth(visual.boostDraft)
-      if (visual.nameplate.visible) hideForDepth(visual.nameplate)
+      hideForDepth(visual.bowl)
+      hideForDepth(visual.boostDraft)
+      hideForDepth(visual.nameplate)
     }
+  }
 
-    try {
-      renderPass()
-    } finally {
-      for (let i = visibilitySnapshot.length - 1; i >= 0; i -= 1) {
-        const snapshot = visibilitySnapshot[i]
-        snapshot.object.visible = snapshot.visible
-      }
+  const endOpaqueSnakeDepthOccluders = () => {
+    for (let i = hiddenSnakeDepthObjects.length - 1; i >= 0; i -= 1) {
+      hiddenSnakeDepthObjects[i].visible = true
     }
+    hiddenSnakeDepthObjects.length = 0
   }
 
   const render = (
@@ -7303,44 +7320,26 @@ diffuseColor.a *= retireEdge;`,
     }
     updatePelletGlow(lakeTimeSeconds)
 
-    const lakeMeshSet = new Set<THREE.Object3D>(lakeMeshes)
-    const includeWithoutPelletsAndLakes = (child: THREE.Object3D) =>
-      child !== pelletsGroup && !lakeMeshSet.has(child)
-    const includeLakeMeshes = (child: THREE.Object3D) => lakeMeshSet.has(child)
-    const includePelletOccluders = (child: THREE.Object3D) =>
-      child === environmentGroup || child === snakesGroup
     const savedAutoClear = renderer.autoClear
     renderer.autoClear = false
     renderer.clear()
     try {
       // Pass 1: Render the main world without pellets/lakes so pellet occlusion can be composited separately.
-      renderWorldPass(includeWithoutPelletsAndLakes, {
-        skyVisible: true,
-      })
-      // Pass 2: Build depth from terrain objects only (not planet) to occlude pellet glow without planet clipping.
-      withOpaqueSnakeDepthOccluders(() => {
-        renderWorldPass(includePelletOccluders, {
-          skyVisible: false,
-          overrideMaterial: occluderDepthMaterial,
-          clearDepth: true,
-        })
-      })
-      // Pass 3: Render pellets against terrain-object depth, allowing partial occlusion.
-      renderWorldPass((child) => child === pelletsGroup, {
-        skyVisible: false,
-      })
-      // Pass 4: Rebuild full scene depth (including planet) so lake overlays depth-test correctly.
-      withOpaqueSnakeDepthOccluders(() => {
-        renderWorldPass(includeWithoutPelletsAndLakes, {
-          skyVisible: false,
-          overrideMaterial: occluderDepthMaterial,
-          clearDepth: true,
-        })
-      })
+      renderWorldPass(RENDER_PASS_WORLD_NO_PELLETS_LAKES, true)
+      // Passes 2-4 share the same snake-depth occluder mask to avoid duplicate snake scans.
+      beginOpaqueSnakeDepthOccluders()
+      try {
+        // Pass 2: Build depth from terrain objects + opaque snakes (not planet) to occlude pellet glow.
+        renderWorldPass(RENDER_PASS_PELLET_OCCLUDERS, false, occluderDepthMaterial, true)
+        // Pass 3: Render pellets against occluder depth for partial occlusion.
+        renderWorldPass(RENDER_PASS_PELLETS_ONLY, false)
+        // Pass 4: Rebuild full depth (including planet) so lake overlays depth-test correctly.
+        renderWorldPass(RENDER_PASS_WORLD_NO_PELLETS_LAKES, false, occluderDepthMaterial, true)
+      } finally {
+        endOpaqueSnakeDepthOccluders()
+      }
       // Pass 5: Render lakes last so underwater pellets still read through the water surface overlay.
-      renderWorldPass(includeLakeMeshes, {
-        skyVisible: false,
-      })
+      renderWorldPass(RENDER_PASS_LAKES_ONLY, false)
     } finally {
       renderer.autoClear = savedAutoClear
     }
