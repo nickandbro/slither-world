@@ -68,6 +68,13 @@ const VIEW_CAMERA_DISTANCE_MAX: f64 = 10.0;
 pub struct Room {
     state: Mutex<RoomState>,
     running: AtomicBool,
+    max_human_players: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RoomStats {
+    pub human_players: usize,
+    pub total_sessions: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -202,6 +209,10 @@ enum JsonClientMessage {
 
 impl Room {
     pub fn new() -> Self {
+        Self::with_max_human_players(None)
+    }
+
+    pub fn with_max_human_players(max_human_players: Option<usize>) -> Self {
         Self {
             state: Mutex::new(RoomState {
                 sessions: HashMap::new(),
@@ -212,6 +223,7 @@ impl Room {
                 environment: Environment::generate(),
             }),
             running: AtomicBool::new(false),
+            max_human_players,
         }
     }
 
@@ -236,9 +248,9 @@ impl Room {
         state.disconnect_session(session_id);
     }
 
-    pub async fn handle_text_message(self: &Arc<Self>, session_id: &str, text: &str) {
+    pub async fn handle_text_message(self: &Arc<Self>, session_id: &str, text: &str) -> bool {
         let Ok(message) = serde_json::from_str::<JsonClientMessage>(text) else {
-            return;
+            return true;
         };
         let message = match message {
             JsonClientMessage::Join {
@@ -268,21 +280,21 @@ impl Room {
                 camera_distance,
             },
         };
-        self.handle_client_message(session_id, message).await;
+        self.handle_client_message(session_id, message).await
     }
 
-    pub async fn handle_binary_message(self: &Arc<Self>, session_id: &str, data: &[u8]) {
+    pub async fn handle_binary_message(self: &Arc<Self>, session_id: &str, data: &[u8]) -> bool {
         let Some(message) = protocol::decode_client_message(data) else {
-            return;
+            return true;
         };
-        self.handle_client_message(session_id, message).await;
+        self.handle_client_message(session_id, message).await
     }
 
     async fn handle_client_message(
         self: &Arc<Self>,
         session_id: &str,
         message: protocol::ClientMessage,
-    ) {
+    ) -> bool {
         let mut state = self.state.lock().await;
         match message {
             protocol::ClientMessage::Join {
@@ -290,12 +302,23 @@ impl Room {
                 player_id,
                 defer_spawn,
             } => {
-                state.handle_join(session_id, name, player_id, defer_spawn);
+                let accepted = state.handle_join(
+                    session_id,
+                    name,
+                    player_id,
+                    defer_spawn,
+                    self.max_human_players,
+                );
+                if !accepted {
+                    return false;
+                }
                 drop(state);
                 self.ensure_loop();
+                true
             }
             protocol::ClientMessage::Respawn => {
                 state.handle_respawn(session_id);
+                true
             }
             protocol::ClientMessage::Input {
                 axis,
@@ -312,6 +335,7 @@ impl Room {
                     view_radius,
                     camera_distance,
                 );
+                true
             }
         }
     }
@@ -319,6 +343,14 @@ impl Room {
     pub async fn debug_kill(&self, target: DebugKillTarget) -> Option<String> {
         let mut state = self.state.lock().await;
         state.debug_kill(target)
+    }
+
+    pub async fn stats(&self) -> RoomStats {
+        let state = self.state.lock().await;
+        RoomStats {
+            human_players: state.human_count(),
+            total_sessions: state.sessions.len(),
+        }
     }
 
     fn ensure_loop(self: &Arc<Self>) {
@@ -375,9 +407,27 @@ impl RoomState {
         name: Option<String>,
         player_id: Option<Uuid>,
         defer_spawn: bool,
-    ) {
+        max_human_players: Option<usize>,
+    ) -> bool {
         let raw_name = name.unwrap_or_else(|| "Player".to_string());
         let sanitized_name = sanitize_player_name(&raw_name, "Player");
+
+        let existing_player_id = player_id.map(|id| id.to_string());
+        let is_existing_human = existing_player_id
+            .as_deref()
+            .and_then(|id| self.players.get(id))
+            .map(|player| !player.is_bot)
+            .unwrap_or(false);
+        if let Some(max_players) = max_human_players {
+            if self.human_count() >= max_players && !is_existing_human {
+                tracing::warn!(
+                    room_capacity = max_players,
+                    current_humans = self.human_count(),
+                    "room_join_rejected_capacity_reached"
+                );
+                return false;
+            }
+        }
 
         let player_id = if let Some(id) = player_id {
             let id_string = id.to_string();
@@ -419,6 +469,7 @@ impl RoomState {
             let _ = sender.send(payload);
         }
         self.broadcast_player_meta(&[player_id]);
+        true
     }
 
     fn prepare_player_for_manual_spawn(player: &mut Player) {

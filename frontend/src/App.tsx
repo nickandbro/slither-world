@@ -14,7 +14,7 @@ import { buildInterpolatedSnapshot, type TimedSnapshot } from './game/snapshots'
 import { drawHud, type RenderConfig } from './game/hud'
 import {
   createRandomPlayerName,
-  DEFAULT_ROOM,
+  getInitialRoom,
   getInitialName,
   getStoredPlayerId,
   getInitialRendererPreference,
@@ -26,6 +26,7 @@ import {
 } from './game/storage'
 import { decodeServerMessage, encodeInput, encodeJoin, encodeRespawn, type PlayerMeta } from './game/wsProtocol'
 import { resolveWebSocketUrl } from './services/backend'
+import { requestMatchmake } from './services/matchmake'
 import {
   CAMERA_DISTANCE_DEFAULT,
   CAMERA_DISTANCE_MAX,
@@ -136,8 +137,8 @@ export default function App() {
   const [environment, setEnvironment] = useState<Environment | null>(null)
   const [playerId, setPlayerId] = useState<string | null>(getStoredPlayerId())
   const [playerName, setPlayerName] = useState(getInitialName)
-  const [roomName, setRoomName] = useState(DEFAULT_ROOM)
-  const [roomInput, setRoomInput] = useState(DEFAULT_ROOM)
+  const [roomName, setRoomName] = useState(getInitialRoom)
+  const [roomInput, setRoomInput] = useState(getInitialRoom)
   const [rendererPreference] = useState<RendererPreference>(getInitialRendererPreference)
   const [connectionStatus, setConnectionStatus] = useState('Connecting')
   const [activeRenderer, setActiveRenderer] = useState<RendererBackend | null>(null)
@@ -762,13 +763,8 @@ export default function App() {
     let reconnectTimer: number | null = null
     let cancelled = false
 
-    const connect = () => {
+    const connect = async () => {
       if (cancelled) return
-      const socket = new WebSocket(
-        resolveWebSocketUrl(`/api/room/${encodeURIComponent(roomName)}`),
-      )
-      socket.binaryType = 'arraybuffer'
-      socketRef.current = socket
       snapshotBufferRef.current = []
       serverOffsetRef.current = null
       lastSnapshotTimeRef.current = null
@@ -795,10 +791,41 @@ export default function App() {
       setMenuOverlayExiting(false)
       pointerRef.current.active = false
       clearBoostInputs()
-      setConnectionStatus('Connecting')
+      setConnectionStatus('Matchmaking')
       setGameState(null)
       setEnvironment(null)
       setMenuPhase('preplay')
+
+      let assignedRoom = roomName
+      let roomToken = ''
+      try {
+        const assignment = await requestMatchmake(roomName)
+        assignedRoom = sanitizeRoomName(assignment.roomId)
+        roomToken = assignment.roomToken
+      } catch {
+        if (cancelled) return
+        setConnectionStatus('Reconnecting')
+        reconnectTimer = window.setTimeout(() => {
+          void connect()
+        }, 1500)
+        return
+      }
+
+      if (cancelled) return
+      if (assignedRoom !== roomName) {
+        setRoomInput(assignedRoom)
+        setRoomName(assignedRoom)
+        return
+      }
+      setRoomInput((previous) => (previous === assignedRoom ? previous : assignedRoom))
+
+      const socket = new WebSocket(
+        resolveWebSocketUrl(
+          `/api/room/${encodeURIComponent(assignedRoom)}?rt=${encodeURIComponent(roomToken)}`,
+        ),
+      )
+      socket.binaryType = 'arraybuffer'
+      socketRef.current = socket
 
       socket.addEventListener('open', () => {
         setConnectionStatus('Connected')
@@ -827,7 +854,9 @@ export default function App() {
       socket.addEventListener('close', () => {
         if (cancelled) return
         setConnectionStatus('Reconnecting')
-        reconnectTimer = window.setTimeout(connect, 1500)
+        reconnectTimer = window.setTimeout(() => {
+          void connect()
+        }, 1500)
       })
 
       socket.addEventListener('error', () => {
@@ -835,7 +864,7 @@ export default function App() {
       })
     }
 
-    connect()
+    void connect()
 
     return () => {
       cancelled = true

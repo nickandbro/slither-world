@@ -12,6 +12,12 @@
 		"not_found_handling": "single-page-application",
 		"binding": "ASSETS"
 	},
+	"vars": {
+		"CONTROL_PLANE_ORIGIN": "http://127.0.0.1:8787"
+	},
+	"placement": {
+		"mode": "smart"
+	},
 	"observability": {
 		"enabled": true
 	}
