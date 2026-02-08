@@ -7,6 +7,7 @@ const LOCAL_STORAGE_RENDERER = 'spherical_snake_renderer'
 export const DEFAULT_ROOM = 'main'
 export const DEFAULT_RENDERER = 'auto'
 export type RendererPreference = 'auto' | 'webgl' | 'webgpu'
+const MAX_ROOM_NAME_LENGTH = 64
 
 export function createRandomPlayerName() {
   return `Player-${Math.floor(Math.random() * 999) + 1}`
@@ -41,7 +42,7 @@ export function getStoredPlayerId() {
 export function sanitizeRoomName(value: string) {
   const cleaned = value.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9-_]/g, '')
   if (!cleaned) return DEFAULT_ROOM
-  return cleaned.slice(0, 20)
+  return cleaned.slice(0, MAX_ROOM_NAME_LENGTH)
 }
 
 export function getInitialRoom() {

@@ -800,7 +800,7 @@ export default function App() {
       let roomToken = ''
       try {
         const assignment = await requestMatchmake(roomName)
-        assignedRoom = sanitizeRoomName(assignment.roomId)
+        assignedRoom = assignment.roomId
         roomToken = assignment.roomToken
       } catch {
         if (cancelled) return

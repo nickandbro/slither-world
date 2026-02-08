@@ -686,9 +686,9 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
 }
 
 fn sanitize_room_name(value: &str) -> String {
-    let mut cleaned = String::with_capacity(value.len().min(32));
+    let mut cleaned = String::with_capacity(value.len().min(64));
     for ch in value.chars() {
-        if cleaned.len() >= 32 {
+        if cleaned.len() >= 64 {
             break;
         }
         if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
@@ -696,6 +696,25 @@ fn sanitize_room_name(value: &str) -> String {
         }
     }
     cleaned
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_room_name;
+
+    #[test]
+    fn sanitize_room_name_preserves_generated_room_ids() {
+        let room_id = "room-e0d805ef307540a0b0315c6a8f787d47";
+        assert_eq!(sanitize_room_name(room_id), room_id);
+    }
+
+    #[test]
+    fn sanitize_room_name_strips_invalid_chars_and_bounds_length() {
+        let source = "room-abc!@#$%^&*()_+[]{}<>?/|`~xyz123456789012345678901234567890";
+        let cleaned = sanitize_room_name(source);
+        assert!(cleaned.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'));
+        assert!(cleaned.len() <= 64);
+    }
 }
 
 fn now_millis() -> i64 {
