@@ -80,6 +80,7 @@ Repo root (recommended for full stack):
 - Default renderer mode is `auto`: it attempts WebGPU first and falls back to WebGL with a status note if WebGPU is unavailable or init fails.
 - Changing renderer mode from the control panel performs a full page reload (required because canvas context type cannot be switched in-place).
 - Startup flow is a pre-spawn hero menu over the live world: before gameplay starts, the menu shows a pilot-name input, a primary play button (`Play` on initial load, `Play again` after returning from a death), and a lower-right `Change skin` button.
+- `Change skin` opens a 3D preview + saved-design picker plus a builder flow; builder designs can be seeded with `1..=8` colors and repeat to fill the 8-slot spawn pattern.
 - Pre-spawn hero copy is intentionally minimal: title text is `Slither World` with no subtitle or pilot-name label.
 - Pre-spawn menu controls use an immediate, clean drop-in CSS entrance (title/input/button short stagger) with reduced-motion fallback.
 - Clicking `Play`/`Play again` fades the menu overlay out before spawn/join is sent and before the menu-to-gameplay camera blend begins.
@@ -96,6 +97,7 @@ Repo root (recommended for full stack):
 - Backend SQLite uses `DATABASE_URL` (default: `sqlite://data/leaderboard.db`). Migrations run at startup.
 - Cloudflare Worker serves static assets and proxies matchmaking/room websocket traffic; no Durable Objects or D1 bindings remain.
 - The client renders interpolated snapshots from the server tick; avoid bypassing the snapshot buffer when changing netcode or visuals.
+- Snapshot interpolation should preserve meta-derived fields on `PlayerSnapshot` (e.g. `skinColors`) so cosmetics remain stable during interpolation.
 - Client lag-spike mitigation is playout-buffer based and currently includes: capped jitter-derived delay (`netJitterDelayMaxTicks`), arrival-gap reentry cooldown/hysteresis, smooth playout-delay retargeting, and spike-class camera behavior (camera hold/recovery for harder spikes like `stale`/`seq-gap`, milder handling for `arrival-gap`).
 - Current default lag-tuning baseline (`frontend/src/app/core/constants.ts`): `netBaseDelayTicks=1.85`, `netMinDelayTicks=1.8`, `netMaxDelayTicks=4.6`, `netJitterDelayMultiplier=1.2`, `netJitterDelayMaxTicks=0.9`, `netSpikeDelayBoostTicks=1.35`, `netDelayBoostDecayPerSec=220`, `netSpikeImpairmentHoldMs=250`, `netSpikeImpairmentMaxHoldMs=850`.
 - Digestion bumps are identity-tracked across snapshots: each digestion item includes a stable `id` plus `progress`, and interpolation is ID-based to prevent bump jumps when older digestions complete during tail growth.

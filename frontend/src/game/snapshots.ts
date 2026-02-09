@@ -148,6 +148,7 @@ function blendPlayers(a: PlayerSnapshot, b: PlayerSnapshot, t: number): PlayerSn
     id: b.id,
     name: b.name,
     color: b.color,
+    skinColors: b.skinColors ?? a.skinColors,
     score: b.score,
     scoreFraction: blendScoreFraction(a, b, t),
     oxygen: lerp(a.oxygen, b.oxygen, t),

@@ -8263,7 +8263,7 @@ diffuseColor.a *= retireEdge;`,
     menuPreviewCamera.aspect = aspect
     menuPreviewCamera.updateProjectionMatrix()
     // Keep the preview clear of the right-side skin UI panels on wide layouts.
-    menuPreviewGroup.position.x = aspect > 1.15 ? -0.65 : 0
+    menuPreviewGroup.position.x = width > 920 ? -0.65 : 0
   }
 
   const dispose = () => {
