@@ -23,7 +23,7 @@ pub struct Digestion {
     pub total: i64,
     pub settle_steps: i64,
     pub growth_amount: f64,
-    pub applied: bool,
+    pub applied_growth: f64,
     pub strength: f32,
 }
 

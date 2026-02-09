@@ -1,8 +1,10 @@
 use super::constants::{
-    DIGESTION_TAIL_SETTLE_STEPS, DIGESTION_TRAVEL_SPEED_MULT, MIN_SURVIVAL_LENGTH, NODE_QUEUE_SIZE,
+    DIGESTION_TAIL_GROWTH_BACKLOG_SQRT_MULT, DIGESTION_TAIL_GROWTH_BASE_PER_STEP,
+    DIGESTION_TAIL_GROWTH_MAX_PER_STEP, DIGESTION_TAIL_SETTLE_STEPS, DIGESTION_TRAVEL_SPEED_MULT,
+    MIN_SURVIVAL_LENGTH, NODE_QUEUE_SIZE,
 };
 use super::math::clamp;
-use super::snake::{add_snake_node, remove_snake_tail_node};
+use super::snake::{add_snake_node_for_growth, remove_snake_tail_node};
 use super::types::{Digestion, Player};
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -36,13 +38,24 @@ pub fn add_digestion_with_strength(player: &mut Player, strength: f32, growth_am
         total,
         settle_steps,
         growth_amount: clamped_growth,
-        applied: false,
+        applied_growth: 0.0,
         strength: clamp(strength as f64, 0.05, 1.0) as f32,
     });
 }
 
 pub fn advance_digestions(player: &mut Player, steps: i32) {
     let _ = advance_digestions_with_boost(player, steps, BoostDrainConfig::default());
+}
+
+fn tail_growth_rate_per_step(backlog: f64) -> f64 {
+    if backlog <= 1e-9 {
+        return 0.0;
+    }
+    let base = DIGESTION_TAIL_GROWTH_BASE_PER_STEP.max(0.0);
+    let mult = DIGESTION_TAIL_GROWTH_BACKLOG_SQRT_MULT.max(0.0);
+    let max = DIGESTION_TAIL_GROWTH_MAX_PER_STEP.max(base);
+    let dynamic = base + mult * backlog.max(0.0).sqrt();
+    dynamic.clamp(0.0, max)
 }
 
 fn can_continue_boost(player: &Player, min_length: usize) -> bool {
@@ -92,18 +105,48 @@ pub fn advance_digestions_with_boost(
         while i < player.digestions.len() {
             player.digestions[i].remaining -= 1;
 
-            if !player.digestions[i].applied
-                && player.digestions[i].remaining <= player.digestions[i].settle_steps
-            {
-                player.tail_extension += player.digestions[i].growth_amount.max(0.0);
-                player.digestions[i].applied = true;
-            }
+            i += 1;
+        }
 
-            if player.digestions[i].remaining <= 0 {
+        // Drain tail growth from any digestions that have reached the tail.
+        let mut tail_backlog = 0.0;
+        for digestion in &player.digestions {
+            if digestion.remaining > digestion.settle_steps {
+                continue;
+            }
+            let remaining = (digestion.growth_amount - digestion.applied_growth).max(0.0);
+            tail_backlog += remaining;
+        }
+        let mut budget = tail_growth_rate_per_step(tail_backlog).min(tail_backlog);
+        if budget > 1e-9 {
+            for digestion in &mut player.digestions {
+                if budget <= 1e-9 {
+                    break;
+                }
+                if digestion.remaining > digestion.settle_steps {
+                    continue;
+                }
+                let remaining = (digestion.growth_amount - digestion.applied_growth).max(0.0);
+                if remaining <= 1e-9 {
+                    continue;
+                }
+                let delta = remaining.min(budget);
+                digestion.applied_growth += delta;
+                player.tail_extension += delta;
+                budget -= delta;
+            }
+        }
+
+        // Cleanup: digestions can outlive their visual window if a large burst is still draining.
+        // Once they've fully applied their growth, they can be removed.
+        let mut i = 0;
+        while i < player.digestions.len() {
+            let growth_remaining =
+                (player.digestions[i].growth_amount - player.digestions[i].applied_growth).max(0.0);
+            if player.digestions[i].remaining <= 0 && growth_remaining <= 1e-6 {
                 player.digestions.remove(i);
                 continue;
             }
-
             i += 1;
         }
 
@@ -116,7 +159,7 @@ pub fn advance_digestions_with_boost(
         }
 
         if player.tail_extension >= 1.0 {
-            add_snake_node(&mut player.snake, player.axis);
+            add_snake_node_for_growth(&mut player.snake, player.axis);
             player.tail_extension -= 1.0;
         }
         if player.tail_extension < 0.0 {
@@ -228,20 +271,20 @@ mod tests {
         player.digestions = vec![
             Digestion {
                 id: 7,
-                remaining: 1,
+                remaining: 0,
                 total: 1,
                 settle_steps: 0,
-                growth_amount: 1.0,
-                applied: false,
+                growth_amount: 0.05,
+                applied_growth: 0.0,
                 strength: 1.0,
             },
             Digestion {
                 id: 9,
-                remaining: 4,
+                remaining: 0,
                 total: 4,
                 settle_steps: 0,
                 growth_amount: 0.5,
-                applied: false,
+                applied_growth: 0.0,
                 strength: 1.0,
             },
         ];
@@ -249,11 +292,11 @@ mod tests {
         let previous_len = player.snake.len();
         advance_digestions(&mut player, 1);
 
-        assert_eq!(player.snake.len(), previous_len + 1);
+        assert_eq!(player.snake.len(), previous_len);
         assert_eq!(player.digestions.len(), 1);
         assert_eq!(player.digestions[0].id, 9);
-        assert_eq!(player.digestions[0].remaining, 3);
-        assert!(player.tail_extension.abs() < 1e-6);
+        assert!(player.tail_extension > 0.0);
+        assert!(player.tail_extension < 1.0);
     }
 
     #[test]
@@ -274,19 +317,29 @@ mod tests {
         let mut player = make_player();
         player.digestions.push(Digestion {
             id: 1,
-            remaining: 1,
+            remaining: 0,
             total: 1,
             settle_steps: 0,
             growth_amount: 0.4,
-            applied: false,
+            applied_growth: 0.0,
             strength: 0.4,
         });
 
         let before_len = player.snake.len();
         advance_digestions(&mut player, 1);
         assert_eq!(player.snake.len(), before_len);
+        assert!(!player.digestions.is_empty());
+        assert!(player.tail_extension > 0.0);
+        assert!(player.tail_extension < 0.4);
+        assert!((player.digestions[0].applied_growth - player.tail_extension).abs() < 1e-6);
+
+        let mut iterations = 0;
+        while !player.digestions.is_empty() && iterations < 300 {
+            advance_digestions(&mut player, 1);
+            iterations += 1;
+        }
         assert!(player.digestions.is_empty());
-        assert!((player.tail_extension - 0.4).abs() < 1e-6);
+        assert!((player.tail_extension - 0.4).abs() < 1e-3);
     }
 
     #[test]
@@ -295,19 +348,29 @@ mod tests {
         player.tail_extension = 0.8;
         player.digestions.push(Digestion {
             id: 1,
-            remaining: 1,
+            remaining: 0,
             total: 1,
             settle_steps: 0,
             growth_amount: 0.35,
-            applied: false,
+            applied_growth: 0.0,
             strength: 0.8,
         });
 
         let before_len = player.snake.len();
-        advance_digestions(&mut player, 1);
-
+        let mut iterations = 0;
+        while player.snake.len() == before_len && iterations < 300 {
+            advance_digestions(&mut player, 1);
+            iterations += 1;
+        }
         assert_eq!(player.snake.len(), before_len + 1);
-        assert!(player.tail_extension > 0.14 && player.tail_extension < 0.16);
+
+        iterations = 0;
+        while !player.digestions.is_empty() && iterations < 300 {
+            advance_digestions(&mut player, 1);
+            iterations += 1;
+        }
+        assert!(player.digestions.is_empty());
+        assert!(player.tail_extension > 0.149 && player.tail_extension < 0.151);
     }
 
     #[test]
@@ -315,19 +378,26 @@ mod tests {
         let mut player = make_player();
         player.digestions.push(Digestion {
             id: 1,
-            remaining: 1,
+            remaining: 0,
             total: 1,
             settle_steps: 0,
             growth_amount: 2.4,
-            applied: false,
+            applied_growth: 0.0,
             strength: 1.0,
         });
 
         let before_len = player.snake.len();
-        advance_digestions(&mut player, 1);
-
-        assert_eq!(player.snake.len(), before_len + 1);
-        assert!(player.tail_extension > 1.39 && player.tail_extension < 1.41);
+        let mut last_len = before_len;
+        let mut iterations = 0;
+        while !player.digestions.is_empty() && iterations < 2000 {
+            advance_digestions(&mut player, 1);
+            assert!(player.snake.len() <= last_len + 1);
+            last_len = player.snake.len();
+            iterations += 1;
+        }
+        assert!(player.digestions.is_empty());
+        assert_eq!(player.snake.len(), before_len + 2);
+        assert!((player.tail_extension - 0.4).abs() < 1e-3);
     }
 
     #[test]
@@ -350,7 +420,7 @@ mod tests {
             total: 10,
             settle_steps: 4,
             growth_amount: 0.2,
-            applied: true,
+            applied_growth: 0.0,
             strength: 0.3,
         };
         let finished = Digestion {
@@ -359,7 +429,7 @@ mod tests {
             total: 10,
             settle_steps: 4,
             growth_amount: 0.2,
-            applied: true,
+            applied_growth: 0.0,
             strength: 0.3,
         };
 

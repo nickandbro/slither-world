@@ -6823,11 +6823,19 @@ diffuseColor.a *= retireEdge;`,
       tailDirMinLen = Number.isFinite(referenceLength)
         ? Math.max(0, referenceLength * TAIL_DIR_MIN_RATIO)
         : 0
-      const hasAuthoritativeTailWindow = player.snakeStart + nodes.length >= player.snakeTotalLen
+      // Only apply `tailExtension` when we have the exact authoritative tail window. During
+      // snapshot interpolation, transient `snakeLen`/`snakeTotalLen` mismatches can otherwise
+      // produce one-frame over/under-shoots ("tail pops") under heavy growth/boost transitions.
+      const hasAuthoritativeTailWindow = player.snakeStart + nodes.length === player.snakeTotalLen
       const extensionRatio = hasAuthoritativeTailWindow
         ? clamp(player.tailExtension, 0, 0.999_999)
         : 0
-      const extensionDistance = Math.max(0, referenceLength * extensionRatio)
+      // Prefer the actual last-segment length for tail extension distance (it matches the
+      // server-side "commit a new node" spacing more closely). Fall back to the more stable
+      // reference length if the tail segment is degenerate.
+      const extensionBaseLength =
+        Number.isFinite(tailSegmentLength) && tailSegmentLength > 1e-6 ? tailSegmentLength : referenceLength
+      const extensionDistance = Math.max(0, extensionBaseLength * extensionRatio)
       tailExtensionDirection = computeTailExtendDirection(
         curvePoints,
         tailDirMinLen,
@@ -6835,10 +6843,43 @@ diffuseColor.a *= retireEdge;`,
         tailFrameState,
       )
       if (extensionDistance > 0) {
+        // Bias toward the raw last-segment direction when the tail is close to fully extended so
+        // the extended tail point lines up with the server's next committed node, avoiding
+        // occasional visible "pops" when rapid growth commits happen.
+        let extensionDir = tailExtensionDirection
+        if (curvePoints.length >= 2) {
+          const tailPos = curvePoints[curvePoints.length - 1]
+          const prevPos = curvePoints[curvePoints.length - 2]
+          snakeContactNormalTemp.copy(tailPos).normalize()
+          snakeContactTangentTemp.copy(tailPos).sub(prevPos)
+          snakeContactTangentTemp.addScaledVector(
+            snakeContactNormalTemp,
+            -snakeContactTangentTemp.dot(snakeContactNormalTemp),
+          )
+          const rawDir = snakeContactTangentTemp.lengthSq() > 1e-8 ? snakeContactTangentTemp.normalize() : null
+          if (rawDir && tailExtensionDirection) {
+            const w = clamp((extensionRatio - 0.6) / 0.3, 0, 1)
+            if (w >= 0.999_999) {
+              extensionDir = rawDir
+            } else if (w > 1e-6) {
+              extensionDir = tailExtensionDirection
+                .clone()
+                .multiplyScalar(1 - w)
+                .addScaledVector(rawDir, w)
+              if (extensionDir.lengthSq() > 1e-8) {
+                extensionDir.normalize()
+              } else {
+                extensionDir = rawDir
+              }
+            }
+          } else if (rawDir) {
+            extensionDir = rawDir
+          }
+        }
         const extendedTail = computeExtendedTailPoint(
           curvePoints,
           extensionDistance,
-          tailExtensionDirection,
+          extensionDir,
         )
         if (extendedTail) {
           curvePoints[curvePoints.length - 1] = extendedTail

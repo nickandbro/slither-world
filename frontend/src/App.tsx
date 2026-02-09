@@ -69,6 +69,7 @@ import {
 import {
   DEBUG_UI_ENABLED,
   getNetDebugEnabled,
+  getTailDebugEnabled,
   getDayNightDebugMode,
   getLakeDebug,
   getMountainDebug,
@@ -181,8 +182,109 @@ type NetLagReport = {
   recentEvents: NetLagEvent[]
 }
 
+type TailGrowthEvent = {
+  id: number
+  atIso: string
+  tMs: number
+  kind: 'rx' | 'render' | 'shrink' | 'stretch'
+  phase: MenuPhase
+  seq: number | null
+  now: number | null
+  localId: string | null
+  alive: boolean | null
+  isBoosting: boolean | null
+  boostInput: boolean | null
+  score: number | null
+  scoreFraction: number | null
+  snakeLen: number | null
+  snakeTotalLen: number | null
+  tailExtension: number | null
+  lenUnits: number | null
+  digestions: number | null
+  digestionMaxProgress: number | null
+  // Tail-end metrics (useful for diagnosing "shrink then pop" reports).
+  tailSegLen: number | null
+  tailRefLen: number | null
+  tailExtRatio: number | null
+  tailExtDist: number | null
+  tailEndLen: number | null
+  // Raw snapshot metrics before the local stabilizer is applied (render-loop only).
+  rawSnakeLen: number | null
+  rawSnakeTotalLen: number | null
+  rawTailExtension: number | null
+  rawLenUnits: number | null
+  rawTailSegLen: number | null
+  rawTailRefLen: number | null
+  rawTailExtRatio: number | null
+  rawTailExtDist: number | null
+  rawTailEndLen: number | null
+  // Net context
+  lagSpikeActive: boolean
+  lagSpikeCause: LagSpikeCause
+  playoutDelayMs: number
+  delayBoostMs: number
+  jitterDelayMs: number
+  jitterMs: number
+  receiveIntervalMs: number
+  staleMs: number
+  impairmentMsRemaining: number
+  maxExtrapolationMs: number
+  latestSeq: number | null
+  seqGapDetected: boolean
+  tuningRevision: number
+}
+
+type TailGrowthReport = {
+  generatedAtIso: string
+  enabled: boolean
+  count: number
+  shrinkCount: number
+  stretchCount: number
+  recentShrinks: TailGrowthEvent[]
+  recentStretches: TailGrowthEvent[]
+}
+
+type TailEndSample = {
+  seq: number | null
+  now: number | null
+  snakeLen: number | null
+  snakeTotalLen: number | null
+  tailExtension: number | null
+  segLen: number
+  refLen: number
+  extRatio: number
+  extDist: number
+  endLen: number
+}
+
+type TailGrowthEventInput = Omit<
+  TailGrowthEvent,
+  | 'id'
+  | 'atIso'
+  | 'tMs'
+  | 'phase'
+  | 'lagSpikeActive'
+  | 'lagSpikeCause'
+  | 'playoutDelayMs'
+  | 'delayBoostMs'
+  | 'jitterDelayMs'
+  | 'jitterMs'
+  | 'receiveIntervalMs'
+  | 'staleMs'
+  | 'impairmentMsRemaining'
+  | 'maxExtrapolationMs'
+  | 'latestSeq'
+  | 'seqGapDetected'
+  | 'tuningRevision'
+> & {
+  tMs?: number
+  phase?: MenuPhase
+}
+
 const SEQ_HALF_RANGE = 0x8000_0000
 const NET_EVENT_LOG_LIMIT = 240
+const TAIL_EVENT_LOG_LIMIT = 900
+const TAIL_RENDER_SAMPLE_INTERVAL_MS = 140
 const ARRIVAL_GAP_REENTRY_COOLDOWN_MS = 480
 
 const isSeqNewer = (next: number, current: number) => {
@@ -325,6 +427,10 @@ export default function App() {
   const netLagEventsRef = useRef<NetLagEvent[]>([])
   const netLagEventIdRef = useRef(1)
   const lastNetSummaryLogMsRef = useRef(0)
+  const tailGrowthEventsRef = useRef<TailGrowthEvent[]>([])
+  const tailGrowthEventIdRef = useRef(1)
+  const lastTailRenderSampleAtMsRef = useRef<number | null>(null)
+  const lastTailEndSampleRef = useRef<TailEndSample | null>(null)
   const lastHeadSampleRef = useRef<Point | null>(null)
   const boostFxStateRef = useRef(createInitialBoostFxState())
   const scoreRadialStateRef = useRef<ScoreRadialVisualState>(createInitialScoreRadialState())
@@ -376,6 +482,7 @@ export default function App() {
   const playerIdRef = useRef<string | null>(playerId)
   const playerNameRef = useRef(playerName)
   const netDebugEnabled = useMemo(getNetDebugEnabled, [])
+  const tailDebugEnabled = useMemo(getTailDebugEnabled, [])
   const isPlaying = menuPhase === 'playing'
   const showMenuOverlay = menuPhase === 'preplay' || menuOverlayExiting
   const solidPaletteColor = SKIN_PALETTE_COLORS[solidPaletteIndex] ?? (SKIN_PALETTE_COLORS[0] ?? '#ffffff')
@@ -535,6 +642,118 @@ export default function App() {
       recentEvents: netLagEventsRef.current.slice(-80),
     }
   }, [])
+
+  const pointDistance = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z)
+
+  const computeTailEndMetrics = (snake: Point[], tailExtension: number) => {
+    if (snake.length < 2) return null
+    const tail = normalize(snake[snake.length - 1])
+    const prev = normalize(snake[snake.length - 2])
+    const segLen = pointDistance(tail, prev)
+    let refLen = segLen
+    if (!(refLen > 1e-6) && snake.length >= 3) {
+      const prevPrev = normalize(snake[snake.length - 3])
+      refLen = pointDistance(prev, prevPrev)
+    }
+    if (!Number.isFinite(refLen) || refLen <= 0) {
+      refLen = 0
+    }
+    const extRatio = clamp(tailExtension, 0, 0.999_999)
+    const extDist = Math.max(0, refLen) * extRatio
+    return {
+      segLen,
+      refLen,
+      extRatio,
+      extDist,
+      endLen: segLen + extDist,
+    }
+  }
+
+  const digestionMaxProgress = (digestions: Array<{ progress: number }>) => {
+    let max = 0
+    for (const digestion of digestions) {
+      const p = digestion.progress
+      if (Number.isFinite(p)) max = Math.max(max, p)
+    }
+    return max
+  }
+
+  const appendTailGrowthEvent = useCallback(
+    (event: TailGrowthEventInput) => {
+      if (!tailDebugEnabled) return
+      const net = netDebugInfoRef.current
+      const entry: TailGrowthEvent = {
+        id: tailGrowthEventIdRef.current,
+        atIso: new Date().toISOString(),
+        tMs: event.tMs ?? performance.now(),
+        kind: event.kind,
+        phase: event.phase ?? menuPhaseRef.current,
+        seq: event.seq,
+        now: event.now,
+        localId: event.localId,
+        alive: event.alive,
+        isBoosting: event.isBoosting,
+        boostInput: event.boostInput,
+        score: event.score,
+        scoreFraction: event.scoreFraction,
+        snakeLen: event.snakeLen,
+        snakeTotalLen: event.snakeTotalLen,
+        tailExtension: event.tailExtension,
+        lenUnits: event.lenUnits,
+        digestions: event.digestions,
+        digestionMaxProgress: event.digestionMaxProgress,
+        tailSegLen: event.tailSegLen,
+        tailRefLen: event.tailRefLen,
+        tailExtRatio: event.tailExtRatio,
+        tailExtDist: event.tailExtDist,
+        tailEndLen: event.tailEndLen,
+        rawSnakeLen: event.rawSnakeLen,
+        rawSnakeTotalLen: event.rawSnakeTotalLen,
+        rawTailExtension: event.rawTailExtension,
+        rawLenUnits: event.rawLenUnits,
+        rawTailSegLen: event.rawTailSegLen,
+        rawTailRefLen: event.rawTailRefLen,
+        rawTailExtRatio: event.rawTailExtRatio,
+        rawTailExtDist: event.rawTailExtDist,
+        rawTailEndLen: event.rawTailEndLen,
+        lagSpikeActive: net.lagSpikeActive,
+        lagSpikeCause: net.lagSpikeCause,
+        playoutDelayMs: net.playoutDelayMs,
+        delayBoostMs: net.delayBoostMs,
+        jitterDelayMs: net.jitterDelayMs,
+        jitterMs: net.jitterMs,
+        receiveIntervalMs: net.receiveIntervalMs,
+        staleMs: net.staleMs,
+        impairmentMsRemaining: net.impairmentMsRemaining,
+        maxExtrapolationMs: net.maxExtrapolationMs,
+        latestSeq: net.latestSeq,
+        seqGapDetected: net.seqGapDetected,
+        tuningRevision: net.tuningRevision,
+      }
+      tailGrowthEventIdRef.current += 1
+      const eventLog = tailGrowthEventsRef.current
+      eventLog.push(entry)
+      if (eventLog.length > TAIL_EVENT_LOG_LIMIT) {
+        eventLog.splice(0, eventLog.length - TAIL_EVENT_LOG_LIMIT)
+      }
+    },
+    [tailDebugEnabled],
+  )
+
+	  const buildTailGrowthReport = useCallback((): TailGrowthReport => {
+	    const events = tailGrowthEventsRef.current
+	    const shrinks = events.filter((event) => event.kind === 'shrink')
+	    const stretches = events.filter((event) => event.kind === 'stretch')
+	    return {
+	      generatedAtIso: new Date().toISOString(),
+	      enabled: tailDebugEnabled,
+	      count: events.length,
+	      shrinkCount: shrinks.length,
+	      stretchCount: stretches.length,
+	      recentShrinks: shrinks.slice(-12),
+	      recentStretches: stretches.slice(-12),
+	    }
+	  }, [tailDebugEnabled])
 
   const applyNetTuningOverrides = useCallback(
     (incoming: NetTuningOverrides | null | undefined, options?: { announce?: boolean }) => {
@@ -757,7 +976,54 @@ export default function App() {
       tuningRevision: netTuningRevisionRef.current,
       tuningOverrides: { ...netTuningOverridesRef.current },
     }
-  }, [appendNetLagEvent, netDebugEnabled])
+
+    if (tailDebugEnabled) {
+      const localId = playerIdRef.current
+      const boostInput = pointerRef.current.boost
+      const localPlayer = localId ? state.players.find((player) => player.id === localId) ?? null : null
+      const tailExt = localPlayer?.tailExtension ?? null
+      const snakeLen = localPlayer?.snake.length ?? null
+      const snakeTotalLen = localPlayer?.snakeTotalLen ?? null
+      const extRatio = tailExt === null ? null : clamp(tailExt, 0, 0.999_999)
+      const totalLen = snakeTotalLen ?? snakeLen
+      const lenUnits = totalLen === null || extRatio === null ? null : totalLen + extRatio
+      const digestions = localPlayer?.digestions ?? null
+      const metrics =
+        localPlayer && tailExt !== null ? computeTailEndMetrics(localPlayer.snake, tailExt) : null
+
+      appendTailGrowthEvent({
+        kind: 'rx',
+        seq: state.seq,
+        now: state.now,
+        localId,
+        alive: localPlayer?.alive ?? null,
+        isBoosting: localPlayer?.isBoosting ?? null,
+        boostInput,
+        score: localPlayer?.score ?? null,
+        scoreFraction: localPlayer?.scoreFraction ?? null,
+        snakeLen,
+        snakeTotalLen,
+        tailExtension: tailExt,
+        lenUnits,
+        digestions: digestions ? digestions.length : null,
+        digestionMaxProgress: digestions ? digestionMaxProgress(digestions) : null,
+        tailSegLen: metrics?.segLen ?? null,
+        tailRefLen: metrics?.refLen ?? null,
+        tailExtRatio: metrics?.extRatio ?? null,
+        tailExtDist: metrics?.extDist ?? null,
+        tailEndLen: metrics?.endLen ?? null,
+        rawSnakeLen: null,
+        rawSnakeTotalLen: null,
+        rawTailExtension: null,
+        rawLenUnits: null,
+        rawTailSegLen: null,
+        rawTailRefLen: null,
+        rawTailExtRatio: null,
+        rawTailExtDist: null,
+        rawTailEndLen: null,
+      })
+    }
+  }, [appendNetLagEvent, netDebugEnabled, tailDebugEnabled, appendTailGrowthEvent])
 
   const getRenderSnapshot = useCallback(() => {
     const buffer = snapshotBufferRef.current
@@ -926,7 +1192,9 @@ export default function App() {
       const incomingSnake = localPlayer.snake
       const previousSnake = localSnakeDisplayRef.current
       if (!previousSnake || previousSnake.length === 0) {
-        localSnakeDisplayRef.current = incomingSnake.map((node) => ({ ...node }))
+        // Normalize to unit vectors so downstream code (view culling, tail metrics, etc) matches
+        // what the renderer actually uses.
+        localSnakeDisplayRef.current = incomingSnake.map((node) => normalize(node))
         return snapshot
       }
 
@@ -959,11 +1227,17 @@ export default function App() {
 
       const blendLen = Math.min(previousSnake.length, incomingSnake.length)
       const blendedSnake: Point[] = []
+      const lastIndex = Math.max(1, incomingSnake.length - 1)
       for (let i = 0; i < incomingSnake.length; i += 1) {
         if (i < blendLen) {
-          blendedSnake.push(lerpPoint(previousSnake[i], incomingSnake[i], alpha))
+          // Reduce smoothing near the tail so segment spacing doesn't collapse during rapid
+          // growth/boost transitions (which can otherwise read as a tail "shrink then pop").
+          const t = i / lastIndex
+          const tailBias = t * t
+          const alphaNode = clamp(alpha + (1 - alpha) * tailBias, 0, 1)
+          blendedSnake.push(normalize(lerpPoint(previousSnake[i], incomingSnake[i], alphaNode)))
         } else {
-          blendedSnake.push({ ...incomingSnake[i] })
+          blendedSnake.push(normalize(incomingSnake[i]))
         }
       }
       localSnakeDisplayRef.current = blendedSnake.map((node) => ({ ...node }))
@@ -1171,22 +1445,164 @@ export default function App() {
 	            if (rafPerfEnabled) {
 	              frameStartMs = nowMs
 	            }
-	            const lastRenderFrameMs = lastRenderFrameMsRef.current
-	            const frameDeltaSeconds =
-	              lastRenderFrameMs !== null ? Math.max(0, Math.min(0.1, (nowMs - lastRenderFrameMs) / 1000)) : 1 / 60
-	            lastRenderFrameMsRef.current = nowMs
-	            const localId = playerIdRef.current
-	            const snapshot = stabilizeLocalSnapshot(getRenderSnapshot(), localId, frameDeltaSeconds)
-	            if (rafPerfEnabled) {
-	              afterSnapshotMs = performance.now()
-	            }
-	            const localSnapshotPlayer =
-	              snapshot?.players.find((player) => player.id === localId) ?? null
+		            const lastRenderFrameMs = lastRenderFrameMsRef.current
+		            const frameDeltaSeconds =
+		              lastRenderFrameMs !== null ? Math.max(0, Math.min(0.1, (nowMs - lastRenderFrameMs) / 1000)) : 1 / 60
+		            lastRenderFrameMsRef.current = nowMs
+		            const localId = playerIdRef.current
+		            const rawSnapshot = getRenderSnapshot()
+		            const snapshot = stabilizeLocalSnapshot(rawSnapshot, localId, frameDeltaSeconds)
+		            if (rafPerfEnabled) {
+		              afterSnapshotMs = performance.now()
+		            }
+		            const localSnapshotPlayer =
+		              snapshot?.players.find((player) => player.id === localId) ?? null
+		            const rawSnapshotPlayer =
+		              rawSnapshot?.players.find((player) => player.id === localId) ?? null
             const localHead = localSnapshotPlayer?.snake[0] ?? null
             const hasSpawnedSnake =
               !!localSnapshotPlayer && localSnapshotPlayer.alive && localSnapshotPlayer.snake.length > 0
             const rawGameplayCamera = updateCamera(localHead, cameraUpRef)
             const phase = menuPhaseRef.current
+
+	            if (tailDebugEnabled) {
+	              const lastSampleAt = lastTailRenderSampleAtMsRef.current
+	              const shouldSample =
+	                lastSampleAt === null || nowMs - lastSampleAt >= TAIL_RENDER_SAMPLE_INTERVAL_MS
+	              if (shouldSample) {
+	                lastTailRenderSampleAtMsRef.current = nowMs
+	                const boostInput = pointerRef.current.boost
+	                const stableTailExt = localSnapshotPlayer?.tailExtension ?? null
+	                const rawTailExt = rawSnapshotPlayer?.tailExtension ?? null
+	                const stableMetrics =
+	                  localSnapshotPlayer && stableTailExt !== null
+	                    ? computeTailEndMetrics(localSnapshotPlayer.snake, stableTailExt)
+	                    : null
+	                const rawMetrics =
+	                  rawSnapshotPlayer && rawTailExt !== null
+	                    ? computeTailEndMetrics(rawSnapshotPlayer.snake, rawTailExt)
+	                    : null
+	                const stableExtRatio = stableTailExt === null ? null : clamp(stableTailExt, 0, 0.999_999)
+	                const rawExtRatio = rawTailExt === null ? null : clamp(rawTailExt, 0, 0.999_999)
+	                const stableTotalLen =
+	                  localSnapshotPlayer?.snakeTotalLen ?? localSnapshotPlayer?.snake.length ?? null
+	                const rawTotalLen = rawSnapshotPlayer?.snakeTotalLen ?? rawSnapshotPlayer?.snake.length ?? null
+	                const stableLenUnits =
+	                  stableTotalLen === null || stableExtRatio === null ? null : stableTotalLen + stableExtRatio
+		                const rawLenUnits =
+		                  rawTotalLen === null || rawExtRatio === null ? null : rawTotalLen + rawExtRatio
+
+		                let kind: TailGrowthEvent['kind'] = 'render'
+		                const stableEndLen = stableMetrics?.endLen ?? null
+		                const prevSample = lastTailEndSampleRef.current
+		                const prevEndLen = prevSample?.endLen ?? null
+		                const stableSample: TailEndSample | null =
+		                  stableMetrics && stableEndLen !== null && Number.isFinite(stableEndLen)
+		                    ? {
+		                        seq: snapshot?.seq ?? null,
+		                        now: snapshot?.now ?? null,
+		                        snakeLen: localSnapshotPlayer?.snake.length ?? null,
+		                        snakeTotalLen: localSnapshotPlayer?.snakeTotalLen ?? null,
+		                        tailExtension: stableTailExt ?? null,
+		                        ...stableMetrics,
+		                      }
+		                    : null
+		                if (
+		                  stableEndLen !== null &&
+		                  prevEndLen !== null &&
+		                  Number.isFinite(stableEndLen) &&
+		                  Number.isFinite(prevEndLen) &&
+		                  !(localSnapshotPlayer?.isBoosting ?? false) &&
+		                  !boostInput
+		                ) {
+		                  const refLen = stableMetrics?.refLen ?? 0
+		                  const threshold = Math.max(0.003, refLen * 0.35)
+		                  if (stableEndLen < prevEndLen - threshold) {
+		                    kind = 'shrink'
+		                    console.info(
+		                      `[tail] shrink seq=${snapshot?.seq ?? -1} endLen=${stableEndLen.toFixed(4)} prev=${prevEndLen.toFixed(4)} ref=${refLen.toFixed(4)} tailExt=${(stableTailExt ?? 0).toFixed(3)} boost=${localSnapshotPlayer?.isBoosting ?? false} input=${boostInput}`,
+		                      {
+		                        prev: prevSample,
+		                        current: stableSample,
+		                        stable: {
+		                          snakeLen: localSnapshotPlayer?.snake.length ?? null,
+		                          snakeTotalLen: localSnapshotPlayer?.snakeTotalLen ?? null,
+		                          tailExtension: stableTailExt,
+		                          ...stableMetrics,
+		                        },
+		                        raw: rawSnapshotPlayer
+		                          ? {
+		                              snakeLen: rawSnapshotPlayer.snake.length,
+		                              snakeTotalLen: rawSnapshotPlayer.snakeTotalLen,
+		                              tailExtension: rawTailExt,
+		                              ...rawMetrics,
+		                            }
+		                          : null,
+		                      },
+		                    )
+		                  } else if (stableEndLen > prevEndLen + threshold) {
+		                    kind = 'stretch'
+		                    console.info(
+		                      `[tail] stretch seq=${snapshot?.seq ?? -1} endLen=${stableEndLen.toFixed(4)} prev=${prevEndLen.toFixed(4)} ref=${refLen.toFixed(4)} tailExt=${(stableTailExt ?? 0).toFixed(3)} boost=${localSnapshotPlayer?.isBoosting ?? false} input=${boostInput}`,
+		                      {
+		                        prev: prevSample,
+		                        current: stableSample,
+		                        stable: {
+		                          snakeLen: localSnapshotPlayer?.snake.length ?? null,
+		                          snakeTotalLen: localSnapshotPlayer?.snakeTotalLen ?? null,
+		                          tailExtension: stableTailExt,
+		                          ...stableMetrics,
+		                        },
+		                        raw: rawSnapshotPlayer
+		                          ? {
+		                              snakeLen: rawSnapshotPlayer.snake.length,
+		                              snakeTotalLen: rawSnapshotPlayer.snakeTotalLen,
+		                              tailExtension: rawTailExt,
+		                              ...rawMetrics,
+		                            }
+		                          : null,
+		                      },
+		                    )
+		                  }
+		                }
+		                lastTailEndSampleRef.current = stableSample
+
+		                appendTailGrowthEvent({
+		                  kind,
+		                  phase,
+	                  seq: snapshot?.seq ?? null,
+	                  now: snapshot?.now ?? null,
+	                  localId,
+	                  alive: localSnapshotPlayer?.alive ?? null,
+	                  isBoosting: localSnapshotPlayer?.isBoosting ?? null,
+	                  boostInput,
+	                  score: localSnapshotPlayer?.score ?? null,
+	                  scoreFraction: localSnapshotPlayer?.scoreFraction ?? null,
+	                  snakeLen: localSnapshotPlayer?.snake.length ?? null,
+	                  snakeTotalLen: localSnapshotPlayer?.snakeTotalLen ?? null,
+	                  tailExtension: stableTailExt,
+	                  lenUnits: stableLenUnits,
+	                  digestions: localSnapshotPlayer?.digestions.length ?? null,
+	                  digestionMaxProgress: localSnapshotPlayer
+	                    ? digestionMaxProgress(localSnapshotPlayer.digestions)
+	                    : null,
+	                  tailSegLen: stableMetrics?.segLen ?? null,
+	                  tailRefLen: stableMetrics?.refLen ?? null,
+	                  tailExtRatio: stableMetrics?.extRatio ?? null,
+	                  tailExtDist: stableMetrics?.extDist ?? null,
+	                  tailEndLen: stableMetrics?.endLen ?? null,
+	                  rawSnakeLen: rawSnapshotPlayer?.snake.length ?? null,
+	                  rawSnakeTotalLen: rawSnapshotPlayer?.snakeTotalLen ?? null,
+	                  rawTailExtension: rawTailExt,
+	                  rawLenUnits,
+	                  rawTailSegLen: rawMetrics?.segLen ?? null,
+	                  rawTailRefLen: rawMetrics?.refLen ?? null,
+	                  rawTailExtRatio: rawMetrics?.extRatio ?? null,
+	                  rawTailExtDist: rawMetrics?.extDist ?? null,
+	                  rawTailEndLen: rawMetrics?.endLen ?? null,
+	                })
+	              }
+	            }
 
             if (phase === 'playing' && hasSpawnedSnake && localHead) {
               const normalizedHead = normalize(localHead)
@@ -1655,6 +2071,26 @@ export default function App() {
                 }
                 ;(
                   rootDebugApi as {
+                    getTailGrowthEvents?: () => TailGrowthEvent[]
+                  }
+                ).getTailGrowthEvents = () => tailGrowthEventsRef.current.slice()
+                ;(
+                  rootDebugApi as {
+                    getTailGrowthReport?: () => TailGrowthReport
+                  }
+                ).getTailGrowthReport = () => buildTailGrowthReport()
+                ;(
+                  rootDebugApi as {
+                    clearTailGrowthEvents?: () => void
+                  }
+	                ).clearTailGrowthEvents = () => {
+	                  tailGrowthEventsRef.current = []
+	                  tailGrowthEventIdRef.current = 1
+	                  lastTailRenderSampleAtMsRef.current = null
+	                  lastTailEndSampleRef.current = null
+	                }
+                ;(
+                  rootDebugApi as {
                     getNetTuningOverrides?: () => NetTuningOverrides
                   }
                 ).getNetTuningOverrides = () => ({
@@ -1936,12 +2372,13 @@ export default function App() {
       socket.addEventListener('message', (event) => {
         if (!(event.data instanceof ArrayBuffer)) return
         const decoded = decodeServerMessage(event.data, playerMetaRef.current)
-        if (!decoded) return
-        if (decoded.type === 'init') {
-          setPlayerId(decoded.playerId)
-          storePlayerId(decoded.playerId)
-          if (Number.isFinite(decoded.tickMs) && decoded.tickMs > 0) {
-            const normalizedTickMs = Math.max(16, decoded.tickMs)
+	        if (!decoded) return
+	        if (decoded.type === 'init') {
+	          setPlayerId(decoded.playerId)
+	          playerIdRef.current = decoded.playerId
+	          storePlayerId(decoded.playerId)
+	          if (Number.isFinite(decoded.tickMs) && decoded.tickMs > 0) {
+	            const normalizedTickMs = Math.max(16, decoded.tickMs)
             serverTickMsRef.current = normalizedTickMs
             tickIntervalRef.current = normalizedTickMs
             receiveIntervalMsRef.current = normalizedTickMs

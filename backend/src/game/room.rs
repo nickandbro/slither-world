@@ -3198,7 +3198,7 @@ mod tests {
             total: 4,
             settle_steps: 1,
             growth_amount: 0.75,
-            applied: true,
+            applied_growth: 0.0,
             strength: 0.35,
         });
 
@@ -3284,7 +3284,7 @@ mod tests {
                 total: 4,
                 settle_steps: 1,
                 growth_amount: 0.4,
-                applied: true,
+                applied_growth: 0.0,
                 strength: 0.4,
             });
         }

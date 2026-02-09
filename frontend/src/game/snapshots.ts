@@ -5,13 +5,90 @@ import type {
   PlayerSnapshot,
   Point,
 } from './types'
-import { clamp, lerp, lerpPoint } from './math'
+import { clamp, lerp, lerpPoint, normalize } from './math'
 
 export type TimedSnapshot = GameStateSnapshot & {
   receivedAt: number
 }
 
 const MAX_DIGESTION_PROGRESS = 2
+const SNAKE_EXT_EPS = 1e-6
+
+const pointDistance = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z)
+
+const nlerpPoint = (a: Point, b: Point, t: number): Point => normalize(lerpPoint(a, b, t))
+
+const cloneSnake = (snake: Point[]) => snake.map((node) => ({ ...node }))
+
+function tailStepLength(snake: Point[]) {
+  if (snake.length < 2) return 0
+  const tail = normalize(snake[snake.length - 1])
+  const prev = normalize(snake[snake.length - 2])
+  let len = pointDistance(tail, prev)
+  if (!(len > SNAKE_EXT_EPS) && snake.length >= 3) {
+    const prevPrev = normalize(snake[snake.length - 3])
+    len = pointDistance(prev, prevPrev)
+  }
+  return Number.isFinite(len) && len > 0 ? len : 0
+}
+
+function tangentDirAtTail(tail: Point, prev: Point): Point | null {
+  const tailN = normalize(tail)
+  const prevN = normalize(prev)
+  const seg = { x: tailN.x - prevN.x, y: tailN.y - prevN.y, z: tailN.z - prevN.z }
+  const dotSegN = seg.x * tailN.x + seg.y * tailN.y + seg.z * tailN.z
+  const dir = {
+    x: seg.x - tailN.x * dotSegN,
+    y: seg.y - tailN.y * dotSegN,
+    z: seg.z - tailN.z * dotSegN,
+  }
+  const len = Math.sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z)
+  if (!(len > SNAKE_EXT_EPS)) return null
+  return { x: dir.x / len, y: dir.y / len, z: dir.z / len }
+}
+
+function extendSnakeTailForGrowth(snake: Point[], targetLength: number): Point[] {
+  if (snake.length >= targetLength) return cloneSnake(snake)
+  const out = cloneSnake(snake)
+  if (out.length === 0) return out
+  const tail0 = normalize(out[out.length - 1])
+  if (out.length < 2) {
+    while (out.length < targetLength) out.push({ ...tail0 })
+    return out
+  }
+
+  const stepLen = tailStepLength(out)
+  if (!(stepLen > SNAKE_EXT_EPS)) {
+    while (out.length < targetLength) out.push({ ...tail0 })
+    return out
+  }
+
+  while (out.length < targetLength) {
+    const tail = normalize(out[out.length - 1])
+    const prev = normalize(out[out.length - 2])
+    const dir = tangentDirAtTail(tail, prev)
+    if (!dir) {
+      out.push({ ...tail })
+      continue
+    }
+    const next = normalize({
+      x: tail.x + dir.x * stepLen,
+      y: tail.y + dir.y * stepLen,
+      z: tail.z + dir.z * stepLen,
+    })
+    out.push(next)
+  }
+  return out
+}
+
+function extendSnakeTailByRepeatingTail(snake: Point[], targetLength: number): Point[] {
+  if (snake.length >= targetLength) return cloneSnake(snake)
+  const out = cloneSnake(snake)
+  if (out.length === 0) return out
+  const tail = normalize(out[out.length - 1])
+  while (out.length < targetLength) out.push({ ...tail })
+  return out
+}
 
 function blendDigestions(a: DigestionSnapshot[], b: DigestionSnapshot[], t: number) {
   const digestions: DigestionSnapshot[] = []
@@ -121,27 +198,67 @@ function blendPlayers(a: PlayerSnapshot, b: PlayerSnapshot, t: number): PlayerSn
   if (a.alive !== b.alive) {
     return b
   }
+  const tLen = clamp(t, 0, 1)
+  let snakeStart = b.snakeStart
+  let snakeTotalLen = b.snakeTotalLen
+  let tailExtension = lerp(a.tailExtension, b.tailExtension, tLen)
+
   let snake: Point[] = []
   if (canBlendSnakeWindow(a, b)) {
-    const maxLength = Math.max(a.snake.length, b.snake.length)
-    const tailA = a.snake[a.snake.length - 1]
-    for (let i = 0; i < maxLength; i += 1) {
-      const nodeA = a.snake[i]
-      const nodeB = b.snake[i]
-      if (nodeA && nodeB) {
-        snake.push(lerpPoint(nodeA, nodeB, t))
-      } else if (nodeB) {
-        if (tailA) {
-          snake.push(lerpPoint(tailA, nodeB, t))
-        } else {
-          snake.push({ ...nodeB })
+    const isFull = a.snakeDetail === 'full' && b.snakeDetail === 'full'
+    if (isFull) {
+      const lenA = a.snake.length
+      const lenB = b.snake.length
+      const maxLength = Math.max(lenA, lenB)
+      if (maxLength > 0) {
+        const aExt = lenA < maxLength ? extendSnakeTailForGrowth(a.snake, maxLength) : cloneSnake(a.snake)
+        const bExt = lenB < maxLength ? extendSnakeTailByRepeatingTail(b.snake, maxLength) : cloneSnake(b.snake)
+        const blended: Point[] = []
+        for (let i = 0; i < maxLength; i += 1) {
+          const nodeA = aExt[i]
+          const nodeB = bExt[i]
+          blended.push(nlerpPoint(nodeA, nodeB, t))
         }
-      } else if (nodeA) {
-        snake.push({ ...nodeA })
+
+        // Preserve visual continuity across "commit a new node" boundaries by blending
+        // length-units (integer nodes + fractional tail extension) and then re-deriving
+        // `{ snakeTotalLen, tailExtension }`. This avoids one-frame "shrink then pop" under
+        // rapid growth/boost transitions.
+        const lenUnitsA = lenA + clamp(a.tailExtension, 0, 0.999_999)
+        const lenUnitsB = lenB + clamp(b.tailExtension, 0, 0.999_999)
+        const lenUnits = lerp(lenUnitsA, lenUnitsB, tLen)
+        const outTotalLen = Math.max(0, Math.min(maxLength, Math.floor(lenUnits + 1e-6)))
+        snakeTotalLen = outTotalLen
+        snakeStart = 0
+        tailExtension = clamp(lenUnits - outTotalLen, 0, 0.999_999)
+        snake = blended.slice(0, outTotalLen)
+      } else {
+        snakeTotalLen = 0
+        snakeStart = 0
+        tailExtension = 0
+        snake = []
+      }
+    } else {
+      const maxLength = Math.max(a.snake.length, b.snake.length)
+      const tailA = a.snake[a.snake.length - 1]
+      for (let i = 0; i < maxLength; i += 1) {
+        const nodeA = a.snake[i]
+        const nodeB = b.snake[i]
+        if (nodeA && nodeB) {
+          snake.push(nlerpPoint(nodeA, nodeB, t))
+        } else if (nodeB) {
+          if (tailA) {
+            snake.push(nlerpPoint(tailA, nodeB, t))
+          } else {
+            snake.push({ ...nodeB })
+          }
+        } else if (nodeA) {
+          snake.push({ ...nodeA })
+        }
       }
     }
   } else {
-    snake = b.snake.map((node) => ({ ...node }))
+    snake = cloneSnake(b.snake)
   }
 
   return {
@@ -154,11 +271,11 @@ function blendPlayers(a: PlayerSnapshot, b: PlayerSnapshot, t: number): PlayerSn
     oxygen: lerp(a.oxygen, b.oxygen, t),
     isBoosting: b.isBoosting,
     girthScale: lerp(a.girthScale, b.girthScale, t),
-    tailExtension: lerp(a.tailExtension, b.tailExtension, t),
+    tailExtension,
     alive: b.alive,
     snakeDetail: b.snakeDetail,
-    snakeStart: b.snakeStart,
-    snakeTotalLen: b.snakeTotalLen,
+    snakeStart,
+    snakeTotalLen,
     snake,
     digestions:
       a.snakeDetail === 'full' && b.snakeDetail === 'full'

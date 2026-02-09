@@ -76,6 +76,12 @@ pub const SPAWN_CONE_ANGLE: f64 = std::f64::consts::PI / 3.0;
 pub const MAX_SPAWN_ATTEMPTS: usize = 32;
 pub const SPAWN_PLAYER_MIN_DISTANCE: f64 = COLLISION_DISTANCE * 2.0;
 pub const DIGESTION_TAIL_SETTLE_STEPS: i64 = 4;
+// Tail growth is smoothed by draining "pending" tail growth at a dynamic rate:
+// `rate = base + mult * sqrt(backlog)`, clamped to `max`.
+// This keeps small growth smooth while letting large bursts catch up faster than linear.
+pub const DIGESTION_TAIL_GROWTH_BASE_PER_STEP: f64 = 0.035;
+pub const DIGESTION_TAIL_GROWTH_BACKLOG_SQRT_MULT: f64 = 0.08;
+pub const DIGESTION_TAIL_GROWTH_MAX_PER_STEP: f64 = 0.28;
 pub const BOT_COUNT: usize = 5;
 pub const BOT_BOOST_DISTANCE: f64 = 0.6 / WORLD_SCALE;
 pub const SNAKE_GIRTH_NODES_PER_STEP: usize = 10;

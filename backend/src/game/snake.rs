@@ -140,6 +140,193 @@ pub fn add_snake_node(snake: &mut Vec<SnakeNode>, axis: Point) {
     snake.push(snake_node);
 }
 
+pub fn add_snake_node_for_growth(snake: &mut Vec<SnakeNode>, axis: Point) {
+    let mut snake_node = SnakeNode {
+        x: 0.0,
+        y: 0.0,
+        z: -1.0,
+        pos_queue: VecDeque::with_capacity(NODE_QUEUE_SIZE),
+    };
+
+    // We want to support rapid tail growth (multiple nodes added in quick succession) without
+    // "pops" caused by newly-added segments lacking enough position history.
+    //
+    // To do that, we synthesize a full history queue by continuing the current tail arc. This
+    // ensures the next segment can immediately follow (next_position is never `None`).
+    //
+    // Important: we intentionally do NOT seed the new node from the existing tail's `pos_queue`.
+    // Using history points can disagree with the client-side fractional tail extension (which is a
+    // local arc continuation). That mismatch shows up as a visible "pop" right when
+    // `tail_extension` crosses 1.0 and a full node is committed.
+    let mut history_axis: Option<Point> = None;
+    let mut history_spacing: Option<f64> = None;
+    let mut history_sign: f64 = 1.0;
+
+    if let Some(last) = snake.last() {
+        let mut distinct_tail_points: Vec<Point> = Vec::with_capacity(3);
+        for node in snake.iter().rev() {
+            let point = normalize(Point {
+                x: node.x,
+                y: node.y,
+                z: node.z,
+            });
+            let should_push = if let Some(last_point) = distinct_tail_points.last() {
+                let angular = clamp(dot(*last_point, point), -1.0, 1.0).acos();
+                angular.is_finite() && angular > 1e-5
+            } else {
+                true
+            };
+            if should_push {
+                distinct_tail_points.push(point);
+            }
+            if distinct_tail_points.len() >= 3 {
+                break;
+            }
+        }
+
+        let mut used_local_continuation = false;
+        if distinct_tail_points.len() >= 2 {
+            let tail = distinct_tail_points[0];
+            let prev = distinct_tail_points[1];
+            let raw_spacing = clamp(dot(prev, tail), -1.0, 1.0).acos();
+            let spacing = if raw_spacing.is_finite() && raw_spacing > 1e-6 {
+                clamp(raw_spacing, NODE_ANGLE * 0.75, NODE_ANGLE * 3.0)
+            } else {
+                NODE_ANGLE * 2.0
+            };
+
+            let project_tangent = |from: Point, to: Point| Point {
+                x: to.x
+                    - from.x
+                    - to.x
+                        * dot(
+                            Point {
+                                x: to.x - from.x,
+                                y: to.y - from.y,
+                                z: to.z - from.z,
+                            },
+                            to,
+                        ),
+                y: to.y
+                    - from.y
+                    - to.y
+                        * dot(
+                            Point {
+                                x: to.x - from.x,
+                                y: to.y - from.y,
+                                z: to.z - from.z,
+                            },
+                            to,
+                        ),
+                z: to.z
+                    - from.z
+                    - to.z
+                        * dot(
+                            Point {
+                                x: to.x - from.x,
+                                y: to.y - from.y,
+                                z: to.z - from.z,
+                            },
+                            to,
+                        ),
+            };
+
+            let mut tangent = project_tangent(prev, tail);
+            if length(tangent) <= 1e-8 && distinct_tail_points.len() >= 3 {
+                tangent = project_tangent(distinct_tail_points[2], prev);
+            }
+            let tangent_len = length(tangent);
+            if tangent_len > 1e-8 {
+                tangent = Point {
+                    x: tangent.x / tangent_len,
+                    y: tangent.y / tangent_len,
+                    z: tangent.z / tangent_len,
+                };
+                let local_axis = cross(tail, tangent);
+                let axis_len = length(local_axis);
+                if axis_len > 1e-8 && spacing.is_finite() {
+                    let axis_norm = Point {
+                        x: local_axis.x / axis_len,
+                        y: local_axis.y / axis_len,
+                        z: local_axis.z / axis_len,
+                    };
+                    let mut point = tail;
+                    rotate_around_axis(&mut point, axis_norm, spacing);
+                    let point = normalize(point);
+                    snake_node.x = point.x;
+                    snake_node.y = point.y;
+                    snake_node.z = point.z;
+                    history_axis = Some(axis_norm);
+                    history_spacing = Some(spacing);
+                    history_sign = 1.0;
+                    used_local_continuation = true;
+                }
+            }
+        }
+
+        if !used_local_continuation {
+            snake_node.x = last.x;
+            snake_node.y = last.y;
+            snake_node.z = last.z;
+            let mut point = Point {
+                x: snake_node.x,
+                y: snake_node.y,
+                z: snake_node.z,
+            };
+            rotate_around_axis(&mut point, axis, -NODE_ANGLE * 2.0);
+            let point = normalize(point);
+            snake_node.x = point.x;
+            snake_node.y = point.y;
+            snake_node.z = point.z;
+            history_axis = Some(axis);
+            history_spacing = Some(NODE_ANGLE * 2.0);
+            history_sign = -1.0;
+        }
+    }
+
+    // The tail node's queue normally isn't used until a new segment is added.
+    // When we do add one, make the newly-added node's first few follow-positions line up with the
+    // committed tail point so it doesn't "snap" on the next movement step.
+    if let (Some(axis), Some(spacing)) = (history_axis, history_spacing) {
+        if let Some(tail_node) = snake.last_mut() {
+            let start = normalize(Point {
+                x: tail_node.x,
+                y: tail_node.y,
+                z: tail_node.z,
+            });
+            tail_node.pos_queue.clear();
+            tail_node.pos_queue.reserve(NODE_QUEUE_SIZE);
+            let denom = (NODE_QUEUE_SIZE as f64).max(1.0);
+            for k in 1..=NODE_QUEUE_SIZE {
+                let t = (k as f64) / denom;
+                let mut point = start;
+                rotate_around_axis(&mut point, axis, history_sign * spacing * t);
+                tail_node.pos_queue.push_back(Some(normalize(point)));
+            }
+        }
+    }
+
+    if let (Some(axis), Some(spacing)) = (history_axis, history_spacing) {
+        let step_angle = (spacing / (NODE_QUEUE_SIZE as f64).max(1.0)).max(1e-6);
+        let start = normalize(Point {
+            x: snake_node.x,
+            y: snake_node.y,
+            z: snake_node.z,
+        });
+        for k in 1..=NODE_QUEUE_SIZE {
+            let mut point = start;
+            rotate_around_axis(&mut point, axis, history_sign * step_angle * (k as f64));
+            snake_node.pos_queue.push_back(Some(normalize(point)));
+        }
+    } else {
+        for _ in 0..NODE_QUEUE_SIZE {
+            snake_node.pos_queue.push_back(None);
+        }
+    }
+
+    snake.push(snake_node);
+}
+
 pub fn remove_snake_tail_node(snake: &mut Vec<SnakeNode>, min_length: usize) -> bool {
     if snake.len() <= min_length {
         return false;
