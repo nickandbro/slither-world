@@ -40,6 +40,7 @@ type SnakeVisual = {
   nameplateCtx: CanvasRenderingContext2D | null
   nameplateText: string
   color: string
+  skinKey: string
 }
 
 type TongueState = {
@@ -240,9 +241,44 @@ const createBoostDraftTexture = () => {
   return texture
 }
 
-const createSnakeStripeTexture = () => {
-  const width = Math.max(8, Math.floor(SNAKE_STRIPE_TEXTURE_WIDTH))
-  const height = Math.max(1, Math.floor(SNAKE_STRIPE_TEXTURE_HEIGHT))
+type Rgb8 = { r: number; g: number; b: number }
+
+const parseHexColor = (value: string): Rgb8 | null => {
+  const trimmed = value.trim().toLowerCase()
+  const match = /^#([0-9a-f]{6})$/.exec(trimmed)
+  if (!match) return null
+  const hex = match[1]
+  const r = Number.parseInt(hex.slice(0, 2), 16)
+  const g = Number.parseInt(hex.slice(2, 4), 16)
+  const b = Number.parseInt(hex.slice(4, 6), 16)
+  if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) return null
+  return { r, g, b }
+}
+
+const normalizeHexColor = (value: string) => {
+  const rgb = parseHexColor(value)
+  if (!rgb) return null
+  const rr = rgb.r.toString(16).padStart(2, '0')
+  const gg = rgb.g.toString(16).padStart(2, '0')
+  const bb = rgb.b.toString(16).padStart(2, '0')
+  return `#${rr}${gg}${bb}`
+}
+
+const resolveSkinSlots = (colors: string[]) => {
+  const normalized = colors
+    .map((c) => normalizeHexColor(c))
+    .filter((c): c is string => !!c)
+  const source = normalized.length > 0 ? normalized : ['#ffffff']
+  const out = new Array<string>(8)
+  for (let i = 0; i < 8; i += 1) {
+    out[i] = source[i % source.length] ?? '#ffffff'
+  }
+  return out
+}
+
+const createSnakeSkinTexture = (colors: string[]) => {
+  const width = Math.max(8, Math.floor(SNAKE_SKIN_TEXTURE_WIDTH))
+  const height = Math.max(1, Math.floor(SNAKE_SKIN_TEXTURE_HEIGHT))
   const canvas = document.createElement('canvas')
   canvas.width = width
   canvas.height = height
@@ -253,19 +289,28 @@ const createSnakeStripeTexture = () => {
   const edge = clamp(SNAKE_STRIPE_EDGE, 0.001, 0.49)
   const imageData = ctx.createImageData(width, height)
 
+  const slots = resolveSkinSlots(colors)
+  const stripeRepeat = Math.max(1, Math.floor(SNAKE_STRIPE_REPEAT))
+
   for (let x = 0; x < width; x += 1) {
-    // One seamless bright/dark cycle across the texture width.
-    // Repeat frequency is controlled by the texture repeat on the material/texture.
+    // Keep u in [0, 1) so RepeatWrapping has no seam at u=1.
     const u = width > 0 ? x / width : 0
-    const wave = Math.cos(u * Math.PI * 2)
+    const slot = clamp(Math.floor(u * 8), 0, 7)
+    const base = slots[slot] ?? '#ffffff'
+    const rgb = parseHexColor(base) ?? { r: 255, g: 255, b: 255 }
+
+    const wave = Math.cos(u * Math.PI * 2 * stripeRepeat)
     const t = smoothstep(-edge, edge, wave)
     const value = dark + (1 - dark) * t
-    const byte = Math.round(clamp(value, 0, 1) * 255)
+    const rf = Math.round(clamp((rgb.r / 255) * value, 0, 1) * 255)
+    const gf = Math.round(clamp((rgb.g / 255) * value, 0, 1) * 255)
+    const bf = Math.round(clamp((rgb.b / 255) * value, 0, 1) * 255)
+
     for (let y = 0; y < height; y += 1) {
       const offset = (y * width + x) * 4
-      imageData.data[offset] = byte
-      imageData.data[offset + 1] = byte
-      imageData.data[offset + 2] = byte
+      imageData.data[offset] = rf
+      imageData.data[offset + 1] = gf
+      imageData.data[offset + 2] = bf
       imageData.data[offset + 3] = 255
     }
   }
@@ -276,7 +321,7 @@ const createSnakeStripeTexture = () => {
   texture.wrapT = THREE.RepeatWrapping
   texture.magFilter = THREE.LinearFilter
   texture.minFilter = THREE.LinearMipmapLinearFilter
-  texture.colorSpace = THREE.NoColorSpace
+  texture.colorSpace = THREE.SRGBColorSpace
   texture.needsUpdate = true
   return texture
 }
@@ -667,6 +712,9 @@ export type RenderScene = {
     cameraDistance: number,
     cameraVerticalOffset?: number,
   ) => { x: number; y: number } | null
+  setMenuPreviewVisible: (visible: boolean) => void
+  setMenuPreviewSkin: (colors: string[] | null, previewLen?: number) => void
+  setMenuPreviewOrbit: (yaw: number, pitch: number) => void
   setEnvironment: (environment: Environment) => void
   setDebugFlags: (flags: {
     mountainOutline?: boolean
@@ -776,8 +824,8 @@ const SNAKE_RADIUS = 0.045
 const SNAKE_GIRTH_SCALE_MIN = 1
 const SNAKE_GIRTH_SCALE_MAX = 2
 const SNAKE_TUBE_RADIAL_SEGMENTS = 16
-const SNAKE_STRIPE_TEXTURE_WIDTH = 256
-const SNAKE_STRIPE_TEXTURE_HEIGHT = 32
+const SNAKE_SKIN_TEXTURE_WIDTH = 256
+const SNAKE_SKIN_TEXTURE_HEIGHT = 32
 const SNAKE_STRIPE_REPEAT = 12
 const SNAKE_STRIPE_DARK = 0.55
 const SNAKE_STRIPE_EDGE = 0.12
@@ -2272,12 +2320,172 @@ export const createScene = async (
   })
   const boostDraftGeometry = new THREE.SphereGeometry(1, 24, 16, 0, Math.PI * 2, 0, Math.PI * 0.5)
   const boostDraftTexture = createBoostDraftTexture()
-  const snakeStripeTexture = createSnakeStripeTexture()
-  if (snakeStripeTexture) {
-    snakeStripeTexture.repeat.set(SNAKE_STRIPE_REPEAT, 1)
-    if (renderer instanceof THREE.WebGLRenderer) {
-      snakeStripeTexture.anisotropy = renderer.capabilities.getMaxAnisotropy()
+  const snakeSkinTextureCache = new Map<string, THREE.CanvasTexture>()
+  const maxAnisotropy =
+    renderer instanceof THREE.WebGLRenderer ? renderer.capabilities.getMaxAnisotropy() : 1
+  const getSnakeSkinTexture = (primaryColor: string, skinColors?: string[] | null) => {
+    const base = (skinColors && skinColors.length > 0 ? skinColors : [primaryColor]).map(
+      (c) => normalizeHexColor(c) ?? normalizeHexColor(primaryColor) ?? '#ffffff',
+    )
+    const slots = resolveSkinSlots(base)
+    const key = slots.join('|')
+    let texture = snakeSkinTextureCache.get(key) ?? null
+    if (!texture) {
+      texture = createSnakeSkinTexture(slots)
+      if (!texture) {
+        const fallbackCanvas = document.createElement('canvas')
+        fallbackCanvas.width = 1
+        fallbackCanvas.height = 1
+        const fallbackCtx = fallbackCanvas.getContext('2d')
+        if (fallbackCtx) {
+          fallbackCtx.fillStyle = slots[0] ?? '#ffffff'
+          fallbackCtx.fillRect(0, 0, 1, 1)
+        }
+        texture = new THREE.CanvasTexture(fallbackCanvas)
+        texture.wrapS = THREE.RepeatWrapping
+        texture.wrapT = THREE.RepeatWrapping
+        texture.magFilter = THREE.LinearFilter
+        texture.minFilter = THREE.LinearFilter
+        texture.colorSpace = THREE.SRGBColorSpace
+        texture.needsUpdate = true
+      }
+      texture.anisotropy = maxAnisotropy
+      snakeSkinTextureCache.set(key, texture)
     }
+    return { key, texture, primary: slots[0] ?? (normalizeHexColor(primaryColor) ?? '#ffffff'), slots }
+  }
+
+  // Menu skin preview (rendered as an overlay pass to avoid contaminating depth/occluder passes).
+  const menuPreviewScene = new THREE.Scene()
+  const menuPreviewCamera = new THREE.PerspectiveCamera(40, 1, 0.1, 20)
+  menuPreviewCamera.position.set(0, 0, 2.65)
+  menuPreviewScene.add(menuPreviewCamera)
+  const menuPreviewAmbient = new THREE.AmbientLight(0xffffff, 0.85)
+  const menuPreviewKeyLight = new THREE.DirectionalLight(0xffffff, 0.92)
+  menuPreviewKeyLight.position.set(2, 3, 4)
+  const menuPreviewRimLight = new THREE.DirectionalLight(0x9bd7ff, 0.35)
+  menuPreviewRimLight.position.set(-2, -1, 2)
+  menuPreviewCamera.add(menuPreviewAmbient)
+  menuPreviewCamera.add(menuPreviewKeyLight)
+  menuPreviewCamera.add(menuPreviewRimLight)
+
+  const menuPreviewGroup = new THREE.Group()
+  menuPreviewScene.add(menuPreviewGroup)
+  menuPreviewGroup.visible = false
+  menuPreviewGroup.position.set(0, 0.1, 0)
+
+  const menuPreviewMaterial = new THREE.MeshStandardMaterial({
+    color: '#ffffff',
+    roughness: 0.35,
+    metalness: 0.1,
+    flatShading: false,
+    transparent: true,
+    opacity: 1,
+  })
+  menuPreviewMaterial.emissive = new THREE.Color('#ffffff')
+  menuPreviewMaterial.emissiveIntensity = 0.22
+  const menuPreviewSeedSkin = getSnakeSkinTexture('#ffffff', ['#ffffff'])
+  menuPreviewMaterial.map = menuPreviewSeedSkin.texture
+  menuPreviewMaterial.emissiveMap = menuPreviewSeedSkin.texture
+
+  const menuPreviewTube = new THREE.Mesh(new THREE.BufferGeometry(), menuPreviewMaterial)
+  const menuPreviewTail = new THREE.Mesh(new THREE.BufferGeometry(), menuPreviewMaterial)
+  const menuPreviewHeadMaterial = new THREE.MeshStandardMaterial({
+    color: menuPreviewSeedSkin.primary,
+    roughness: 0.25,
+    metalness: 0.1,
+    transparent: true,
+    opacity: 1,
+  })
+  menuPreviewHeadMaterial.emissive = new THREE.Color(menuPreviewSeedSkin.primary)
+  menuPreviewHeadMaterial.emissiveIntensity = 0.12
+  const menuPreviewHead = new THREE.Mesh(headGeometry, menuPreviewHeadMaterial)
+  menuPreviewGroup.add(menuPreviewTube)
+  menuPreviewGroup.add(menuPreviewTail)
+  menuPreviewGroup.add(menuPreviewHead)
+
+  let menuPreviewVisible = false
+  let menuPreviewSkinKey = menuPreviewSeedSkin.key
+  let menuPreviewLen = 8
+  let menuPreviewGeometryReady = false
+  let menuPreviewYaw = -0.35
+  let menuPreviewPitch = 0.08
+
+  const rebuildMenuPreviewGeometry = (nextLen: number) => {
+    const len = clamp(Math.floor(nextLen), 1, 8)
+    const pointCount = Math.max(2, len)
+    const points: THREE.Vector3[] = []
+    const spacing = 0.21
+    const half = (pointCount - 1) * 0.5
+    for (let i = 0; i < pointCount; i += 1) {
+      const t = pointCount > 1 ? i / (pointCount - 1) : 0
+      const x = (i - half) * spacing
+      const y = Math.sin(i * 0.85) * 0.07
+      const z = Math.cos(t * Math.PI * 1.1) * 0.06
+      points.push(new THREE.Vector3(x, y, z))
+    }
+    const curve = new THREE.CatmullRomCurve3(points, false, 'centripetal')
+    const tubularSegments = Math.max(32, pointCount * 22)
+    const radius = SNAKE_RADIUS * 1.25
+    const tubeGeometry = new THREE.TubeGeometry(curve, tubularSegments, radius, SNAKE_TUBE_RADIAL_SEGMENTS, false)
+
+    // Preview uses the same UV encoding as gameplay snakes so patterns behave the same way.
+    applySnakeSkinUVs(tubeGeometry, 0, len)
+
+    const prevPoint = points[points.length - 2] ?? points[0]
+    const tailPoint = points[points.length - 1] ?? points[0]
+    const tailDir = tailPoint.clone().sub(prevPoint)
+    if (tailDir.lengthSq() > 1e-8) tailDir.normalize()
+    const capGeometry = buildTailCapGeometry(tubeGeometry, tailDir) ?? null
+
+    const oldTube = menuPreviewTube.geometry
+    const oldTail = menuPreviewTail.geometry
+    menuPreviewTube.geometry = tubeGeometry
+    if (capGeometry) {
+      menuPreviewTail.geometry = capGeometry
+    } else {
+      menuPreviewTail.geometry = new THREE.BufferGeometry()
+    }
+    const headPoint = points[0] ?? null
+    if (headPoint) {
+      menuPreviewHead.position.copy(headPoint)
+    } else {
+      menuPreviewHead.position.set(0, 0, 0)
+    }
+    oldTube.dispose()
+    oldTail.dispose()
+    menuPreviewGeometryReady = true
+  }
+
+  const setMenuPreviewVisible = (visible: boolean) => {
+    menuPreviewVisible = visible
+    menuPreviewGroup.visible = visible
+  }
+
+  const setMenuPreviewSkin = (colors: string[] | null, previewLen?: number) => {
+    const safeLen = typeof previewLen === 'number' ? previewLen : menuPreviewLen
+    const list = colors && colors.length ? colors : ['#ffffff']
+    const primary = list[0] ?? '#ffffff'
+    const skin = getSnakeSkinTexture(primary, list)
+    if (skin.key !== menuPreviewSkinKey) {
+      menuPreviewSkinKey = skin.key
+      menuPreviewMaterial.map = skin.texture
+      menuPreviewMaterial.emissiveMap = skin.texture
+      menuPreviewMaterial.needsUpdate = true
+    }
+    menuPreviewHeadMaterial.color.set(skin.primary)
+    menuPreviewHeadMaterial.emissive.set(skin.primary)
+    const clampedLen = clamp(Math.floor(safeLen), 1, 8)
+    if (!menuPreviewGeometryReady || clampedLen !== menuPreviewLen) {
+      menuPreviewLen = clampedLen
+      rebuildMenuPreviewGeometry(menuPreviewLen)
+    }
+  }
+
+  const setMenuPreviewOrbit = (yaw: number, pitch: number) => {
+    if (!Number.isFinite(yaw) || !Number.isFinite(pitch)) return
+    menuPreviewYaw = yaw
+    menuPreviewPitch = clamp(pitch, -1.25, 1.25)
   }
 
   const PELLET_COLOR_BUCKET_COUNT = PELLET_COLORS.length
@@ -4401,25 +4609,27 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
     return material
   }
 
-  const createSnakeVisual = (color: string): SnakeVisual => {
+  const createSnakeVisual = (
+    primaryColor: string,
+    skinKey: string,
+    skinTexture: THREE.CanvasTexture,
+  ): SnakeVisual => {
     const group = new THREE.Group()
 
     const tubeMaterial = new THREE.MeshStandardMaterial({
-      color,
+      color: '#ffffff',
       roughness: 0.35,
       metalness: 0.1,
       flatShading: false,
     })
-    if (snakeStripeTexture) {
-      tubeMaterial.map = snakeStripeTexture
-      tubeMaterial.emissiveMap = snakeStripeTexture
-      tubeMaterial.needsUpdate = true
-    }
+    tubeMaterial.map = skinTexture
+    tubeMaterial.emissiveMap = skinTexture
+    tubeMaterial.emissive = new THREE.Color('#ffffff')
     const tube = new THREE.Mesh(new THREE.BufferGeometry(), tubeMaterial)
     group.add(tube)
 
     const selfOverlapGlowMaterial = new THREE.MeshBasicMaterial({
-      color,
+      color: primaryColor,
       transparent: true,
       opacity: 0,
       blending: THREE.AdditiveBlending,
@@ -4433,7 +4643,7 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
     group.add(selfOverlapGlow)
 
     const headMaterial = new THREE.MeshStandardMaterial({
-      color,
+      color: primaryColor,
       roughness: 0.25,
       metalness: 0.1,
     })
@@ -4554,7 +4764,8 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
       nameplateCanvas: nameplateTarget?.canvas ?? null,
       nameplateCtx: nameplateTarget?.ctx ?? null,
       nameplateText: '',
-      color,
+      color: primaryColor,
+      skinKey,
     }
   }
 
@@ -4566,8 +4777,13 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
     emissiveIntensity?: number,
   ) => {
     const base = new THREE.Color(color)
-    material.color.copy(base)
-    material.emissive.copy(base)
+    if (material.map) {
+      material.color.set('#ffffff')
+      material.emissive.set('#ffffff')
+    } else {
+      material.color.copy(base)
+      material.emissive.copy(base)
+    }
     material.emissiveIntensity = emissiveIntensity ?? (isLocal ? 0.3 : 0.12)
     material.opacity = opacity
     const shouldBeTransparent = opacity < 0.999
@@ -5526,13 +5742,17 @@ diffuseColor.a *= retireEdge;`,
       if (Number.isFinite(candidate)) baseU = candidate
     }
     const uSpan = Math.max(0, SNAKE_TAIL_CAP_U_SPAN)
+    // Keep the cap within the current RepeatWrapping cycle so slot colors don't snap across the seam,
+    // but still vary u so ring-band stripes flow down the cap instead of flattening out.
+    const minU = Math.floor(baseU) + 0.0001
+    const capSpan = Math.min(uSpan, Math.max(0, baseU - minU))
     const ringDenom = Math.max(1, rings - 1)
 
     for (let s = 0; s < rings; s += 1) {
       const theta = (s / rings) * (Math.PI / 2)
       const scale = Math.cos(theta)
       const offset = Math.sin(theta) * radius
-      const u = baseU + (s / ringDenom) * uSpan
+      const u = baseU - (s / ringDenom) * capSpan
       for (let i = 0; i < radialSegments; i += 1) {
         const vector = ringVectors[i]
         const point = center
@@ -5556,7 +5776,7 @@ diffuseColor.a *= retireEdge;`,
     capPositions[tipOffset + 1] = tip.y
     capPositions[tipOffset + 2] = tip.z
     const tipUvOffset = rings * radialSegments * 2
-    capUvs[tipUvOffset] = baseU + uSpan
+    capUvs[tipUvOffset] = baseU - capSpan
     capUvs[tipUvOffset + 1] = 0
 
     const indices: number[] = []
@@ -6375,22 +6595,28 @@ diffuseColor.a *= retireEdge;`,
   }
 
   const applySnakeSelfOverlapColors = (
-    geometry: THREE.BufferGeometry,
+    geometry: THREE.TubeGeometry,
     intensities: Float32Array,
     pointCount: number,
   ) => {
     const positionAttr = geometry.getAttribute('position')
-    const uvAttr = geometry.getAttribute('uv')
-    if (!(positionAttr instanceof THREE.BufferAttribute) || !(uvAttr instanceof THREE.BufferAttribute)) {
+    if (!(positionAttr instanceof THREE.BufferAttribute)) {
       return
     }
+    const params = geometry.parameters as { radialSegments?: number; tubularSegments?: number }
+    const radialSegments = params.radialSegments ?? 8
+    const tubularSegments = params.tubularSegments ?? 1
+    const ringVertexCount = radialSegments + 1
+    const ringCount = tubularSegments + 1
+    const ringDenom = Math.max(1, ringCount - 1)
+
     const vertexCount = positionAttr.count
-    const uv = uvAttr.array as ArrayLike<number>
     const colors = new Float32Array(vertexCount * 3)
     const scale = pointCount > 1 ? pointCount - 1 : 0
     for (let v = 0; v < vertexCount; v += 1) {
-      const u = (uv[v * 2] as number) ?? 0
-      const idx = clamp(Math.round(u * scale), 0, scale)
+      const ring = ringVertexCount > 0 ? Math.floor(v / ringVertexCount) : 0
+      const t = ringDenom > 0 ? ring / ringDenom : 0
+      const idx = clamp(Math.round(t * scale), 0, scale)
       const intensity = intensities[idx] ?? 0
       const out = v * 3
       colors[out] = intensity
@@ -6400,6 +6626,41 @@ diffuseColor.a *= retireEdge;`,
     geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
   }
 
+  const applySnakeSkinUVs = (
+    geometry: THREE.TubeGeometry,
+    snakeStart: number,
+    snakeLen: number,
+  ) => {
+    const uvAttr = geometry.getAttribute('uv')
+    if (!(uvAttr instanceof THREE.BufferAttribute)) return
+    const params = geometry.parameters as { radialSegments?: number; tubularSegments?: number }
+    const radialSegments = params.radialSegments ?? 8
+    const tubularSegments = params.tubularSegments ?? 1
+    const ringVertexCount = radialSegments + 1
+    const ringCount = tubularSegments + 1
+    const ringDenom = Math.max(1, ringCount - 1)
+    const vDenom = Math.max(1, radialSegments)
+
+    const safeStart = Number.isFinite(snakeStart) ? Math.max(0, snakeStart) : 0
+    const safeLen = Number.isFinite(snakeLen) ? Math.max(0, Math.floor(snakeLen)) : 0
+    const span = Math.max(0, safeLen)
+    for (let ring = 0; ring < ringCount; ring += 1) {
+      const t = ring / ringDenom
+      const globalIndex = safeStart + t * span
+      let u = globalIndex / 8
+      // Avoid an exact integer boundary at the tail so RepeatWrapping doesn't snap to u=0 at the seam.
+      if (ring === ringCount - 1) {
+        u = u - 0.0001
+      }
+      const ringOffset = ring * ringVertexCount
+      for (let i = 0; i < ringVertexCount; i += 1) {
+        const v = i / vDenom
+        uvAttr.setXY(ringOffset + i, u, v)
+      }
+    }
+    uvAttr.needsUpdate = true
+  }
+
 
   const updateSnake = (
     player: PlayerSnapshot,
@@ -6407,15 +6668,24 @@ diffuseColor.a *= retireEdge;`,
     deltaSeconds: number,
     pellets: PelletSnapshot[] | null,
   ): PelletOverride | null => {
+    const skin = getSnakeSkinTexture(player.color, player.skinColors)
     let visual = snakes.get(player.id)
     if (!visual) {
-      visual = createSnakeVisual(player.color)
+      visual = createSnakeVisual(skin.primary, skin.key, skin.texture)
       snakes.set(player.id, visual)
       snakesGroup.add(visual.group)
+    } else {
+      if (visual.skinKey !== skin.key) {
+        visual.skinKey = skin.key
+        visual.tube.material.map = skin.texture
+        visual.tube.material.emissiveMap = skin.texture
+        visual.tube.material.needsUpdate = true
+      }
     }
 
-    if (visual.color !== player.color) {
-      visual.color = player.color
+    if (visual.color !== skin.primary) {
+      visual.color = skin.primary
+      visual.selfOverlapGlowMaterial.color.set(skin.primary)
     }
     const groundingInfo = isLocal ? createGroundingInfo() : null
 
@@ -6617,6 +6887,7 @@ diffuseColor.a *= retireEdge;`,
         SNAKE_TUBE_RADIAL_SEGMENTS,
         false,
       )
+      applySnakeSkinUVs(tubeGeometry, player.snakeStart, nodes.length)
       const digestionStartOffset = computeDigestionStartOffset(curvePoints)
       if (digestionVisuals.length) {
         applyDigestionBulges(tubeGeometry, digestionVisuals, digestionStartOffset, digestionBulgeScale)
@@ -6640,7 +6911,7 @@ diffuseColor.a *= retireEdge;`,
       oldTubeGeometry.dispose()
 
       visual.selfOverlapGlowMaterial.opacity = opacity * SNAKE_SELF_OVERLAP_GLOW_OPACITY
-      visual.selfOverlapGlowMaterial.color.copy(visual.tube.material.color)
+      visual.selfOverlapGlowMaterial.color.set(visual.color)
       visual.selfOverlapGlow.visible =
         visual.group.visible && overlapMax > SNAKE_SELF_OVERLAP_GLOW_VISIBILITY_THRESHOLD
     }
@@ -7886,6 +8157,12 @@ diffuseColor.a *= retireEdge;`,
 	      if (perfEnabled) {
 	        passLakesMs = performance.now() - passStartMs
 	      }
+
+        if (menuPreviewVisible && menuPreviewGroup.visible) {
+          menuPreviewGroup.rotation.set(menuPreviewPitch, menuPreviewYaw, 0)
+          renderer.clearDepth()
+          renderer.render(menuPreviewScene, menuPreviewCamera)
+        }
 	    } finally {
 	      renderer.autoClear = savedAutoClear
 	    }
@@ -7979,8 +8256,14 @@ diffuseColor.a *= retireEdge;`,
     viewportHeight = height
     renderer.setPixelRatio(dpr)
     renderer.setSize(width, height, false)
-    camera.aspect = width / height
+    const safeHeight = height > 0 ? height : 1
+    const aspect = width / safeHeight
+    camera.aspect = aspect
     camera.updateProjectionMatrix()
+    menuPreviewCamera.aspect = aspect
+    menuPreviewCamera.updateProjectionMatrix()
+    // Keep the preview clear of the right-side skin UI panels on wide layouts.
+    menuPreviewGroup.position.x = aspect > 1.15 ? -0.65 : 0
   }
 
   const dispose = () => {
@@ -8015,7 +8298,14 @@ diffuseColor.a *= retireEdge;`,
     tongueMaterial.dispose()
     boostDraftGeometry.dispose()
     boostDraftTexture?.dispose()
-    snakeStripeTexture?.dispose()
+    menuPreviewMaterial.dispose()
+    menuPreviewHeadMaterial.dispose()
+    menuPreviewTube.geometry.dispose()
+    menuPreviewTail.geometry.dispose()
+    for (const texture of snakeSkinTextureCache.values()) {
+      texture.dispose()
+    }
+    snakeSkinTextureCache.clear()
     for (let i = 0; i < pelletBuckets.length; i += 1) {
       const bucket = pelletBuckets[i]
       if (!bucket) continue
@@ -8062,6 +8352,9 @@ diffuseColor.a *= retireEdge;`,
   return {
     resize,
     render,
+    setMenuPreviewVisible,
+    setMenuPreviewSkin,
+    setMenuPreviewOrbit,
     setEnvironment,
     setDebugFlags,
     setDayNightDebugMode,

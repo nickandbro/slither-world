@@ -178,6 +178,7 @@ mod tests {
             id_bytes: [0u8; 16],
             name: "Player".to_string(),
             color: "#fff".to_string(),
+            skin: None,
             is_bot: false,
             axis: Point {
                 x: 1.0,

@@ -8,6 +8,7 @@ type MenuOverlayProps = {
   menuPhase: MenuPhase
   onPlayerNameChange: (value: string) => void
   onPlay: () => void
+  onChangeSkin: () => void
 }
 
 export function MenuOverlay({
@@ -18,6 +19,7 @@ export function MenuOverlay({
   menuPhase,
   onPlayerNameChange,
   onPlay,
+  onChangeSkin,
 }: MenuOverlayProps) {
   return (
     <div className={`menu-overlay${isExiting ? ' menu-overlay--exiting' : ''}`}>
@@ -59,6 +61,15 @@ export function MenuOverlay({
           {playLabel}
         </button>
       </div>
+
+      <button
+        type='button'
+        className='menu-skin-button'
+        disabled={menuPhase === 'spawning' || isExiting}
+        onClick={onChangeSkin}
+      >
+        Change skin
+      </button>
     </div>
   )
 }

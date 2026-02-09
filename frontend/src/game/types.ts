@@ -23,6 +23,8 @@ export type PlayerSnapshot = {
   id: string
   name: string
   color: string
+  // Optional repeating skin colors (length <= 8). When absent, render uses `color`.
+  skinColors?: string[]
   score: number
   scoreFraction: number
   oxygen: number

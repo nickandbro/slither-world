@@ -25,6 +25,21 @@ import {
   storeRendererPreference,
 } from './game/storage'
 import { decodeServerMessage, encodeInput, encodeJoin, encodeRespawn, type PlayerMeta } from './game/wsProtocol'
+import {
+  DEFAULT_SOLID_SKIN,
+  MAX_SAVED_SKIN_DESIGNS,
+  SKIN_PALETTE_COLORS,
+  SNAKE_PATTERN_LEN,
+  createSkinDesign,
+  deleteSkinDesign,
+  getSavedSkinDesigns,
+  getSelectedSkin,
+  resolveSelectedSkinColors,
+  saveSkinDesign,
+  storeSelectedSkin,
+  type SelectedSkinV1,
+  type SnakeSkinDesignV1,
+} from './game/skins'
 import { resolveWebSocketUrl } from './services/backend'
 import { requestMatchmake } from './services/matchmake'
 import {
@@ -79,9 +94,12 @@ import {
 } from './app/core/scoreRadial'
 import { ControlPanel } from './app/components/ControlPanel'
 import { MenuOverlay } from './app/components/MenuOverlay'
+import { SkinBuilderOverlay } from './app/components/SkinBuilderOverlay'
+import { SkinOverlay } from './app/components/SkinOverlay'
 import { RealtimeLeaderboard, type RealtimeLeaderboardEntry } from './app/components/RealtimeLeaderboard'
 
 type LagSpikeCause = 'none' | 'stale' | 'seq-gap' | 'arrival-gap'
+type MenuUiMode = 'home' | 'skin' | 'builder'
 
 type NetSmoothingDebugInfo = {
   lagSpikeActive: boolean
@@ -240,6 +258,19 @@ export default function App() {
   const headScreenRef = useRef<{ x: number; y: number } | null>(null)
   const playerMetaRef = useRef<Map<string, PlayerMeta>>(new Map())
   const menuPhaseRef = useRef<MenuPhase>('preplay')
+  const menuUiModeRef = useRef<MenuUiMode>('home')
+  const menuOverlayExitingRef = useRef(false)
+  const joinSkinColorsRef = useRef<string[]>(resolveSelectedSkinColors(getSelectedSkin(), getSavedSkinDesigns()))
+  const builderPatternRef = useRef<Array<string | null>>(new Array(SNAKE_PATTERN_LEN).fill(null))
+  const builderPaletteColorRef = useRef<string>(SKIN_PALETTE_COLORS[0] ?? '#ffffff')
+  const builderPaletteIndexRef = useRef(0)
+  const menuPreviewOrbitRef = useRef({ yaw: -0.35, pitch: 0.08 })
+  const menuPreviewDragRef = useRef<{
+    active: boolean
+    pointerId: number | null
+    lastX: number
+    lastY: number
+  }>({ active: false, pointerId: null, lastX: 0, lastY: 0 })
   const inputEnabledRef = useRef(false)
   const cameraBlendRef = useRef(0)
   const cameraBlendStartMsRef = useRef<number | null>(null)
@@ -302,6 +333,20 @@ export default function App() {
   const [environment, setEnvironment] = useState<Environment | null>(null)
   const [playerId, setPlayerId] = useState<string | null>(getStoredPlayerId())
   const [playerName, setPlayerName] = useState(getInitialName)
+  const [menuUiMode, setMenuUiMode] = useState<MenuUiMode>('home')
+  const [skinDesigns, setSkinDesigns] = useState<SnakeSkinDesignV1[]>(getSavedSkinDesigns)
+  const [selectedSkin, setSelectedSkin] = useState<SelectedSkinV1>(getSelectedSkin)
+  const [solidPaletteIndex, setSolidPaletteIndex] = useState(() => {
+    const initial = getSelectedSkin()
+    if (initial.kind !== 'solid') return 0
+    const idx = SKIN_PALETTE_COLORS.findIndex((c) => c.toLowerCase() === initial.color.toLowerCase())
+    return idx >= 0 ? idx : 0
+  })
+  const [builderPaletteColor, setBuilderPaletteColor] = useState(() => SKIN_PALETTE_COLORS[0] ?? '#ffffff')
+  const [builderPattern, setBuilderPattern] = useState<Array<string | null>>(
+    () => new Array(SNAKE_PATTERN_LEN).fill(null),
+  )
+  const [builderDesignName, setBuilderDesignName] = useState('')
   const [roomName, setRoomName] = useState(getInitialRoom)
   const [roomInput, setRoomInput] = useState(getInitialRoom)
   const [rendererPreference] = useState<RendererPreference>(getInitialRendererPreference)
@@ -333,6 +378,7 @@ export default function App() {
   const netDebugEnabled = useMemo(getNetDebugEnabled, [])
   const isPlaying = menuPhase === 'playing'
   const showMenuOverlay = menuPhase === 'preplay' || menuOverlayExiting
+  const solidPaletteColor = SKIN_PALETTE_COLORS[solidPaletteIndex] ?? (SKIN_PALETTE_COLORS[0] ?? '#ffffff')
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -944,7 +990,51 @@ export default function App() {
   }, [playerName])
 
   useEffect(() => {
+    menuUiModeRef.current = menuUiMode
+  }, [menuUiMode])
+
+  useEffect(() => {
+    menuOverlayExitingRef.current = menuOverlayExiting
+  }, [menuOverlayExiting])
+
+  useEffect(() => {
+    storeSelectedSkin(selectedSkin)
+  }, [selectedSkin])
+
+  useEffect(() => {
+    // Keep selected solid palette index in sync with persisted selection.
+    if (selectedSkin.kind !== 'solid') return
+    const idx = SKIN_PALETTE_COLORS.findIndex((c) => c.toLowerCase() === selectedSkin.color.toLowerCase())
+    if (idx >= 0 && idx !== solidPaletteIndex) {
+      setSolidPaletteIndex(idx)
+    }
+  }, [selectedSkin, solidPaletteIndex])
+
+  useEffect(() => {
+    const resolved = resolveSelectedSkinColors(selectedSkin, skinDesigns)
+    joinSkinColorsRef.current = resolved
+    // If we are in the live menu room, push a meta update so others see it immediately.
+    if (menuPhaseRef.current === 'preplay') {
+      const socket = socketRef.current
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        sendJoin(socket, true)
+      }
+    }
+  }, [selectedSkin, skinDesigns])
+
+  useEffect(() => {
+    builderPatternRef.current = builderPattern
+  }, [builderPattern])
+
+  useEffect(() => {
+    builderPaletteColorRef.current = builderPaletteColor
+  }, [builderPaletteColor])
+
+  useEffect(() => {
     menuPhaseRef.current = menuPhase
+    if (menuPhase === 'preplay') {
+      setMenuUiMode('home')
+    }
     inputEnabledRef.current = menuPhase === 'playing'
     if (menuPhase !== 'playing') {
       pointerRef.current.active = false
@@ -953,7 +1043,7 @@ export default function App() {
     if (menuPhase === 'preplay' && !allowPreplayAutoResumeRef.current) {
       const socket = socketRef.current
       if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(encodeJoin(playerNameRef.current, playerIdRef.current, true))
+        sendJoin(socket, true)
       }
     }
   }, [menuPhase])
@@ -1148,7 +1238,7 @@ export default function App() {
               deathStartedAtMsRef.current = null
               const socket = socketRef.current
               if (socket && socket.readyState === WebSocket.OPEN) {
-                socket.send(encodeJoin(playerNameRef.current, playerIdRef.current, true))
+                sendJoin(socket, true)
               }
               setMenuPhase('returning')
             }
@@ -1279,7 +1369,7 @@ export default function App() {
                 allowPreplayAutoResumeRef.current = false
                 const socket = socketRef.current
                 if (socket && socket.readyState === WebSocket.OPEN) {
-                  socket.send(encodeJoin(playerNameRef.current, playerIdRef.current, true))
+                  sendJoin(socket, true)
                 }
                 setShowPlayAgain(true)
                 setMenuPhase('preplay')
@@ -1303,6 +1393,26 @@ export default function App() {
 	            if (rafPerfEnabled) {
 	              afterCameraMs = performance.now()
 	            }
+
+              const uiMode = menuUiModeRef.current
+              const showSkinPreview =
+                phase === 'preplay' && uiMode !== 'home' && !menuOverlayExitingRef.current
+              webgl.setMenuPreviewVisible(showSkinPreview)
+              if (showSkinPreview) {
+                if (uiMode === 'builder') {
+                  const pattern = builderPatternRef.current
+                  const colors: string[] = []
+                  for (let i = 0; i < pattern.length; i += 1) {
+                    const entry = pattern[i]
+                    if (!entry) break
+                    colors.push(entry)
+                  }
+                  const previewColors = colors.length ? colors : [builderPaletteColorRef.current]
+                  webgl.setMenuPreviewSkin(previewColors, 8)
+                } else {
+                  webgl.setMenuPreviewSkin(joinSkinColorsRef.current, 8)
+                }
+              }
 
 	            const headScreen = webgl.render(
 	              snapshot,
@@ -1974,7 +2084,14 @@ export default function App() {
 
   const sendJoin = (socket: WebSocket, deferSpawn = menuPhaseRef.current !== 'playing') => {
     if (socket.readyState !== WebSocket.OPEN) return
-    socket.send(encodeJoin(playerNameRef.current, playerIdRef.current, deferSpawn))
+    socket.send(
+      encodeJoin(
+        playerNameRef.current,
+        playerIdRef.current,
+        deferSpawn,
+        joinSkinColorsRef.current,
+      ),
+    )
   }
 
   const isPointerBoostButtonPressed = (event: React.PointerEvent<HTMLCanvasElement>) =>
@@ -2047,6 +2164,9 @@ export default function App() {
     const socket = socketRef.current
     if (!socket || socket.readyState !== WebSocket.OPEN) return
     if (menuOverlayExiting) return
+    if (menuUiModeRef.current !== 'home') {
+      setMenuUiMode('home')
+    }
 
     const trimmedName = playerName.trim()
     const nextName = trimmedName || createRandomPlayerName()
@@ -2092,6 +2212,197 @@ export default function App() {
     }, MENU_OVERLAY_FADE_OUT_MS)
   }
 
+  const refreshSkinDesigns = () => {
+    setSkinDesigns(getSavedSkinDesigns())
+  }
+
+  const resetMenuPreviewOrbit = () => {
+    const orbit = menuPreviewOrbitRef.current
+    orbit.yaw = -0.35
+    orbit.pitch = 0.08
+    webglRef.current?.setMenuPreviewOrbit(orbit.yaw, orbit.pitch)
+  }
+
+  const handleOpenSkin = () => {
+    if (menuOverlayExiting || menuPhaseRef.current !== 'preplay') return
+    resetMenuPreviewOrbit()
+    setMenuUiMode('skin')
+  }
+
+  const cyclePaletteIndex = (index: number, delta: number) => {
+    const count = SKIN_PALETTE_COLORS.length
+    if (count <= 0) return 0
+    const next = (index + delta) % count
+    return next < 0 ? next + count : next
+  }
+
+  const stopMenuPreviewDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = menuPreviewDragRef.current
+    if (!drag.active) return
+    drag.active = false
+    drag.pointerId = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+  }
+
+  const handleMenuPreviewPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (menuOverlayExitingRef.current) return
+    if (menuPhaseRef.current !== 'preplay') return
+    event.preventDefault()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    const drag = menuPreviewDragRef.current
+    drag.active = true
+    drag.pointerId = event.pointerId
+    drag.lastX = event.clientX
+    drag.lastY = event.clientY
+  }
+
+  const handleMenuPreviewPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = menuPreviewDragRef.current
+    if (!drag.active || drag.pointerId !== event.pointerId) return
+    event.preventDefault()
+    const dx = event.clientX - drag.lastX
+    const dy = event.clientY - drag.lastY
+    drag.lastX = event.clientX
+    drag.lastY = event.clientY
+
+    const orbit = menuPreviewOrbitRef.current
+    const sensitivity = 0.006
+    orbit.yaw += dx * sensitivity
+    orbit.pitch = clamp(orbit.pitch + dy * sensitivity, -1.25, 1.25)
+    webglRef.current?.setMenuPreviewOrbit(orbit.yaw, orbit.pitch)
+  }
+
+  const handleMenuPreviewPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    stopMenuPreviewDrag(event)
+  }
+
+  const handleMenuPreviewPointerCancel = (event: React.PointerEvent<HTMLDivElement>) => {
+    stopMenuPreviewDrag(event)
+  }
+
+  const handleMenuPreviewPointerLeave = (event: React.PointerEvent<HTMLDivElement>) => {
+    stopMenuPreviewDrag(event)
+  }
+
+  const handleSolidPrev = () => {
+    const nextIndex = cyclePaletteIndex(solidPaletteIndex, -1)
+    const nextColor = SKIN_PALETTE_COLORS[nextIndex] ?? solidPaletteColor
+    setSolidPaletteIndex(nextIndex)
+    setSelectedSkin({ kind: 'solid', color: nextColor })
+  }
+
+  const handleSolidNext = () => {
+    const nextIndex = cyclePaletteIndex(solidPaletteIndex, 1)
+    const nextColor = SKIN_PALETTE_COLORS[nextIndex] ?? solidPaletteColor
+    setSolidPaletteIndex(nextIndex)
+    setSelectedSkin({ kind: 'solid', color: nextColor })
+  }
+
+  const handleSelectSolid = (color: string) => {
+    setSelectedSkin({ kind: 'solid', color })
+  }
+
+  const handleSelectDesign = (id: string) => {
+    setSelectedSkin({ kind: 'design', id })
+  }
+
+  const handleDeleteDesign = (id: string) => {
+    if (typeof window !== 'undefined') {
+      const design = skinDesigns.find((d) => d.id === id)
+      const confirmed = window.confirm(`Delete design "${design?.name ?? 'Unnamed'}"?`)
+      if (!confirmed) return
+    }
+    deleteSkinDesign(id)
+    refreshSkinDesigns()
+    if (selectedSkin.kind === 'design' && selectedSkin.id === id) {
+      setSelectedSkin(DEFAULT_SOLID_SKIN)
+    }
+  }
+
+  const resetBuilder = () => {
+    builderPaletteIndexRef.current = 0
+    setBuilderPaletteColor(SKIN_PALETTE_COLORS[0] ?? '#ffffff')
+    setBuilderPattern(new Array(SNAKE_PATTERN_LEN).fill(null))
+    setBuilderDesignName('')
+  }
+
+  const handleStartBuilder = () => {
+    resetBuilder()
+    resetMenuPreviewOrbit()
+    setMenuUiMode('builder')
+  }
+
+  const handleBuilderPrev = () => {
+    const nextIndex = cyclePaletteIndex(builderPaletteIndexRef.current, -1)
+    builderPaletteIndexRef.current = nextIndex
+    setBuilderPaletteColor(SKIN_PALETTE_COLORS[nextIndex] ?? builderPaletteColorRef.current)
+  }
+
+  const handleBuilderNext = () => {
+    const nextIndex = cyclePaletteIndex(builderPaletteIndexRef.current, 1)
+    builderPaletteIndexRef.current = nextIndex
+    setBuilderPaletteColor(SKIN_PALETTE_COLORS[nextIndex] ?? builderPaletteColorRef.current)
+  }
+
+  const handleBuilderPickColor = (value: string) => {
+    const normalized = value.trim().toLowerCase()
+    setBuilderPaletteColor(normalized)
+    const idx = SKIN_PALETTE_COLORS.findIndex((color) => color.toLowerCase() === normalized)
+    if (idx >= 0) builderPaletteIndexRef.current = idx
+  }
+
+  const handleBuilderAddColor = () => {
+    setBuilderPattern((current) => {
+      const next = current.slice(0, SNAKE_PATTERN_LEN)
+      const idx = next.findIndex((c) => !c)
+      if (idx === -1) return next
+      next[idx] = builderPaletteColorRef.current
+      return next
+    })
+  }
+
+  const handleBuilderPaintSlot = (index: number) => {
+    setBuilderPattern((current) => {
+      const next = current.slice(0, SNAKE_PATTERN_LEN)
+      if (!next[index]) return next
+      next[index] = builderPaletteColorRef.current
+      return next
+    })
+  }
+
+  const handleBuilderSave = () => {
+    if (skinDesigns.length >= MAX_SAVED_SKIN_DESIGNS) return
+    const seed: string[] = []
+    for (let i = 0; i < SNAKE_PATTERN_LEN; i += 1) {
+      const entry = builderPattern[i]
+      if (typeof entry === 'string' && entry) {
+        seed.push(entry)
+        continue
+      }
+      break
+    }
+    if (seed.length < 1) return
+    const colors: string[] = []
+    for (let i = 0; i < SNAKE_PATTERN_LEN; i += 1) {
+      colors.push(seed[i % seed.length] ?? seed[0] ?? '#ffffff')
+    }
+    const design = createSkinDesign(builderDesignName, colors)
+    if (!design) return
+    const saved = saveSkinDesign(design)
+    if (!saved.ok) {
+      if (typeof window !== 'undefined' && saved.error === 'max') {
+        window.alert('Max designs reached. Delete one to save a new design.')
+      }
+      return
+    }
+    refreshSkinDesigns()
+    setSelectedSkin({ kind: 'design', id: design.id })
+    setMenuUiMode('skin')
+    resetBuilder()
+  }
+
   const handleRendererModeChange = (value: string) => {
     const mode: RendererPreference =
       value === 'webgl' || value === 'webgpu' || value === 'auto' ? value : 'auto'
@@ -2121,7 +2432,7 @@ export default function App() {
             <canvas ref={hudCanvasRef} className='hud-canvas' aria-hidden='true' />
             <div ref={boostFxRef} className='boost-fx' aria-hidden='true' />
           </div>
-          {showMenuOverlay && (
+          {showMenuOverlay && menuUiMode === 'home' && (
             <MenuOverlay
               playerName={playerName}
               playLabel={showPlayAgain ? 'Play again' : 'Play'}
@@ -2130,6 +2441,56 @@ export default function App() {
               menuPhase={menuPhase}
               onPlayerNameChange={setPlayerName}
               onPlay={handlePlay}
+              onChangeSkin={handleOpenSkin}
+            />
+          )}
+          {showMenuOverlay && menuUiMode === 'skin' && (
+            <SkinOverlay
+              isExiting={menuOverlayExiting}
+              solidColor={solidPaletteColor}
+              selected={selectedSkin}
+              designs={skinDesigns}
+              onPreviewPointerDown={handleMenuPreviewPointerDown}
+              onPreviewPointerMove={handleMenuPreviewPointerMove}
+              onPreviewPointerUp={handleMenuPreviewPointerUp}
+              onPreviewPointerCancel={handleMenuPreviewPointerCancel}
+              onPreviewPointerLeave={handleMenuPreviewPointerLeave}
+              onSolidPrev={handleSolidPrev}
+              onSolidNext={handleSolidNext}
+              onSelectSolid={handleSelectSolid}
+              onSelectDesign={handleSelectDesign}
+              onDeleteDesign={handleDeleteDesign}
+              onBuild={handleStartBuilder}
+              onBack={() => setMenuUiMode('home')}
+            />
+          )}
+          {showMenuOverlay && menuUiMode === 'builder' && (
+            <SkinBuilderOverlay
+              isExiting={menuOverlayExiting}
+              paletteColor={builderPaletteColor}
+              pattern={builderPattern}
+              designName={builderDesignName}
+              designsCount={skinDesigns.length}
+              onPreviewPointerDown={handleMenuPreviewPointerDown}
+              onPreviewPointerMove={handleMenuPreviewPointerMove}
+              onPreviewPointerUp={handleMenuPreviewPointerUp}
+              onPreviewPointerCancel={handleMenuPreviewPointerCancel}
+              onPreviewPointerLeave={handleMenuPreviewPointerLeave}
+              onPalettePrev={handleBuilderPrev}
+              onPaletteNext={handleBuilderNext}
+              onPalettePick={handleBuilderPickColor}
+              onAddColor={handleBuilderAddColor}
+              onPaintSlot={handleBuilderPaintSlot}
+              onDesignNameChange={setBuilderDesignName}
+              onSave={handleBuilderSave}
+              onBack={() => {
+                resetBuilder()
+                setMenuUiMode('skin')
+              }}
+              onCancel={() => {
+                resetBuilder()
+                setMenuUiMode('home')
+              }}
             />
           )}
         </div>

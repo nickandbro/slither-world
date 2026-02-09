@@ -10,9 +10,10 @@ import type {
 export type PlayerMeta = {
   name: string
   color: string
+  skinColors?: string[]
 }
 
-const VERSION = 12
+const VERSION = 13
 
 const TYPE_JOIN = 0x01
 const TYPE_INPUT = 0x02
@@ -25,6 +26,7 @@ const TYPE_PLAYER_META = 0x12
 const FLAG_JOIN_PLAYER_ID = 1 << 0
 const FLAG_JOIN_NAME = 1 << 1
 const FLAG_JOIN_DEFER_SPAWN = 1 << 2
+const FLAG_JOIN_SKIN = 1 << 3
 
 const FLAG_INPUT_AXIS = 1 << 0
 const FLAG_INPUT_BOOST = 1 << 1
@@ -59,15 +61,22 @@ export function encodeJoin(
   name: string | null,
   playerId: string | null,
   deferSpawn = false,
+  skinColors: string[] | null = null,
 ): ArrayBuffer {
   const idBytes = playerId ? uuidToBytes(playerId) : null
   const nameBytes = name !== null ? encodeString(name) : null
+  const skinBytes = skinColors ? encodeSkinColors(skinColors) : null
   let flags = 0
   if (idBytes) flags |= FLAG_JOIN_PLAYER_ID
   if (nameBytes) flags |= FLAG_JOIN_NAME
   if (deferSpawn) flags |= FLAG_JOIN_DEFER_SPAWN
+  if (skinBytes) flags |= FLAG_JOIN_SKIN
 
-  const length = 4 + (idBytes ? 16 : 0) + (nameBytes ? 1 + nameBytes.length : 0)
+  const length =
+    4 +
+    (idBytes ? 16 : 0) +
+    (nameBytes ? 1 + nameBytes.length : 0) +
+    (skinBytes ? 1 + skinBytes.length : 0)
   const buffer = new ArrayBuffer(length)
   const view = new DataView(buffer)
   let offset = 0
@@ -81,6 +90,12 @@ export function encodeJoin(
     offset += 1
     new Uint8Array(buffer, offset, nameBytes.length).set(nameBytes)
     offset += nameBytes.length
+  }
+  if (skinBytes) {
+    view.setUint8(offset, skinBytes.length / 3)
+    offset += 1
+    new Uint8Array(buffer, offset, skinBytes.length).set(skinBytes)
+    offset += skinBytes.length
   }
   return buffer
 }
@@ -188,8 +203,9 @@ function decodeInit(reader: Reader, meta: Map<string, PlayerMeta>): DecodedMessa
     const id = reader.readUuid()
     const name = reader.readString()
     const color = reader.readString()
-    if (id === null || name === null || color === null) return null
-    meta.set(id, { name, color })
+    const skinColors = readSkinColors(reader)
+    if (id === null || name === null || color === null || skinColors === null) return null
+    meta.set(id, { name, color, skinColors: skinColors ?? undefined })
   }
 
   const players = readPlayerStates(reader, meta)
@@ -233,8 +249,9 @@ function decodeMeta(reader: Reader, meta: Map<string, PlayerMeta>) {
     const id = reader.readUuid()
     const name = reader.readString()
     const color = reader.readString()
-    if (id === null || name === null || color === null) return
-    meta.set(id, { name, color })
+    const skinColors = readSkinColors(reader)
+    if (id === null || name === null || color === null || skinColors === null) return
+    meta.set(id, { name, color, skinColors: skinColors ?? undefined })
   }
 }
 
@@ -316,6 +333,7 @@ function readPlayerStates(reader: Reader, meta: Map<string, PlayerMeta>): Player
       id,
       name: metaEntry?.name ?? 'Player',
       color: metaEntry?.color ?? '#ffffff',
+      skinColors: metaEntry?.skinColors,
       score,
       scoreFraction,
       oxygen,
@@ -535,6 +553,40 @@ function encodeString(value: string): Uint8Array {
   return textEncoder.encode(result)
 }
 
+function parseHexColor(value: string): [number, number, number] | null {
+  const trimmed = value.trim().toLowerCase()
+  const match = /^#([0-9a-f]{6})$/.exec(trimmed)
+  if (!match) return null
+  const hex = match[1]
+  const r = Number.parseInt(hex.slice(0, 2), 16)
+  const g = Number.parseInt(hex.slice(2, 4), 16)
+  const b = Number.parseInt(hex.slice(4, 6), 16)
+  if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) return null
+  return [r, g, b]
+}
+
+function encodeSkinColors(colors: string[]): Uint8Array | null {
+  const clampedLen = Math.max(0, Math.min(8, colors.length))
+  if (clampedLen <= 0) return null
+  const bytes = new Uint8Array(clampedLen * 3)
+  for (let i = 0; i < clampedLen; i += 1) {
+    const parsed = parseHexColor(colors[i] ?? '')
+    if (!parsed) return null
+    const offset = i * 3
+    bytes[offset] = parsed[0]
+    bytes[offset + 1] = parsed[1]
+    bytes[offset + 2] = parsed[2]
+  }
+  return bytes
+}
+
+function bytesToHexColor(r: number, g: number, b: number) {
+  const rr = r.toString(16).padStart(2, '0')
+  const gg = g.toString(16).padStart(2, '0')
+  const bb = b.toString(16).padStart(2, '0')
+  return `#${rr}${gg}${bb}`
+}
+
 function uuidToBytes(uuid: string): Uint8Array | null {
   const hex = uuid.replace(/-/g, '').toLowerCase()
   if (!/^[0-9a-f]{32}$/.test(hex)) return null
@@ -550,6 +602,22 @@ function bytesToUuid(bytes: Uint8Array): string {
     .map((value) => value.toString(16).padStart(2, '0'))
     .join('')
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
+function readSkinColors(reader: Reader): string[] | undefined | null {
+  const skinLen = reader.readU8()
+  if (skinLen === null) return null
+  if (skinLen === 0) return undefined
+  if (skinLen > 8) return null
+  const out: string[] = []
+  for (let i = 0; i < skinLen; i += 1) {
+    const r = reader.readU8()
+    const g = reader.readU8()
+    const b = reader.readU8()
+    if (r === null || g === null || b === null) return null
+    out.push(bytesToHexColor(r, g, b))
+  }
+  return out
 }
 
 class Reader {

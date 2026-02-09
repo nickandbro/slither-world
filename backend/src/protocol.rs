@@ -1,7 +1,7 @@
 use crate::game::types::Point;
 use uuid::Uuid;
 
-pub const VERSION: u8 = 12;
+pub const VERSION: u8 = 13;
 
 pub const TYPE_JOIN: u8 = 0x01;
 pub const TYPE_INPUT: u8 = 0x02;
@@ -14,6 +14,7 @@ pub const TYPE_PLAYER_META: u8 = 0x12;
 pub const FLAG_JOIN_PLAYER_ID: u16 = 1 << 0;
 pub const FLAG_JOIN_NAME: u16 = 1 << 1;
 pub const FLAG_JOIN_DEFER_SPAWN: u16 = 1 << 2;
+pub const FLAG_JOIN_SKIN: u16 = 1 << 3;
 
 pub const FLAG_INPUT_AXIS: u16 = 1 << 0;
 pub const FLAG_INPUT_BOOST: u16 = 1 << 1;
@@ -31,6 +32,7 @@ pub enum ClientMessage {
         name: Option<String>,
         player_id: Option<Uuid>,
         defer_spawn: bool,
+        skin: Option<Vec<[u8; 3]>>,
     },
     Respawn,
     Input {
@@ -63,10 +65,27 @@ pub fn decode_client_message(data: &[u8]) -> Option<ClientMessage> {
                 None
             };
             let defer_spawn = flags & FLAG_JOIN_DEFER_SPAWN != 0;
+            let skin = if flags & FLAG_JOIN_SKIN != 0 {
+                let skin_len = reader.read_u8()? as usize;
+                let skin_len = skin_len.min(8);
+                if skin_len == 0 {
+                    None
+                } else {
+                    let mut out = Vec::with_capacity(skin_len);
+                    for _ in 0..skin_len {
+                        let rgb = reader.read_bytes::<3>()?;
+                        out.push(rgb);
+                    }
+                    Some(out)
+                }
+            } else {
+                None
+            };
             Some(ClientMessage::Join {
                 name,
                 player_id,
                 defer_spawn,
+                skin,
             })
         }
         TYPE_RESPAWN => Some(ClientMessage::Respawn),
@@ -248,10 +267,12 @@ mod tests {
                 name,
                 player_id,
                 defer_spawn,
+                skin,
             } => {
                 assert_eq!(name.as_deref(), Some("Player-7"));
                 assert_eq!(player_id, Some(id));
                 assert!(!defer_spawn);
+                assert!(skin.is_none());
             }
             _ => panic!("unexpected message"),
         }
@@ -269,10 +290,49 @@ mod tests {
                 name,
                 player_id,
                 defer_spawn,
+                skin,
             } => {
                 assert!(name.is_none());
                 assert!(player_id.is_none());
                 assert!(defer_spawn);
+                assert!(skin.is_none());
+            }
+            _ => panic!("unexpected message"),
+        }
+    }
+
+    #[test]
+    fn decode_join_with_skin_pattern() {
+        let mut encoder = Encoder::with_capacity(64);
+        encoder.write_header(TYPE_JOIN, FLAG_JOIN_SKIN);
+        encoder.write_u8(3);
+        encoder.write_u8(0xff);
+        encoder.write_u8(0x00);
+        encoder.write_u8(0x00);
+        encoder.write_u8(0x00);
+        encoder.write_u8(0xff);
+        encoder.write_u8(0x00);
+        encoder.write_u8(0x00);
+        encoder.write_u8(0x00);
+        encoder.write_u8(0xff);
+        let data = encoder.into_vec();
+
+        let message = decode_client_message(&data).expect("message");
+        match message {
+            ClientMessage::Join {
+                name,
+                player_id,
+                defer_spawn,
+                skin,
+            } => {
+                assert!(name.is_none());
+                assert!(player_id.is_none());
+                assert!(!defer_spawn);
+                let skin = skin.expect("skin");
+                assert_eq!(skin.len(), 3);
+                assert_eq!(skin[0], [0xff, 0x00, 0x00]);
+                assert_eq!(skin[1], [0x00, 0xff, 0x00]);
+                assert_eq!(skin[2], [0x00, 0x00, 0xff]);
             }
             _ => panic!("unexpected message"),
         }

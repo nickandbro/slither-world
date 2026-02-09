@@ -56,6 +56,7 @@ pub struct Player {
     pub id_bytes: [u8; 16],
     pub name: String,
     pub color: String,
+    pub skin: Option<Vec<[u8; 3]>>,
     pub is_bot: bool,
     pub axis: Point,
     pub target_axis: Point,

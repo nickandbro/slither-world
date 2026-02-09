@@ -265,6 +265,7 @@ impl Room {
                     name,
                     player_id,
                     defer_spawn: defer_spawn.unwrap_or(false),
+                    skin: None,
                 }
             }
             JsonClientMessage::Respawn => protocol::ClientMessage::Respawn,
@@ -303,12 +304,14 @@ impl Room {
                 name,
                 player_id,
                 defer_spawn,
+                skin,
             } => {
                 let accepted = state.handle_join(
                     session_id,
                     name,
                     player_id,
                     defer_spawn,
+                    skin,
                     self.max_human_players,
                 );
                 if !accepted {
@@ -409,6 +412,7 @@ impl RoomState {
         name: Option<String>,
         player_id: Option<Uuid>,
         defer_spawn: bool,
+        skin: Option<Vec<[u8; 3]>>,
         max_human_players: Option<usize>,
     ) -> bool {
         let raw_name = name.unwrap_or_else(|| "Player".to_string());
@@ -459,6 +463,21 @@ impl RoomState {
             self.players.insert(id_string.clone(), new_player);
             id_string
         };
+
+        if let Some(pattern) = skin {
+            let clamped_len = pattern.len().min(8);
+            let stored = if clamped_len > 0 {
+                Some(pattern.into_iter().take(clamped_len).collect::<Vec<[u8; 3]>>())
+            } else {
+                None
+            };
+            if let Some(player) = self.players.get_mut(&player_id) {
+                player.skin = stored.clone();
+                if let Some(first) = stored.as_ref().and_then(|v| v.first()) {
+                    player.color = format!("#{:02x}{:02x}{:02x}", first[0], first[1], first[2]);
+                }
+            }
+        }
 
         let sender = if let Some(session) = self.sessions.get_mut(session_id) {
             session.player_id = Some(player_id.clone());
@@ -912,6 +931,7 @@ impl RoomState {
             id_bytes: *id.as_bytes(),
             name,
             color: COLOR_POOL[self.players.len() % COLOR_POOL.len()].to_string(),
+            skin: None,
             is_bot,
             axis,
             target_axis: axis,
@@ -2293,6 +2313,12 @@ impl RoomState {
             capacity += 16;
             capacity += 1 + Self::truncated_len(&player.name);
             capacity += 1 + Self::truncated_len(&player.color);
+            capacity += 1;
+            capacity += player
+                .skin
+                .as_ref()
+                .map(|skin| skin.len().min(8) * 3)
+                .unwrap_or(0);
         }
         capacity += 2;
         for visible in visible_players.iter().take(visible_player_count) {
@@ -2332,6 +2358,17 @@ impl RoomState {
             encoder.write_uuid(&player.id_bytes);
             encoder.write_string(&player.name);
             encoder.write_string(&player.color);
+            if let Some(skin) = player.skin.as_ref() {
+                let len = skin.len().min(8);
+                encoder.write_u8(len as u8);
+                for rgb in skin.iter().take(len) {
+                    encoder.write_u8(rgb[0]);
+                    encoder.write_u8(rgb[1]);
+                    encoder.write_u8(rgb[2]);
+                }
+            } else {
+                encoder.write_u8(0);
+            }
         }
 
         encoder.write_u16(visible_player_count as u16);
@@ -2405,6 +2442,12 @@ impl RoomState {
             capacity += 16;
             capacity += 1 + Self::truncated_len(&player.name);
             capacity += 1 + Self::truncated_len(&player.color);
+            capacity += 1;
+            capacity += player
+                .skin
+                .as_ref()
+                .map(|skin| skin.len().min(8) * 3)
+                .unwrap_or(0);
         }
 
         let mut encoder = protocol::Encoder::with_capacity(capacity);
@@ -2414,6 +2457,17 @@ impl RoomState {
             encoder.write_uuid(&player.id_bytes);
             encoder.write_string(&player.name);
             encoder.write_string(&player.color);
+            if let Some(skin) = player.skin.as_ref() {
+                let len = skin.len().min(8);
+                encoder.write_u8(len as u8);
+                for rgb in skin.iter().take(len) {
+                    encoder.write_u8(rgb[0]);
+                    encoder.write_u8(rgb[1]);
+                    encoder.write_u8(rgb[2]);
+                }
+            } else {
+                encoder.write_u8(0);
+            }
         }
         Some(encoder.into_vec())
     }
@@ -2591,6 +2645,7 @@ mod tests {
             id_bytes: [0u8; 16],
             name: "Test".to_string(),
             color: "#ffffff".to_string(),
+            skin: None,
             is_bot: false,
             axis: Point {
                 x: 1.0,
@@ -2766,6 +2821,8 @@ mod tests {
             offset += name_len;
             let color_len = read_u8(payload, &mut offset) as usize;
             offset += color_len;
+            let skin_len = read_u8(payload, &mut offset) as usize;
+            offset += skin_len * 3;
         }
         let visible_players = read_u16(payload, &mut offset);
         for _ in 0..visible_players {
