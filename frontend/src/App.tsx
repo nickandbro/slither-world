@@ -286,6 +286,7 @@ const NET_EVENT_LOG_LIMIT = 240
 const TAIL_EVENT_LOG_LIMIT = 900
 const TAIL_RENDER_SAMPLE_INTERVAL_MS = 140
 const ARRIVAL_GAP_REENTRY_COOLDOWN_MS = 480
+const SCORE_RADIAL_DEPLETION_EPS = 0.05
 
 const isSeqNewer = (next: number, current: number) => {
   const delta = (next - current) >>> 0
@@ -1880,13 +1881,18 @@ export default function App() {
                   !localSnapshotPlayer.isBoosting &&
                   localSnapshotPlayer.score < minBoostStartScore
                 const attemptingBoost = pointerRef.current.boost
+                const spawnReserveFloor = scoreRadialState.spawnReserve ?? currentReserve
+                const reserveAboveFloor = Math.max(0, currentReserve - spawnReserveFloor)
+                const depleted = reserveAboveFloor <= SCORE_RADIAL_DEPLETION_EPS
                 if (
                   scoreRadialState.lastBoosting &&
                   !scoreRadialActive &&
                   localSnapshotPlayer.alive &&
                   attemptingBoost
                 ) {
-                  scoreRadialState.blockedFlashUntilMs = nowMs + SCORE_RADIAL_BLOCKED_FLASH_MS
+                  if (scoreBlockedByThreshold || depleted) {
+                    scoreRadialState.blockedFlashUntilMs = nowMs + SCORE_RADIAL_BLOCKED_FLASH_MS
+                  }
                 }
                 if (scoreRadialActive) {
                   scoreRadialState.blockedFlashUntilMs = 0
@@ -1934,7 +1940,7 @@ export default function App() {
                   scoreRadialState.lastDisplayScore = scoreDisplay
                   scoreRadialBlocked =
                     (scoreBlockedByThreshold && attemptingBoost) ||
-                    nowMs < scoreRadialState.blockedFlashUntilMs
+                    (attemptingBoost && nowMs < scoreRadialState.blockedFlashUntilMs)
                 }
                 scoreRadialState.lastBoosting = scoreRadialActive
                 scoreRadialState.lastAlive = localSnapshotPlayer.alive

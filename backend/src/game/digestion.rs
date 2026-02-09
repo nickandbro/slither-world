@@ -59,7 +59,18 @@ fn tail_growth_rate_per_step(backlog: f64) -> f64 {
 }
 
 fn can_continue_boost(player: &Player, min_length: usize) -> bool {
-    player.snake.len() > min_length.max(1) || player.tail_extension > 1e-6
+    if player.snake.len() > min_length.max(1) {
+        return true;
+    }
+    if player.tail_extension > 1e-6 {
+        return true;
+    }
+    // Allow boost to consume pending (in-flight) digestion growth so boost remains responsive
+    // even when tail growth has not yet reached the end of the snake.
+    player
+        .digestions
+        .iter()
+        .any(|digestion| digestion.growth_amount - digestion.applied_growth > 1e-6)
 }
 
 fn apply_score_drain(player: &mut Player, score_drain: f64) {
@@ -166,8 +177,32 @@ pub fn advance_digestions_with_boost(
             if remove_snake_tail_node(&mut player.snake, min_length) {
                 player.tail_extension += 1.0;
             } else {
+                // We are at the floor. Instead of hard-stopping boost immediately, burn pending
+                // digestion growth so players can boost as soon as they've earned reserve, even if
+                // the growth is still traveling down the body.
+                let deficit = -player.tail_extension;
                 player.tail_extension = 0.0;
-                boost_active = false;
+
+                let mut remaining = deficit;
+                if remaining > 1e-9 {
+                    for digestion in &mut player.digestions {
+                        if remaining <= 1e-9 {
+                            break;
+                        }
+                        let available =
+                            (digestion.growth_amount - digestion.applied_growth).max(0.0);
+                        if available <= 1e-9 {
+                            continue;
+                        }
+                        let delta = available.min(remaining);
+                        digestion.applied_growth += delta;
+                        remaining -= delta;
+                    }
+                }
+
+                if remaining > 1e-6 {
+                    boost_active = false;
+                }
             }
         }
         if boost_active && !can_continue_boost(player, min_length) {
@@ -485,5 +520,39 @@ mod tests {
         assert!(player.tail_extension.abs() < 1e-6);
         assert_eq!(player.score, 0);
         assert!(player.pellet_growth_fraction.abs() < 1e-6);
+    }
+
+    #[test]
+    fn boost_drain_can_burn_pending_growth_at_floor() {
+        let mut player = make_player();
+        player.snake = make_snake(MIN_SURVIVAL_LENGTH);
+        player.tail_extension = 0.0;
+        player.digestions.push(Digestion {
+            id: 1,
+            remaining: 20,
+            total: 20,
+            settle_steps: 4,
+            growth_amount: 0.2,
+            applied_growth: 0.0,
+            strength: 0.4,
+        });
+
+        let boost_active = advance_digestions_with_boost(
+            &mut player,
+            1,
+            BoostDrainConfig {
+                active: true,
+                score_per_step: 0.0,
+                node_per_step: 0.05,
+                min_length: MIN_SURVIVAL_LENGTH,
+            },
+        );
+
+        assert!(boost_active);
+        assert_eq!(player.snake.len(), MIN_SURVIVAL_LENGTH);
+        assert!(player.tail_extension.abs() < 1e-6);
+        assert_eq!(player.digestions.len(), 1);
+        assert!(player.digestions[0].applied_growth > 0.049);
+        assert!(player.digestions[0].applied_growth < 0.051);
     }
 }

@@ -2016,7 +2016,16 @@ impl RoomState {
     }
 
     fn can_player_continue_boost(player: &Player) -> bool {
-        player.snake.len() > player.boost_floor_len.max(1) || player.tail_extension > 1e-6
+        if player.snake.len() > player.boost_floor_len.max(1) {
+            return true;
+        }
+        if player.tail_extension > 1e-6 {
+            return true;
+        }
+        player
+            .digestions
+            .iter()
+            .any(|digestion| digestion.growth_amount - digestion.applied_growth > 1e-6)
     }
 
     fn min_boost_start_score(player: &Player) -> i64 {
@@ -2925,6 +2934,25 @@ mod tests {
 
         player.is_boosting = false;
         assert!(!RoomState::can_player_boost(&player));
+    }
+
+    #[test]
+    fn boost_can_start_at_floor_when_pending_growth_exists() {
+        let mut player = make_player("boost-start-pending", make_snake(STARTING_LENGTH, 0.0));
+        player.boost_floor_len = STARTING_LENGTH;
+        player.score = STARTING_LENGTH as i64 + 1;
+        player.tail_extension = 0.0;
+        player.digestions.push(Digestion {
+            id: 1,
+            remaining: 12,
+            total: 12,
+            settle_steps: 4,
+            growth_amount: 0.10,
+            applied_growth: 0.0,
+            strength: 1.0,
+        });
+
+        assert!(RoomState::can_player_boost(&player));
     }
 
     fn insert_session_with_view(
