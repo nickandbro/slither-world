@@ -6642,7 +6642,8 @@ diffuseColor.a *= retireEdge;`,
     const vDenom = Math.max(1, radialSegments)
 
     const safeStart = Number.isFinite(snakeStart) ? Math.max(0, snakeStart) : 0
-    const safeLen = Number.isFinite(snakeLen) ? Math.max(0, Math.floor(snakeLen)) : 0
+    // snakeLen can be fractional (tail extension) so skin patterns advance smoothly as the tail grows.
+    const safeLen = Number.isFinite(snakeLen) ? Math.max(0, snakeLen) : 0
     const span = Math.max(0, safeLen)
     for (let ring = 0; ring < ringCount; ring += 1) {
       const t = ring / ringDenom
@@ -6887,7 +6888,8 @@ diffuseColor.a *= retireEdge;`,
         SNAKE_TUBE_RADIAL_SEGMENTS,
         false,
       )
-      applySnakeSkinUVs(tubeGeometry, player.snakeStart, nodes.length)
+      // Keep skin UV progression continuous while the tail is fractionally extended.
+      applySnakeSkinUVs(tubeGeometry, player.snakeStart, nodes.length + extensionRatio)
       const digestionStartOffset = computeDigestionStartOffset(curvePoints)
       if (digestionVisuals.length) {
         applyDigestionBulges(tubeGeometry, digestionVisuals, digestionStartOffset, digestionBulgeScale)
