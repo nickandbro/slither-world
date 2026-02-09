@@ -80,6 +80,14 @@ type BoostTrailState = {
   retireInitialCount: number
   retireCut: number
   dirty: boolean
+  // Allocation-light geometry rebuild scratch.
+  curve: THREE.CatmullRomCurve3
+  curvePoints: THREE.Vector3[]
+  projectedPoints: THREE.Vector3[]
+  positionAttr: THREE.BufferAttribute
+  uvAttr: THREE.BufferAttribute
+  trailProgressAttr: THREE.BufferAttribute | null
+  indexAttr: THREE.BufferAttribute
 }
 
 type BoostTrailMaterialUserData = {
@@ -898,6 +906,7 @@ const PELLET_SIZE_TIER_LARGE_MIN = 1.6
 const PELLET_WOBBLE_DISTANCE = PELLET_RADIUS * 0.45
 const PELLET_WOBBLE_GFR_RATE = 1000 / 8
 const PELLET_WOBBLE_WSP_RANGE = 0.0225
+const PELLET_WOBBLE_DISABLE_VISIBLE_THRESHOLD = 1800
 const PELLET_GLOW_PULSE_SPEED = 9.2
 const PELLET_SHADOW_OPACITY_BASE = 0.9
 const PELLET_SHADOW_OPACITY_RANGE = 0.008
@@ -935,6 +944,11 @@ const BOOST_TRAIL_MIN_SAMPLE_DISTANCE = SNAKE_RADIUS * 0.38
 const BOOST_TRAIL_MAX_SAMPLES = 280
 const BOOST_TRAIL_MAX_ARC_ANGLE = 0.055
 const BOOST_TRAIL_CURVE_SEGMENTS_PER_POINT = 10
+const BOOST_TRAIL_MAX_CURVE_SEGMENTS = 512
+const BOOST_TRAIL_MAX_CENTER_POINTS = BOOST_TRAIL_MAX_CURVE_SEGMENTS + 1
+const BOOST_TRAIL_MAX_VERTEX_COUNT = BOOST_TRAIL_MAX_CENTER_POINTS * 2
+const BOOST_TRAIL_MAX_INDEX_COUNT = (BOOST_TRAIL_MAX_CENTER_POINTS - 1) * 6
+const BOOST_TRAIL_POOL_MAX = 48
 const BOOST_TRAIL_WIDTH = SNAKE_RADIUS * 0.42
 const BOOST_TRAIL_EDGE_FADE_CAP = 0.22
 const BOOST_TRAIL_SIDE_FADE_CAP = 0.28
@@ -2556,16 +2570,17 @@ export const createScene = async (
   const pelletBuckets: Array<PelletSpriteBucket | null> = new Array(PELLET_BUCKET_COUNT).fill(null)
   const pelletBucketCounts = new Array<number>(PELLET_BUCKET_COUNT).fill(0)
   const pelletBucketOffsets = new Array<number>(PELLET_BUCKET_COUNT).fill(0)
+  const pelletBucketPositionArrays: Array<Float32Array | null> = new Array(PELLET_BUCKET_COUNT).fill(null)
   const pelletGroundCache = new Map<number, { x: number; y: number; z: number; radius: number }>()
   const pelletMotionStates = new Map<number, PelletMotionState>()
   const pelletIdsSeen = new Set<number>()
-  const pelletVisibleIds = new Set<number>()
   let viewportWidth = 1
   let viewportHeight = 1
   let lastFrameTime = performance.now()
 
   const snakes = new Map<string, SnakeVisual>()
   const boostTrails = new Map<string, BoostTrailState[]>()
+  const boostTrailPool: BoostTrailState[] = []
   const deathStates = new Map<string, DeathState>()
   const lastAliveStates = new Map<string, boolean>()
   const lastHeadPositions = new Map<string, THREE.Vector3>()
@@ -5025,12 +5040,124 @@ diffuseColor.a *= retireEdge;`,
     return material
   }
 
+  // Warm up boost-related shader/pipeline compilation so the first boost activation doesn't stall
+  // the main thread with shader compilation/pipeline creation.
+  let boostWarmupGroup: THREE.Group | null = null
+  let boostWarmupTrailGeometry: THREE.BufferGeometry | null = null
+  let boostWarmupTrailMaterial: THREE.MeshBasicMaterial | null = null
+  let boostWarmupDraftMaterial: THREE.MeshBasicMaterial | null = null
+  const warmBoostPipelinesOnce = () => {
+    if (boostWarmupGroup) return
+    boostWarmupGroup = new THREE.Group()
+    boostWarmupGroup.visible = true
+    world.add(boostWarmupGroup)
+
+    boostWarmupDraftMaterial = createBoostDraftMaterial()
+    boostWarmupDraftMaterial.opacity = 0
+    boostWarmupDraftMaterial.transparent = true
+    const boostWarmupDraftMesh = new THREE.Mesh(boostDraftGeometry, boostWarmupDraftMaterial)
+    boostWarmupDraftMesh.renderOrder = 2
+    boostWarmupDraftMesh.scale.setScalar(0.01)
+    boostWarmupDraftMesh.position.set(0, 0, 0)
+    boostWarmupGroup.add(boostWarmupDraftMesh)
+
+    boostWarmupTrailMaterial = createBoostTrailMaterial()
+    boostWarmupTrailMaterial.opacity = 0
+    boostWarmupTrailMaterial.transparent = true
+    boostWarmupTrailGeometry = new THREE.BufferGeometry()
+    const warmPositions = new Float32Array([
+      -0.01, 0.0, 0.0,
+      0.01, 0.0, 0.0,
+      -0.01, 0.01, 0.0,
+      0.01, 0.01, 0.0,
+    ])
+    const warmUvs = new Float32Array([0, 0, 1, 0, 0, 1, 1, 1])
+    boostWarmupTrailGeometry.setAttribute('position', new THREE.BufferAttribute(warmPositions, 3))
+    boostWarmupTrailGeometry.setAttribute('uv', new THREE.BufferAttribute(warmUvs, 2))
+    if (webglShaderHooksEnabled) {
+      const warmProgress = new Float32Array([0, 0, 1, 1])
+      boostWarmupTrailGeometry.setAttribute('trailProgress', new THREE.BufferAttribute(warmProgress, 1))
+    }
+    boostWarmupTrailGeometry.setIndex([0, 2, 1, 1, 2, 3])
+    const boostWarmupTrailMesh = new THREE.Mesh(boostWarmupTrailGeometry, boostWarmupTrailMaterial)
+    boostWarmupTrailMesh.renderOrder = 1
+    boostWarmupTrailMesh.scale.setScalar(0.01)
+    boostWarmupTrailMesh.position.set(0, 0, 0)
+    boostWarmupGroup.add(boostWarmupTrailMesh)
+
+    try {
+      renderer.render(scene, camera)
+    } catch {
+      // Ignore warm-up failures; gameplay will still render (possibly with a first-boost stutter).
+    }
+
+    boostWarmupGroup.visible = false
+  }
+
+  warmBoostPipelinesOnce()
+
   const createBoostTrail = (): BoostTrailState => {
+    const pooled = boostTrailPool.pop() ?? null
+    if (pooled) {
+      pooled.mesh.visible = false
+      pooled.mesh.geometry.setDrawRange(0, 0)
+      pooled.samples.length = 0
+      pooled.boosting = false
+      pooled.retiring = false
+      pooled.retireStartedAt = 0
+      pooled.retireInitialCount = 0
+      pooled.retireCut = 0
+      pooled.dirty = false
+      const materialUserData = pooled.mesh.material.userData as BoostTrailMaterialUserData
+      materialUserData.retireCut = 0
+      if (materialUserData.retireCutUniform) {
+        materialUserData.retireCutUniform.value = 0
+      }
+      boostTrailsGroup.add(pooled.mesh)
+      return pooled
+    }
+
     const material = createBoostTrailMaterial()
-    const mesh = new THREE.Mesh(new THREE.BufferGeometry(), material)
+    const geometry = new THREE.BufferGeometry()
+    const positionArray = new Float32Array(BOOST_TRAIL_MAX_VERTEX_COUNT * 3)
+    const uvArray = new Float32Array(BOOST_TRAIL_MAX_VERTEX_COUNT * 2)
+    const trailProgressArray = webglShaderHooksEnabled ? new Float32Array(BOOST_TRAIL_MAX_VERTEX_COUNT) : null
+    const indexArray = new Uint16Array(BOOST_TRAIL_MAX_INDEX_COUNT)
+
+    const positionAttr = new THREE.BufferAttribute(positionArray, 3)
+    positionAttr.setUsage(THREE.DynamicDrawUsage)
+    const uvAttr = new THREE.BufferAttribute(uvArray, 2)
+    uvAttr.setUsage(THREE.DynamicDrawUsage)
+    geometry.setAttribute('position', positionAttr)
+    geometry.setAttribute('uv', uvAttr)
+    let trailProgressAttr: THREE.BufferAttribute | null = null
+    if (webglShaderHooksEnabled && trailProgressArray) {
+      trailProgressAttr = new THREE.BufferAttribute(trailProgressArray, 1)
+      trailProgressAttr.setUsage(THREE.DynamicDrawUsage)
+      geometry.setAttribute('trailProgress', trailProgressAttr)
+    }
+    const indexAttr = new THREE.BufferAttribute(indexArray, 1)
+    indexAttr.setUsage(THREE.DynamicDrawUsage)
+    geometry.setIndex(indexAttr)
+    geometry.setDrawRange(0, 0)
+    // Avoid recomputing bounds on every rebuild. Trails are always on the planet surface.
+    geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), PLANET_RADIUS + 2)
+
+    const mesh = new THREE.Mesh(geometry, material)
     mesh.visible = false
     mesh.renderOrder = 1
     boostTrailsGroup.add(mesh)
+    const projectedPoints: THREE.Vector3[] = new Array(BOOST_TRAIL_MAX_CENTER_POINTS)
+    for (let i = 0; i < projectedPoints.length; i += 1) {
+      projectedPoints[i] = new THREE.Vector3()
+    }
+    const curvePoints: THREE.Vector3[] = []
+    const curve = new THREE.CatmullRomCurve3(
+      [new THREE.Vector3(), new THREE.Vector3()],
+      false,
+      'centripetal',
+      0.25,
+    )
     return {
       mesh,
       samples: [],
@@ -5040,13 +5167,43 @@ diffuseColor.a *= retireEdge;`,
       retireInitialCount: 0,
       retireCut: 0,
       dirty: false,
+      curve,
+      curvePoints,
+      projectedPoints,
+      positionAttr,
+      uvAttr,
+      trailProgressAttr,
+      indexAttr,
     }
   }
 
-  const removeBoostTrail = (trail: BoostTrailState) => {
+  const disposeBoostTrail = (trail: BoostTrailState) => {
     boostTrailsGroup.remove(trail.mesh)
     trail.mesh.geometry.dispose()
     trail.mesh.material.dispose()
+  }
+
+  const recycleBoostTrail = (trail: BoostTrailState) => {
+    boostTrailsGroup.remove(trail.mesh)
+    trail.mesh.visible = false
+    trail.mesh.geometry.setDrawRange(0, 0)
+    trail.samples.length = 0
+    trail.boosting = false
+    trail.retiring = false
+    trail.retireStartedAt = 0
+    trail.retireInitialCount = 0
+    trail.retireCut = 0
+    trail.dirty = false
+    const materialUserData = trail.mesh.material.userData as BoostTrailMaterialUserData
+    materialUserData.retireCut = 0
+    if (materialUserData.retireCutUniform) {
+      materialUserData.retireCutUniform.value = 0
+    }
+    if (boostTrailPool.length >= BOOST_TRAIL_POOL_MAX) {
+      disposeBoostTrail(trail)
+      return
+    }
+    boostTrailPool.push(trail)
   }
 
   const setBoostTrailRetireCut = (trail: BoostTrailState) => {
@@ -5106,7 +5263,6 @@ diffuseColor.a *= retireEdge;`,
     if (trail.retiring) {
       trail.retireInitialCount = Math.max(1, trail.samples.length)
     }
-    markBoostTrailDirty(trail)
   }
 
   const pushBoostTrailSample = (
@@ -5171,7 +5327,10 @@ diffuseColor.a *= retireEdge;`,
     trail.retireInitialCount = trail.samples.length
     if (trail.retireCut !== 0) {
       trail.retireCut = 0
-      markBoostTrailDirty(trail)
+      if (!webglShaderHooksEnabled) {
+        // WebGPU fallback encodes retire fade in UVs, so it needs a geometry rebuild.
+        markBoostTrailDirty(trail)
+      }
     }
   }
 
@@ -5182,12 +5341,14 @@ diffuseColor.a *= retireEdge;`,
     const t = durationMs > 0 ? clamp(elapsed / durationMs, 0, 1) : 1
     if (Math.abs(trail.retireCut - t) > 1e-4) {
       trail.retireCut = t
-      markBoostTrailDirty(trail)
+      if (!webglShaderHooksEnabled) {
+        // WebGPU fallback encodes retire fade in UVs, so it needs a geometry rebuild.
+        markBoostTrailDirty(trail)
+      }
     }
     if (t >= 1 || trail.samples.length === 0) {
       if (trail.samples.length > 0) {
         trail.samples.length = 0
-        markBoostTrailDirty(trail)
       }
       trail.retiring = false
       trail.retireInitialCount = 0
@@ -5201,44 +5362,41 @@ diffuseColor.a *= retireEdge;`,
     const points = trail.samples
     if (points.length < 2) {
       trail.mesh.visible = false
+      trail.mesh.geometry.setDrawRange(0, 0)
       return
     }
 
-    const curvePoints = points.map((sample) => sample.point.clone())
-    const curve = new THREE.CatmullRomCurve3(curvePoints, false, 'centripetal', 0.25)
+    const curvePoints = trail.curvePoints
+    curvePoints.length = points.length
+    for (let i = 0; i < points.length; i += 1) {
+      curvePoints[i] = points[i].point
+    }
+    trail.curve.points = curvePoints
     const curveSegments = Math.max(
       8,
-      Math.min(512, (curvePoints.length - 1) * BOOST_TRAIL_CURVE_SEGMENTS_PER_POINT),
+      Math.min(BOOST_TRAIL_MAX_CURVE_SEGMENTS, (curvePoints.length - 1) * BOOST_TRAIL_CURVE_SEGMENTS_PER_POINT),
     )
-    const linePoints = curve.getPoints(curveSegments)
-    if (linePoints.length < 2) {
-      trail.mesh.visible = false
-      return
-    }
-    const projectedPoints = linePoints.map((point) => {
-      trailReprojectNormalTemp.copy(point)
+    const centerCount = curveSegments + 1
+    const projectedPoints = trail.projectedPoints
+    for (let i = 0; i < centerCount; i += 1) {
+      const t = curveSegments > 0 ? i / curveSegments : 0
+      trail.curve.getPoint(t, trailReprojectPointTemp)
+      trailReprojectNormalTemp.copy(trailReprojectPointTemp)
       if (trailReprojectNormalTemp.lengthSq() <= 1e-10) {
-        return point.clone()
+        projectedPoints[i].copy(trailReprojectPointTemp)
+        continue
       }
       trailReprojectNormalTemp.normalize()
-      getTrailSurfacePointFromNormal(trailReprojectNormalTemp, trailReprojectPointTemp)
-      return trailReprojectPointTemp.clone()
-    })
-    const centerCount = projectedPoints.length
-    const vertexCount = centerCount * 2
-    if (centerCount < 2) {
-      trail.mesh.visible = false
-      return
+      getTrailSurfacePointFromNormal(trailReprojectNormalTemp, projectedPoints[i])
     }
 
-    const positionArray = new Float32Array(vertexCount * 3)
-    const uvArray = new Float32Array(vertexCount * 2)
-    const trailProgressArray = new Float32Array(vertexCount)
+    const positionArray = trail.positionAttr.array as Float32Array
+    const uvArray = trail.uvAttr.array as Float32Array
+    const trailProgressArray = trail.trailProgressAttr
+      ? (trail.trailProgressAttr.array as Float32Array)
+      : null
+    const indexArray = trail.indexAttr.array as Uint16Array
     const segmentCount = centerCount - 1
-    const indexArray =
-      vertexCount > 65535
-        ? new Uint32Array(segmentCount * 6)
-        : new Uint16Array(segmentCount * 6)
     const halfWidth = BOOST_TRAIL_WIDTH * 0.5
     const retireCut = trail.retiring ? clamp(trail.retireCut, 0, 0.9999) : 0
     const retireFadeEnd = trail.retiring
@@ -5250,6 +5408,7 @@ diffuseColor.a *= retireEdge;`,
       const center = projectedPoints[i]
       const prev = i > 0 ? projectedPoints[i - 1] : null
       const next = i < centerCount - 1 ? projectedPoints[i + 1] : null
+      if (!center) continue
       trailReprojectNormalTemp.copy(center)
       if (trailReprojectNormalTemp.lengthSq() <= 1e-10) {
         trailReprojectNormalTemp.set(0, 1, 0)
@@ -5311,7 +5470,9 @@ diffuseColor.a *= retireEdge;`,
       positionArray[leftVertexIndex * 3 + 2] = trailOffsetTemp.z
       uvArray[leftVertexIndex * 2] = u
       uvArray[leftVertexIndex * 2 + 1] = 0
-      trailProgressArray[leftVertexIndex] = baseU
+      if (trailProgressArray) {
+        trailProgressArray[leftVertexIndex] = baseU
+      }
 
       trailOffsetTemp.copy(center).addScaledVector(trailSideTemp, -halfWidth)
       trailReprojectPointTemp.copy(trailOffsetTemp)
@@ -5326,7 +5487,9 @@ diffuseColor.a *= retireEdge;`,
       positionArray[rightVertexIndex * 3 + 2] = trailOffsetTemp.z
       uvArray[rightVertexIndex * 2] = u
       uvArray[rightVertexIndex * 2 + 1] = 1
-      trailProgressArray[rightVertexIndex] = baseU
+      if (trailProgressArray) {
+        trailProgressArray[rightVertexIndex] = baseU
+      }
     }
 
     let indexOffset = 0
@@ -5344,16 +5507,13 @@ diffuseColor.a *= retireEdge;`,
       indexOffset += 6
     }
 
-    const geometry = new THREE.BufferGeometry()
-    geometry.setAttribute('position', new THREE.BufferAttribute(positionArray, 3))
-    geometry.setAttribute('uv', new THREE.BufferAttribute(uvArray, 2))
-    if (webglShaderHooksEnabled) {
-      geometry.setAttribute('trailProgress', new THREE.BufferAttribute(trailProgressArray, 1))
+    trail.mesh.geometry.setDrawRange(0, segmentCount * 6)
+    trail.positionAttr.needsUpdate = true
+    trail.uvAttr.needsUpdate = true
+    if (trail.trailProgressAttr) {
+      trail.trailProgressAttr.needsUpdate = true
     }
-    geometry.setIndex(new THREE.BufferAttribute(indexArray, 1))
-    geometry.computeBoundingSphere()
-    trail.mesh.geometry.dispose()
-    trail.mesh.geometry = geometry
+    trail.indexAttr.needsUpdate = true
     trail.mesh.visible = true
   }
 
@@ -5364,7 +5524,7 @@ diffuseColor.a *= retireEdge;`,
       setBoostTrailRetireCut(trail)
       rebuildBoostTrailGeometry(trail)
       if (!trail.boosting && !trail.retiring && trail.samples.length === 0) {
-        removeBoostTrail(trail)
+        recycleBoostTrail(trail)
         trails.splice(i, 1)
       }
     }
@@ -5403,7 +5563,10 @@ diffuseColor.a *= retireEdge;`,
         activeTrail.retireInitialCount = 0
         if (activeTrail.retireCut !== 0) {
           activeTrail.retireCut = 0
-          markBoostTrailDirty(activeTrail)
+          if (!webglShaderHooksEnabled) {
+            // WebGPU fallback encodes retire fade in UVs, so it needs a geometry rebuild.
+            markBoostTrailDirty(activeTrail)
+          }
         }
       }
       if (tailContactNormal) {
@@ -7557,16 +7720,17 @@ diffuseColor.a *= retireEdge;`,
     viewAngle: number,
   ) => {
     pelletIdsSeen.clear()
-    pelletVisibleIds.clear()
     for (let i = 0; i < PELLET_BUCKET_COUNT; i += 1) {
       pelletBucketCounts[i] = 0
       pelletBucketOffsets[i] = 0
+      pelletBucketPositionArrays[i] = null
     }
 
     // Keep large glow sprites stable near the horizon while culling the far hemisphere.
     const visibleLimit = Math.min(Math.PI - 1e-4, viewAngle + PELLET_GLOW_HORIZON_MARGIN)
     const minDirectionDot = Math.cos(visibleLimit)
     const forcedVisiblePelletId = override?.id ?? null
+    let visibleCount = 0
 
     for (let i = 0; i < pellets.length; i += 1) {
       const pellet = pellets[i]
@@ -7577,10 +7741,9 @@ diffuseColor.a *= retireEdge;`,
       }
       const bucketIndex = pelletBucketIndex(pellet.colorIndex, pellet.size)
       pelletBucketCounts[bucketIndex] += 1
-      pelletVisibleIds.add(pellet.id)
+      visibleCount += 1
     }
 
-    const bucketPositions: Array<Float32Array | null> = new Array(PELLET_BUCKET_COUNT).fill(null)
     for (let bucketIndex = 0; bucketIndex < PELLET_BUCKET_COUNT; bucketIndex += 1) {
       const required = pelletBucketCounts[bucketIndex]
       const bucket = pelletBuckets[bucketIndex]
@@ -7600,21 +7763,26 @@ diffuseColor.a *= retireEdge;`,
       nextBucket.innerGlowPoints.visible = true
       nextBucket.glowPoints.visible = true
       nextBucket.corePoints.geometry.setDrawRange(0, required)
-      bucketPositions[bucketIndex] = nextBucket.positionAttribute.array as Float32Array
+      pelletBucketPositionArrays[bucketIndex] = nextBucket.positionAttribute.array as Float32Array
     }
 
     for (let i = 0; i < pellets.length; i += 1) {
       const pellet = pellets[i]
-      if (!pelletVisibleIds.has(pellet.id)) continue
+      const forceVisible = forcedVisiblePelletId !== null && pellet.id === forcedVisiblePelletId
+      if (!forceVisible && !isPelletNearSide(pellet, cameraLocalDir, minDirectionDot)) {
+        continue
+      }
       const bucketIndex = pelletBucketIndex(pellet.colorIndex, pellet.size)
-      const positions = bucketPositions[bucketIndex]
+      const positions = pelletBucketPositionArrays[bucketIndex]
       if (!positions) continue
 
       if (override && override.id === pellet.id) {
         tempVector.copy(override.position)
       } else {
         getPelletSurfacePosition(pellet, tempVector)
-        applyPelletWobble(pellet, tempVector, timeSeconds)
+        if (visibleCount <= PELLET_WOBBLE_DISABLE_VISIBLE_THRESHOLD) {
+          applyPelletWobble(pellet, tempVector, timeSeconds)
+        }
       }
 
       const itemIndex = pelletBucketOffsets[bucketIndex]
@@ -8311,6 +8479,22 @@ diffuseColor.a *= retireEdge;`,
 
   const dispose = () => {
     renderer.dispose()
+    if (boostWarmupGroup) {
+      world.remove(boostWarmupGroup)
+      boostWarmupGroup = null
+    }
+    if (boostWarmupTrailGeometry) {
+      boostWarmupTrailGeometry.dispose()
+      boostWarmupTrailGeometry = null
+    }
+    if (boostWarmupTrailMaterial) {
+      boostWarmupTrailMaterial.dispose()
+      boostWarmupTrailMaterial = null
+    }
+    if (boostWarmupDraftMaterial) {
+      boostWarmupDraftMaterial.dispose()
+      boostWarmupDraftMaterial = null
+    }
     disposeEnvironment()
     camera.remove(skyGroup)
     skyDomeGeometry.dispose()
@@ -8371,18 +8555,21 @@ diffuseColor.a *= retireEdge;`,
     pelletGroundCache.clear()
     pelletMotionStates.clear()
     pelletIdsSeen.clear()
-    pelletVisibleIds.clear()
     for (const [id, visual] of snakes) {
       removeSnake(visual, id)
     }
     snakes.clear()
     for (const trails of boostTrails.values()) {
       for (const trail of trails) {
-        removeBoostTrail(trail)
+        disposeBoostTrail(trail)
       }
     }
     boostTrails.clear()
     boostTrailAlphaTexture?.dispose()
+    for (const trail of boostTrailPool) {
+      disposeBoostTrail(trail)
+    }
+    boostTrailPool.length = 0
 
     if ((debugEnabled || perfDebugEnabled) && typeof window !== 'undefined') {
       const debugWindow = window as Window & { __SNAKE_DEBUG__?: unknown }

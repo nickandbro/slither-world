@@ -1439,23 +1439,27 @@ export default function App() {
 	          let afterSnapshotMs = 0
 	          let afterCameraMs = 0
 	          let afterRenderMs = 0
-	          let afterHudMs = 0
-	          let afterDebugMs = 0
-	          if (config && webgl) {
-	            nowMs = performance.now()
-	            if (rafPerfEnabled) {
-	              frameStartMs = nowMs
+		          let afterHudMs = 0
+		          let afterDebugMs = 0
+		          let snapshotPlayerCount = 0
+		          let snapshotPelletCount = 0
+		          if (config && webgl) {
+		            nowMs = performance.now()
+		            if (rafPerfEnabled) {
+		              frameStartMs = nowMs
 	            }
 		            const lastRenderFrameMs = lastRenderFrameMsRef.current
 		            const frameDeltaSeconds =
 		              lastRenderFrameMs !== null ? Math.max(0, Math.min(0.1, (nowMs - lastRenderFrameMs) / 1000)) : 1 / 60
 		            lastRenderFrameMsRef.current = nowMs
-		            const localId = playerIdRef.current
-		            const rawSnapshot = getRenderSnapshot()
-		            const snapshot = stabilizeLocalSnapshot(rawSnapshot, localId, frameDeltaSeconds)
-		            if (rafPerfEnabled) {
-		              afterSnapshotMs = performance.now()
-		            }
+			            const localId = playerIdRef.current
+			            const rawSnapshot = getRenderSnapshot()
+			            const snapshot = stabilizeLocalSnapshot(rawSnapshot, localId, frameDeltaSeconds)
+			            snapshotPlayerCount = snapshot?.players.length ?? 0
+			            snapshotPelletCount = snapshot?.pellets.length ?? 0
+			            if (rafPerfEnabled) {
+			              afterSnapshotMs = performance.now()
+			            }
 		            const localSnapshotPlayer =
 		              snapshot?.players.find((player) => player.id === localId) ?? null
 		            const rawSnapshotPlayer =
@@ -2198,21 +2202,80 @@ export default function App() {
 	                rafPerf.slowFrames.splice(0, rafPerf.slowFrames.length - RAF_SLOW_FRAMES_MAX)
 	              }
 
-	              // Throttle warnings to avoid turning perf debugging into the perf problem.
-	              if (nowMs - rafPerf.lastSlowLogMs >= 1000) {
-	                rafPerf.lastSlowLogMs = nowMs
-	                console.warn(
-	                  `[raf] slow frame ${totalMs.toFixed(1)}ms (snapshot ${snapshotMs.toFixed(
-	                    1,
-	                  )}ms camera ${cameraMs.toFixed(1)}ms render ${renderMs.toFixed(
-	                    1,
-	                  )}ms hud ${hudMs.toFixed(1)}ms debug ${debugMs.toFixed(1)}ms tail ${tailMs.toFixed(1)}ms)`,
-	                )
-	              }
-	            }
-	          }
-	          frameId = window.requestAnimationFrame(renderLoop)
-	        }
+		              // Throttle warnings to avoid turning perf debugging into the perf problem.
+		              if (nowMs - rafPerf.lastSlowLogMs >= 1000) {
+		                rafPerf.lastSlowLogMs = nowMs
+		                console.warn(
+		                  `[raf] slow frame ${totalMs.toFixed(1)}ms (snapshot ${snapshotMs.toFixed(
+		                    1,
+		                  )}ms camera ${cameraMs.toFixed(1)}ms render ${renderMs.toFixed(
+		                    1,
+		                  )}ms hud ${hudMs.toFixed(1)}ms debug ${debugMs.toFixed(1)}ms tail ${tailMs.toFixed(1)}ms)`,
+		                )
+		                try {
+		                  const debugApi = (
+		                    window as Window & { __SNAKE_DEBUG__?: Record<string, unknown> }
+		                  ).__SNAKE_DEBUG__
+		                  const getRenderPerfInfo = debugApi && (debugApi as { getRenderPerfInfo?: unknown }).getRenderPerfInfo
+		                  if (typeof getRenderPerfInfo === 'function') {
+		                    const perf = (getRenderPerfInfo as () => { lastFrame?: unknown })()
+		                    const frame = perf?.lastFrame as
+		                      | {
+		                          totalMs: number
+		                          setupMs: number
+		                          snakesMs: number
+		                          pelletsMs: number
+		                          visibilityMs: number
+		                          waterMs: number
+		                          passWorldMs: number
+		                          passOccludersMs: number
+		                          passPelletsMs: number
+		                          passDepthRebuildMs: number
+		                          passLakesMs: number
+		                        }
+		                      | null
+		                    const getRendererInfo =
+		                      debugApi && (debugApi as { getRendererInfo?: unknown }).getRendererInfo
+		                    const rendererInfo =
+		                      typeof getRendererInfo === 'function'
+		                        ? (getRendererInfo as () => { activeBackend?: string; webglShaderHooksEnabled?: boolean })()
+		                        : null
+		                    if (frame) {
+		                      console.warn(
+		                        `[render] backend=${rendererInfo?.activeBackend ?? 'unknown'} hooks=${
+		                          typeof rendererInfo?.webglShaderHooksEnabled === 'boolean'
+		                            ? rendererInfo.webglShaderHooksEnabled
+		                              ? 1
+		                              : 0
+		                            : '?'
+		                        } total=${frame.totalMs.toFixed(1)}ms setup=${frame.setupMs.toFixed(
+		                          1,
+		                        )} snakes=${frame.snakesMs.toFixed(1)} pellets=${frame.pelletsMs.toFixed(
+		                          1,
+		                        )} vis=${frame.visibilityMs.toFixed(1)} water=${frame.waterMs.toFixed(
+		                          1,
+		                        )} passWorld=${frame.passWorldMs.toFixed(
+		                          1,
+		                        )} passOcc=${frame.passOccludersMs.toFixed(
+		                          1,
+		                        )} passPel=${frame.passPelletsMs.toFixed(
+		                          1,
+		                        )} passDepth=${frame.passDepthRebuildMs.toFixed(
+		                          1,
+		                        )} passLakes=${frame.passLakesMs.toFixed(1)} players=${
+		                          snapshotPlayerCount
+		                        } pellets=${snapshotPelletCount}`,
+		                      )
+		                    }
+		                  }
+		                } catch {
+		                  // Ignore perf log errors; raf perf is opt-in debug-only.
+		                }
+		              }
+		            }
+		          }
+		          frameId = window.requestAnimationFrame(renderLoop)
+		        }
 
         renderLoop()
       } catch (error) {
