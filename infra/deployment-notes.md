@@ -16,9 +16,16 @@
 
 ## Current Runtime Image
 - Backend image in use:
-  - `ghcr.io/nickandbro/slither-world-backend:prod-20260208-ccdeb07`
+  - `ghcr.io/nickandbro/slither-world-backend:prod-20260210-84f6dfa`
 
-## Latest Deploy (2026-02-08)
+## Latest Deploy (2026-02-10)
+- Control-plane container restarted on `snake-control-prod` to `prod-20260210-84f6dfa` and `ROOM_IMAGE` updated to match.
+- Worker deployed (`snake-game`) version id: `35346354-fc41-474a-9535-8d60b0a5b24e`.
+- Verification:
+  - `POST https://slitherworld.com/api/matchmake` returns `200`.
+  - WebSocket upgrade via `https://slitherworld.com/api/room/:room?rt=...` returns `101`.
+
+## Deploy (2026-02-08)
 - Control-plane container restarted on `snake-control-prod` to `prod-20260208-ccdeb07` and `ROOM_IMAGE` updated to match.
 - Worker deployed (`snake-game`) version id: `c4f59b01-c616-45c8-99be-5a39f5dca1ad`.
 - Room fleet rollout note:
