@@ -2098,6 +2098,43 @@ export const createScene = async (
 ): Promise<RenderScene> => {
   const renderer = await createRenderer(canvas, activeBackend)
   const webglShaderHooksEnabled = activeBackend === 'webgl'
+  const webgpuOffscreenEnabled = activeBackend === 'webgpu'
+
+  // WebGPURenderer runs an internal output conversion pass when rendering to the canvas.
+  // Our world render is multi-pass; rendering everything into an explicit RenderTarget keeps
+  // depth consistent between passes (so pellet glow never sees terrain depth) and presents once.
+  let webgpuWorldTarget: THREE.RenderTarget | null = null
+  let webgpuPresentScene: THREE.Scene | null = null
+  let webgpuPresentCamera: THREE.OrthographicCamera | null = null
+  let webgpuPresentMaterial: THREE.MeshBasicMaterial | null = null
+  let webgpuPresentQuad: THREE.Mesh | null = null
+
+  if (webgpuOffscreenEnabled) {
+    webgpuWorldTarget = new THREE.RenderTarget(1, 1, {
+      depthBuffer: true,
+      stencilBuffer: false,
+      // Match canvas AA when possible. Still cheaper than multiple canvas renders.
+      samples: 4,
+      // Keep offscreen output linear; final present pass handles output conversion.
+      colorSpace: THREE.LinearSRGBColorSpace,
+    })
+    webgpuWorldTarget.texture.name = 'snake_world_target'
+    webgpuWorldTarget.texture.colorSpace = THREE.LinearSRGBColorSpace
+
+    webgpuPresentScene = new THREE.Scene()
+    webgpuPresentCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
+    webgpuPresentMaterial = new THREE.MeshBasicMaterial({
+      map: webgpuWorldTarget.texture,
+      toneMapped: false,
+      depthTest: false,
+      depthWrite: false,
+      transparent: true,
+      blending: THREE.NoBlending,
+    })
+    webgpuPresentQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), webgpuPresentMaterial)
+    webgpuPresentQuad.frustumCulled = false
+    webgpuPresentScene.add(webgpuPresentQuad)
+  }
 
   const scene = new THREE.Scene()
   const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 20)
@@ -2705,6 +2742,10 @@ export const createScene = async (
 
   // WebGPU does not support variable-size point primitives, so render pellets via instanced sprites.
   const pelletsUseSprites = activeBackend === 'webgpu'
+  // Avoid mid-game resizes (and the associated pipeline/binding churn) by giving WebGPU buckets a
+  // reasonable initial capacity. Per-bucket counts tend to be in the tens/low-hundreds even during
+  // mass deaths, so 128 is a good tradeoff.
+  const PELLET_SPRITE_BUCKET_MIN_CAPACITY = 128
 
   const PELLET_COLOR_BUCKET_COUNT = PELLET_COLORS.length
   const PELLET_BUCKET_COUNT = PELLET_COLOR_BUCKET_COUNT * PELLET_SIZE_TIER_MULTIPLIERS.length
@@ -2730,6 +2771,7 @@ export const createScene = async (
   const RENDER_PASS_PELLET_OCCLUDERS = 1
   const RENDER_PASS_PELLETS_ONLY = 2
   const RENDER_PASS_LAKES_ONLY = 3
+  const RENDER_PASS_TERRAIN_DEPTH_FILL = 4
   const worldChildVisibilityScratch: boolean[] = []
   const hiddenSnakeDepthObjects: THREE.Object3D[] = []
   let treeTierGeometries: THREE.BufferGeometry[] = []
@@ -2784,6 +2826,7 @@ export const createScene = async (
   const pelletIdsSeen = new Set<number>()
   let viewportWidth = 1
   let viewportHeight = 1
+  let viewportDpr = 1
   let lastFrameTime = performance.now()
 
   const snakes = new Map<string, SnakeVisual>()
@@ -8020,7 +8063,7 @@ diffuseColor.a *= retireEdge;`,
     const targetCapacity = Math.max(1, required)
     let bucket = pelletBuckets[bucketIndex]
     if (!bucket) {
-      let capacity = 1
+      let capacity = pelletsUseSprites ? PELLET_SPRITE_BUCKET_MIN_CAPACITY : 1
       while (capacity < targetCapacity) {
         capacity *= 2
       }
@@ -8467,13 +8510,13 @@ diffuseColor.a *= retireEdge;`,
     skyVisible: boolean,
     overrideMaterial: THREE.Material | null = null,
     clearDepth = false,
-  ) => {
-    const savedSkyVisible = skyGroup.visible
-    const savedOverrideMaterial = scene.overrideMaterial
-    const worldChildCount = world.children.length
-    if (worldChildVisibilityScratch.length < worldChildCount) {
-      worldChildVisibilityScratch.length = worldChildCount
-    }
+	  ) => {
+	    const savedSkyVisible = skyGroup.visible
+	    const savedOverrideMaterial = scene.overrideMaterial
+	    const worldChildCount = world.children.length
+	    if (worldChildVisibilityScratch.length < worldChildCount) {
+	      worldChildVisibilityScratch.length = worldChildCount
+	    }
     for (let i = 0; i < worldChildCount; i += 1) {
       const child = world.children[i]
       const wasVisible = child.visible
@@ -8487,18 +8530,23 @@ diffuseColor.a *= retireEdge;`,
         includeChild = child === pelletsGroup
       } else if (mode === RENDER_PASS_LAKES_ONLY) {
         includeChild = isLakeMesh(child)
+      } else if (mode === RENDER_PASS_TERRAIN_DEPTH_FILL) {
+        // Used after the pellet occluder depth pass to restore terrain depth without re-rendering
+        // expensive environment/snake occluders.
+        includeChild = child instanceof THREE.Mesh && !isLakeMesh(child)
       }
       child.visible = wasVisible && includeChild
     }
 
-    skyGroup.visible = savedSkyVisible && skyVisible
-    scene.overrideMaterial = overrideMaterial ?? null
-    if (clearDepth) {
-      renderer.clearDepth()
-    }
-    renderer.render(scene, camera)
-    scene.overrideMaterial = savedOverrideMaterial
-    skyGroup.visible = savedSkyVisible
+	    skyGroup.visible = savedSkyVisible && skyVisible
+	    scene.overrideMaterial = overrideMaterial ?? null
+	    if (clearDepth) {
+	      // Clear depth only, preserving the already-rendered color buffer.
+	      renderer.clear(false, true, false)
+	    }
+	    renderer.render(scene, camera)
+	    scene.overrideMaterial = savedOverrideMaterial
+	    skyGroup.visible = savedSkyVisible
 
     for (let i = 0; i < worldChildCount; i += 1) {
       const child = world.children[i]
@@ -8918,20 +8966,40 @@ diffuseColor.a *= retireEdge;`,
 	      afterWaterMs = performance.now()
 	    }
 
-	    const savedAutoClear = renderer.autoClear
-	    renderer.autoClear = false
-	    renderer.clear()
-	    try {
-	      // Pass 1: Render the main world without pellets/lakes so pellet occlusion can be composited separately.
-	      let passStartMs = 0
-	      if (perfEnabled) {
-	        passStartMs = performance.now()
+		    const savedAutoClear = renderer.autoClear
+		    const savedRenderTarget =
+		      (renderer as unknown as { getRenderTarget?: () => unknown }).getRenderTarget?.() ??
+		      null
+		    const useWebgpuOffscreen =
+		      webgpuOffscreenEnabled &&
+		      webgpuWorldTarget !== null &&
+		      webgpuPresentScene !== null &&
+		      webgpuPresentCamera !== null
+
+		    if (useWebgpuOffscreen) {
+		      ;(renderer as unknown as { setRenderTarget?: (target: unknown) => void }).setRenderTarget?.(
+		        webgpuWorldTarget,
+		      )
+		    }
+
+		    renderer.autoClear = false
+		    renderer.clear()
+		    try {
+		      // Pass 1: Render the main world without pellets/lakes so pellet occlusion can be composited separately.
+		      let passStartMs = 0
+		      if (perfEnabled) {
+		        passStartMs = performance.now()
 	      }
 	      renderWorldPass(RENDER_PASS_WORLD_NO_PELLETS_LAKES, true)
 	      if (perfEnabled) {
 	        passWorldMs = performance.now() - passStartMs
 	      }
+
 	      // Passes 2-4 share the same snake-depth occluder mask to avoid duplicate snake scans.
+	      // This pass structure is required so pellet glow is not clipped by the terrain surface:
+	      // - Build depth from environment + opaque snakes (no planet)
+	      // - Render pellets against that depth
+	      // - Restore terrain depth for water overlays (without re-rendering environment/snakes)
 	      beginOpaqueSnakeDepthOccluders()
 	      try {
 	        // Pass 2: Build depth from terrain objects + opaque snakes (not planet) to occlude pellet glow.
@@ -8942,6 +9010,7 @@ diffuseColor.a *= retireEdge;`,
 	        if (perfEnabled) {
 	          passOccludersMs = performance.now() - passStartMs
 	        }
+
 	        // Pass 3: Render pellets against occluder depth for partial occlusion.
 	        if (perfEnabled) {
 	          passStartMs = performance.now()
@@ -8950,42 +9019,71 @@ diffuseColor.a *= retireEdge;`,
 	        if (perfEnabled) {
 	          passPelletsMs = performance.now() - passStartMs
 	        }
-	        // Pass 4: Rebuild full depth (including planet) so lake overlays depth-test correctly.
+
+	        // Pass 4: Restore depth for the terrain (and other non-environment meshes) so water overlays
+	        // depth-test correctly, but keep the already-rendered environment/snake depth.
 	        if (perfEnabled) {
 	          passStartMs = performance.now()
 	        }
-	        renderWorldPass(RENDER_PASS_WORLD_NO_PELLETS_LAKES, false, occluderDepthMaterial, true)
+	        renderWorldPass(RENDER_PASS_TERRAIN_DEPTH_FILL, false, occluderDepthMaterial)
 	        if (perfEnabled) {
 	          passDepthRebuildMs = performance.now() - passStartMs
 	        }
 	      } finally {
 	        endOpaqueSnakeDepthOccluders()
 	      }
+
 	      // Pass 5: Render lakes last so underwater pellets still read through the water surface overlay.
 	      if (perfEnabled) {
 	        passStartMs = performance.now()
 	      }
 	      renderWorldPass(RENDER_PASS_LAKES_ONLY, false)
-	      if (perfEnabled) {
-	        passLakesMs = performance.now() - passStartMs
-	      }
+		      if (perfEnabled) {
+		        passLakesMs = performance.now() - passStartMs
+		      }
 
-	        if (menuPreviewVisible && menuPreviewGroup.visible) {
-	          menuPreviewGroup.rotation.set(menuPreviewPitch, menuPreviewYaw, 0)
-	          renderer.clearDepth()
-	          renderer.render(menuPreviewScene, menuPreviewCamera)
-	        }
-	        if (pointerOverlayRoot.visible) {
-	          renderer.clearDepth()
-	          renderer.render(pointerOverlayScene, camera)
-	        }
-		    } finally {
-		      renderer.autoClear = savedAutoClear
+		      if (useWebgpuOffscreen) {
+		        // Keep overlays inside the offscreen world target so we only present once.
+		        if (menuPreviewVisible && menuPreviewGroup.visible) {
+		          menuPreviewGroup.rotation.set(menuPreviewPitch, menuPreviewYaw, 0)
+		          renderer.clear(false, true, false)
+		          renderer.render(menuPreviewScene, menuPreviewCamera)
+		        }
+		        if (pointerOverlayRoot.visible) {
+		          renderer.clear(false, true, false)
+		          renderer.render(pointerOverlayScene, camera)
+		        }
+		      } else {
+		        if (menuPreviewVisible && menuPreviewGroup.visible) {
+		          menuPreviewGroup.rotation.set(menuPreviewPitch, menuPreviewYaw, 0)
+		          renderer.clearDepth()
+		          renderer.render(menuPreviewScene, menuPreviewCamera)
+		        }
+		        if (pointerOverlayRoot.visible) {
+		          renderer.clearDepth()
+		          renderer.render(pointerOverlayScene, camera)
+		        }
+		      }
+			    } finally {
+			      renderer.autoClear = savedAutoClear
+			    }
+
+		    if (useWebgpuOffscreen) {
+		      ;(renderer as unknown as { setRenderTarget?: (target: unknown) => void }).setRenderTarget?.(
+		        null,
+		      )
+		      const savedPresentAutoClear = renderer.autoClear
+		      renderer.autoClear = true
+		      renderer.render(webgpuPresentScene!, webgpuPresentCamera!)
+		      renderer.autoClear = savedPresentAutoClear
+		      ;(renderer as unknown as { setRenderTarget?: (target: unknown) => void }).setRenderTarget?.(
+		        savedRenderTarget,
+		      )
 		    }
-	    if (perfEnabled) {
-	      const frameEndMs = performance.now()
-	      const totalMs = frameEndMs - perfStartMs
-	      const frame: RenderPerfFrame = {
+		    if (perfEnabled) {
+		      const frameEndMs = performance.now()
+		      const totalMs = frameEndMs - perfStartMs
+		      const frame: RenderPerfFrame = {
 	        tMs: now,
 	        totalMs,
 	        setupMs: afterSetupMs - perfStartMs,
@@ -9067,27 +9165,45 @@ diffuseColor.a *= retireEdge;`,
     dayNightDebugMode = 'auto'
   }
 
-  const resize = (width: number, height: number, dpr: number) => {
-    viewportWidth = width
-    viewportHeight = height
-    renderer.setPixelRatio(dpr)
-    renderer.setSize(width, height, false)
-    const safeHeight = height > 0 ? height : 1
-    const aspect = width / safeHeight
-    camera.aspect = aspect
-    camera.updateProjectionMatrix()
+	  const resize = (width: number, height: number, dpr: number) => {
+	    viewportWidth = width
+	    viewportHeight = height
+	    viewportDpr = Number.isFinite(dpr) && dpr > 0 ? dpr : 1
+	    renderer.setPixelRatio(dpr)
+	    renderer.setSize(width, height, false)
+	    if (webgpuWorldTarget) {
+	      const rtW = Math.max(1, Math.floor(width * viewportDpr))
+	      const rtH = Math.max(1, Math.floor(height * viewportDpr))
+	      webgpuWorldTarget.setSize(rtW, rtH)
+	    }
+	    const safeHeight = height > 0 ? height : 1
+	    const aspect = width / safeHeight
+	    camera.aspect = aspect
+	    camera.updateProjectionMatrix()
     menuPreviewCamera.aspect = aspect
     menuPreviewCamera.updateProjectionMatrix()
     // Keep the preview clear of the right-side skin UI panels on wide layouts.
     menuPreviewGroup.position.x = width > 920 ? -0.65 : 0
   }
 
-  const dispose = () => {
-    renderer.dispose()
-    if (boostWarmupGroup) {
-      world.remove(boostWarmupGroup)
-      boostWarmupGroup = null
-    }
+	  const dispose = () => {
+	    if (webgpuPresentQuad) {
+	      webgpuPresentQuad.geometry.dispose()
+	      webgpuPresentQuad = null
+	    }
+	    if (webgpuPresentMaterial) {
+	      webgpuPresentMaterial.dispose()
+	      webgpuPresentMaterial = null
+	    }
+	    if (webgpuWorldTarget) {
+	      webgpuWorldTarget.dispose()
+	      webgpuWorldTarget = null
+	    }
+	    renderer.dispose()
+	    if (boostWarmupGroup) {
+	      world.remove(boostWarmupGroup)
+	      boostWarmupGroup = null
+	    }
     if (boostWarmupTrailGeometry) {
       boostWarmupTrailGeometry.dispose()
       boostWarmupTrailGeometry = null
