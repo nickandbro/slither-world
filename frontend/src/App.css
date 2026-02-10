@@ -1015,6 +1015,12 @@ button:active {
   color: rgba(170, 193, 214, 0.9);
 }
 
+@media (pointer: coarse) {
+  .app--playing .control-panel {
+    display: none;
+  }
+}
+
 @media (max-width: 920px) {
   .skin-screen {
     grid-template-columns: 1fr;

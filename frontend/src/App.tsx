@@ -326,6 +326,17 @@ const TAIL_EVENT_LOG_LIMIT = 900
 const TAIL_RENDER_SAMPLE_INTERVAL_MS = 140
 const ARRIVAL_GAP_REENTRY_COOLDOWN_MS = 480
 const SCORE_RADIAL_DEPLETION_EPS = 0.05
+const TOUCH_BOOST_THRESHOLD_SCALE = 2.75
+const TOUCH_BOOST_ON_RATIO = 0.17
+const TOUCH_BOOST_OFF_RATIO = 0.14
+const TOUCH_BOOST_ON_PX_MIN = 60
+const TOUCH_BOOST_ON_PX_MAX = 160
+const TOUCH_BOOST_OFF_PX_MIN = 50
+const TOUCH_BOOST_OFF_PX_MAX = 150
+
+const PINCH_ZOOM_RATIO_MIN = 0.85
+const PINCH_ZOOM_RATIO_MAX = 1.15
+const PINCH_ZOOM_SENSITIVITY = 1
 
 const isSeqNewer = (next: number, current: number) => {
   const delta = (next - current) >>> 0
@@ -353,6 +364,12 @@ export default function App() {
     active: false,
     screenX: Number.NaN,
     screenY: Number.NaN,
+  })
+  const touchControlRef = useRef({
+    pointers: new Map<number, { x: number; y: number }>(),
+    pinchActive: false,
+    pinchPrevDistancePx: null as number | null,
+    boostWanted: false,
   })
   const boostInputRef = useRef({
     keyboard: false,
@@ -1361,6 +1378,10 @@ export default function App() {
     if (menuPhase !== 'playing') {
       pointerRef.current.active = false
       webglRef.current?.setPointerScreen?.(Number.NaN, Number.NaN, false)
+      touchControlRef.current.pointers.clear()
+      touchControlRef.current.pinchActive = false
+      touchControlRef.current.pinchPrevDistancePx = null
+      touchControlRef.current.boostWanted = false
       clearBoostInputs()
     }
     if (menuPhase === 'preplay' && !allowPreplayAutoResumeRef.current) {
@@ -2654,17 +2675,53 @@ export default function App() {
     }
   }, [])
 
+  const isTouchLikePointer = (event: React.PointerEvent<HTMLCanvasElement>) =>
+    event.pointerType === 'touch' || event.pointerType === 'pen'
+
+  const getViewportMinDim = () => {
+    const config = renderConfigRef.current
+    if (
+      config &&
+      Number.isFinite(config.width) &&
+      Number.isFinite(config.height) &&
+      config.width > 0 &&
+      config.height > 0
+    ) {
+      return Math.min(config.width, config.height)
+    }
+    const canvas = glCanvasRef.current
+    if (canvas) {
+      const rect = canvas.getBoundingClientRect()
+      if (rect.width > 0 && rect.height > 0) {
+        return Math.min(rect.width, rect.height)
+      }
+    }
+    return 0
+  }
+
+  const setPointerScreen = (x: number, y: number, active: boolean) => {
+    pointerRef.current.screenX = x
+    pointerRef.current.screenY = y
+    pointerRef.current.active = active
+    webglRef.current?.setPointerScreen?.(x, y, active)
+  }
+
+  const clearTouchState = () => {
+    const touch = touchControlRef.current
+    touch.pointers.clear()
+    touch.pinchActive = false
+    touch.pinchPrevDistancePx = null
+    touch.boostWanted = false
+  }
+
   const updatePointer = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const canvas = glCanvasRef.current
     if (!canvas) return
     const rect = canvas.getBoundingClientRect()
     const localX = event.clientX - rect.left
     const localY = event.clientY - rect.top
-    pointerRef.current.screenX = localX
-    pointerRef.current.screenY = localY
     const active = inputEnabledRef.current
-    pointerRef.current.active = active
-    webglRef.current?.setPointerScreen?.(localX, localY, active)
+    setPointerScreen(localX, localY, active)
   }
 
   const startInputLoop = () => {
@@ -2709,13 +2766,140 @@ export default function App() {
   const isPointerBoostButtonPressed = (event: React.PointerEvent<HTMLCanvasElement>) =>
     (event.buttons & (1 | 2)) !== 0
 
+  const updateTouchBoostGate = () => {
+    const touch = touchControlRef.current
+    if (!inputEnabledRef.current) {
+      touch.boostWanted = false
+      setPointerButtonBoostInput(false)
+      return
+    }
+
+    const head = headScreenRef.current
+    const pointerX = pointerRef.current.screenX
+    const pointerY = pointerRef.current.screenY
+    if (!head || !Number.isFinite(pointerX) || !Number.isFinite(pointerY)) {
+      touch.boostWanted = false
+      setPointerButtonBoostInput(false)
+      return
+    }
+
+    let minDim = getViewportMinDim()
+    if (!(minDim > 0)) minDim = 400
+    const thresholdOn = clamp(
+      minDim * TOUCH_BOOST_ON_RATIO * TOUCH_BOOST_THRESHOLD_SCALE,
+      TOUCH_BOOST_ON_PX_MIN * TOUCH_BOOST_THRESHOLD_SCALE,
+      TOUCH_BOOST_ON_PX_MAX * TOUCH_BOOST_THRESHOLD_SCALE,
+    )
+    const thresholdOff = clamp(
+      minDim * TOUCH_BOOST_OFF_RATIO * TOUCH_BOOST_THRESHOLD_SCALE,
+      TOUCH_BOOST_OFF_PX_MIN * TOUCH_BOOST_THRESHOLD_SCALE,
+      TOUCH_BOOST_OFF_PX_MAX * TOUCH_BOOST_THRESHOLD_SCALE,
+    )
+
+    const dist = Math.hypot(pointerX - head.x, pointerY - head.y)
+    const wanted = touch.boostWanted ? dist >= thresholdOff : dist >= thresholdOn
+    touch.boostWanted = wanted
+    setPointerButtonBoostInput(wanted)
+  }
+
+  const disableTouchSteeringAndBoost = () => {
+    touchControlRef.current.boostWanted = false
+    setPointerButtonBoostInput(false)
+    setPointerScreen(Number.NaN, Number.NaN, false)
+  }
+
+  const updatePinchZoom = () => {
+    if (!inputEnabledRef.current) return
+    const touch = touchControlRef.current
+    if (touch.pointers.size < 2) return
+
+    const iter = touch.pointers.values()
+    const a = iter.next().value as { x: number; y: number } | undefined
+    const b = iter.next().value as { x: number; y: number } | undefined
+    if (!a || !b) return
+
+    const dist = Math.hypot(a.x - b.x, a.y - b.y)
+    if (!Number.isFinite(dist) || dist <= 0) return
+
+    const prev = touch.pinchPrevDistancePx
+    if (prev !== null && Number.isFinite(prev) && prev > 0) {
+      let ratio = dist / prev
+      if (Number.isFinite(ratio) && ratio > 0) {
+        ratio = clamp(ratio, PINCH_ZOOM_RATIO_MIN, PINCH_ZOOM_RATIO_MAX)
+        const zoomFactor = Math.exp(-Math.log(ratio) * PINCH_ZOOM_SENSITIVITY)
+        cameraDistanceRef.current = clamp(
+          cameraDistanceRef.current * zoomFactor,
+          CAMERA_DISTANCE_MIN,
+          CAMERA_DISTANCE_MAX,
+        )
+      }
+    }
+    touch.pinchPrevDistancePx = dist
+  }
+
   const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId)
+    if (isTouchLikePointer(event)) {
+      if (event.cancelable) event.preventDefault()
+      const canvas = glCanvasRef.current
+      if (canvas) {
+        const rect = canvas.getBoundingClientRect()
+        const localX = event.clientX - rect.left
+        const localY = event.clientY - rect.top
+        touchControlRef.current.pointers.set(event.pointerId, { x: localX, y: localY })
+      }
+
+      const touch = touchControlRef.current
+      if (touch.pointers.size >= 2) {
+        touch.pinchActive = true
+        touch.pinchPrevDistancePx = null
+        disableTouchSteeringAndBoost()
+        updatePinchZoom()
+        return
+      }
+
+      touch.pinchActive = false
+      touch.pinchPrevDistancePx = null
+      updatePointer(event)
+      updateTouchBoostGate()
+      return
+    }
+
     updatePointer(event)
     setPointerButtonBoostInput(inputEnabledRef.current && isPointerBoostButtonPressed(event))
   }
 
   const handlePointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (isTouchLikePointer(event)) {
+      if (event.cancelable) event.preventDefault()
+      const canvas = glCanvasRef.current
+      if (canvas) {
+        const rect = canvas.getBoundingClientRect()
+        const localX = event.clientX - rect.left
+        const localY = event.clientY - rect.top
+        touchControlRef.current.pointers.set(event.pointerId, { x: localX, y: localY })
+      }
+
+      const touch = touchControlRef.current
+      if (touch.pointers.size >= 2) {
+        if (!touch.pinchActive) {
+          touch.pinchActive = true
+          touch.pinchPrevDistancePx = null
+          disableTouchSteeringAndBoost()
+        }
+        updatePinchZoom()
+        return
+      }
+
+      if (touch.pinchActive) {
+        touch.pinchActive = false
+        touch.pinchPrevDistancePx = null
+      }
+      updatePointer(event)
+      updateTouchBoostGate()
+      return
+    }
+
     updatePointer(event)
     setPointerButtonBoostInput(inputEnabledRef.current && isPointerBoostButtonPressed(event))
   }
@@ -2724,22 +2908,81 @@ export default function App() {
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
+    if (isTouchLikePointer(event)) {
+      if (event.cancelable) event.preventDefault()
+      const touch = touchControlRef.current
+      touch.pointers.delete(event.pointerId)
+
+      if (touch.pointers.size >= 2) {
+        touch.pinchActive = true
+        touch.pinchPrevDistancePx = null
+        disableTouchSteeringAndBoost()
+        updatePinchZoom()
+        return
+      }
+
+      if (touch.pointers.size === 1) {
+        touch.pinchActive = false
+        touch.pinchPrevDistancePx = null
+        const remaining = touch.pointers.values().next().value as { x: number; y: number } | undefined
+        if (remaining) {
+          const active = inputEnabledRef.current
+          setPointerScreen(remaining.x, remaining.y, active)
+          updateTouchBoostGate()
+          return
+        }
+      }
+
+      clearTouchState()
+      setPointerScreen(Number.NaN, Number.NaN, false)
+      setPointerButtonBoostInput(false)
+      return
+    }
+
     setPointerButtonBoostInput(inputEnabledRef.current && isPointerBoostButtonPressed(event))
   }
 
-  const handlePointerLeave = () => {
-    pointerRef.current.active = false
-    pointerRef.current.screenX = Number.NaN
-    pointerRef.current.screenY = Number.NaN
-    webglRef.current?.setPointerScreen?.(Number.NaN, Number.NaN, false)
+  const handlePointerLeave = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (isTouchLikePointer(event)) {
+      clearTouchState()
+    }
+    setPointerScreen(Number.NaN, Number.NaN, false)
     setPointerButtonBoostInput(false)
   }
 
-  const handlePointerCancel = () => {
-    pointerRef.current.active = false
-    pointerRef.current.screenX = Number.NaN
-    pointerRef.current.screenY = Number.NaN
-    webglRef.current?.setPointerScreen?.(Number.NaN, Number.NaN, false)
+  const handlePointerCancel = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+
+    if (isTouchLikePointer(event)) {
+      const touch = touchControlRef.current
+      touch.pointers.delete(event.pointerId)
+
+      if (touch.pointers.size >= 2) {
+        touch.pinchActive = true
+        touch.pinchPrevDistancePx = null
+        disableTouchSteeringAndBoost()
+        updatePinchZoom()
+        return
+      }
+
+      if (touch.pointers.size === 1) {
+        touch.pinchActive = false
+        touch.pinchPrevDistancePx = null
+        const remaining = touch.pointers.values().next().value as { x: number; y: number } | undefined
+        if (remaining) {
+          const active = inputEnabledRef.current
+          setPointerScreen(remaining.x, remaining.y, active)
+          updateTouchBoostGate()
+          return
+        }
+      }
+
+      clearTouchState()
+    }
+
+    setPointerScreen(Number.NaN, Number.NaN, false)
     setPointerButtonBoostInput(false)
   }
 
