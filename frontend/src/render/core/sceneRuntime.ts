@@ -753,6 +753,8 @@ export type RenderScene = {
   setMenuPreviewVisible: (visible: boolean) => void
   setMenuPreviewSkin: (colors: string[] | null, previewLen?: number) => void
   setMenuPreviewOrbit: (yaw: number, pitch: number) => void
+  // WebGPU-only quality knob (offscreen MSAA samples). No-op on WebGL.
+  setWebgpuWorldSamples?: (samples: number) => void
   setEnvironment: (environment: Environment) => void
   setDebugFlags: (flags: {
     mountainOutline?: boolean
@@ -2064,25 +2066,25 @@ const createRenderer = async (
   canvas: HTMLCanvasElement,
   backend: RendererBackend,
 ): Promise<THREE.WebGLRenderer | WebGPURenderer> => {
-  if (backend === 'webgpu') {
-    const renderer = new WebGPURenderer({
-      canvas,
-      antialias: true,
-      alpha: true,
-    })
-    renderer.outputColorSpace = THREE.SRGBColorSpace
-    renderer.toneMapping = THREE.ACESFilmicToneMapping
-    renderer.toneMappingExposure = 1.05
+	  if (backend === 'webgpu') {
+	    const renderer = new WebGPURenderer({
+	      canvas,
+	      antialias: true,
+	      alpha: true,
+	    })
+	    renderer.outputColorSpace = THREE.SRGBColorSpace
+	    renderer.toneMapping = THREE.ACESFilmicToneMapping
+	    renderer.toneMappingExposure = 1.05
     renderer.setClearColor(0x000000, 0)
     await renderer.init()
     return renderer
   }
 
-  const renderer = new THREE.WebGLRenderer({
-    canvas,
-    antialias: true,
-    alpha: true,
-  })
+	  const renderer = new THREE.WebGLRenderer({
+	    canvas,
+	    antialias: true,
+	    alpha: true,
+	  })
   renderer.outputColorSpace = THREE.SRGBColorSpace
   renderer.toneMapping = THREE.ACESFilmicToneMapping
   renderer.toneMappingExposure = 1.05
@@ -2104,6 +2106,7 @@ export const createScene = async (
   // Our world render is multi-pass; rendering everything into an explicit RenderTarget keeps
   // depth consistent between passes (so pellet glow never sees terrain depth) and presents once.
   let webgpuWorldTarget: THREE.RenderTarget | null = null
+  let webgpuWorldSamples = 4
   let webgpuPresentScene: THREE.Scene | null = null
   let webgpuPresentCamera: THREE.OrthographicCamera | null = null
   let webgpuPresentMaterial: THREE.MeshBasicMaterial | null = null
@@ -2114,27 +2117,37 @@ export const createScene = async (
       depthBuffer: true,
       stencilBuffer: false,
       // Match canvas AA when possible. Still cheaper than multiple canvas renders.
-      samples: 4,
+      samples: webgpuWorldSamples,
       // Keep offscreen output linear; final present pass handles output conversion.
       colorSpace: THREE.LinearSRGBColorSpace,
     })
-    webgpuWorldTarget.texture.name = 'snake_world_target'
-    webgpuWorldTarget.texture.colorSpace = THREE.LinearSRGBColorSpace
+	    webgpuWorldTarget.texture.name = 'snake_world_target'
+	    webgpuWorldTarget.texture.colorSpace = THREE.LinearSRGBColorSpace
 
-    webgpuPresentScene = new THREE.Scene()
-    webgpuPresentCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
-    webgpuPresentMaterial = new THREE.MeshBasicMaterial({
-      map: webgpuWorldTarget.texture,
-      toneMapped: false,
-      depthTest: false,
+	    webgpuPresentScene = new THREE.Scene()
+	    webgpuPresentCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10)
+	    webgpuPresentCamera.position.z = 1
+	    webgpuPresentMaterial = new THREE.MeshBasicMaterial({
+	      map: webgpuWorldTarget.texture,
+	      toneMapped: false,
+	      depthTest: false,
       depthWrite: false,
-      transparent: true,
-      blending: THREE.NoBlending,
-    })
-    webgpuPresentQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), webgpuPresentMaterial)
-    webgpuPresentQuad.frustumCulled = false
-    webgpuPresentScene.add(webgpuPresentQuad)
-  }
+	      transparent: true,
+	      blending: THREE.NoBlending,
+	    })
+	    const presentGeometry = new THREE.PlaneGeometry(2, 2)
+	    const presentUv = presentGeometry.getAttribute('uv')
+	    if (presentUv instanceof THREE.BufferAttribute) {
+	      // WebGPURenderTarget sampling is vertically flipped vs the canvas output pass. Flip V once here.
+	      for (let i = 0; i < presentUv.count; i += 1) {
+	        presentUv.setY(i, 1 - presentUv.getY(i))
+	      }
+	      presentUv.needsUpdate = true
+	    }
+	    webgpuPresentQuad = new THREE.Mesh(presentGeometry, webgpuPresentMaterial)
+	    webgpuPresentQuad.frustumCulled = false
+	    webgpuPresentScene.add(webgpuPresentQuad)
+	  }
 
   const scene = new THREE.Scene()
   const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 20)
@@ -2532,20 +2545,20 @@ export const createScene = async (
 	  pointerOverlayScene.add(pointerOverlayKeyLight.target)
 	  pointerOverlayScene.add(pointerOverlayRimLight.target)
 
-	  const pointerArrowMaterial = new THREE.MeshStandardMaterial({
-	    color: 0xe7e7e7,
-	    roughness: 0.5,
-	    metalness: 0.04,
-	    flatShading: true,
-	    // Overlay pass clears depth before rendering, so we can keep depth testing enabled for correct
-	    // self-occlusion (prevents weird diagonal artifacts from backfaces drawing over frontfaces).
-	    side: THREE.DoubleSide,
-	    depthTest: true,
-	    depthWrite: true,
-	    fog: false,
-	  })
-	  pointerArrowMaterial.depthTest = true
-	  pointerArrowMaterial.depthWrite = true
+		  const pointerArrowMaterial = new THREE.MeshStandardMaterial({
+		    color: 0xe7e7e7,
+		    roughness: 0.5,
+		    metalness: 0.04,
+		    flatShading: true,
+		    // Overlay pass clears depth before rendering, so we can keep depth testing enabled for correct
+		    // self-occlusion (prevents weird diagonal artifacts from backfaces drawing over frontfaces).
+		    side: THREE.DoubleSide,
+		    depthTest: true,
+		    depthWrite: true,
+		    fog: false,
+		  })
+		  pointerArrowMaterial.depthTest = true
+		  pointerArrowMaterial.depthWrite = true
 
 	  const pointerArrowRingCount = POINTER_ARROW_SEGMENTS + 1
 	  // Each ring has 4 vertices (bottomLeft, bottomRight, topLeft, topRight) plus 2 tip vertices.
@@ -2797,22 +2810,26 @@ export const createScene = async (
   let treeCullEntries: TreeCullEntry[] = []
   let treeVisibilityState: boolean[] = []
   let treeVisibleIndices: number[] = []
+  const nextTreeVisibleScratch: number[] = []
   let cactusTrunkSourceMatrices: THREE.Matrix4[] = []
   let cactusPartSourceMatrices: THREE.Matrix4[][] = []
   let cactusCullEntries: CactusCullEntry[] = []
   let cactusVisibilityState: boolean[] = []
   let cactusVisibleIndices: number[] = []
+  const nextCactusVisibleScratch: number[] = []
   let visibleTreeCount = 0
   let visibleCactusCount = 0
   let mountainSourceMatricesByVariant: THREE.Matrix4[][] = []
   let mountainCullEntriesByVariant: MountainCullEntry[][] = []
   let mountainVisibilityStateByVariant: boolean[][] = []
   let mountainVisibleIndicesByVariant: number[][] = []
+  const nextMountainVisibleScratchByVariant: number[][] = []
   let visibleMountainCount = 0
   let pebbleSourceMatrices: THREE.Matrix4[] = []
   let pebbleCullEntries: PebbleCullEntry[] = []
   let pebbleVisibilityState: boolean[] = []
   let pebbleVisibleIndices: number[] = []
+  const nextPebbleVisibleScratch: number[] = []
   let visiblePebbleCount = 0
   let visibleLakeCount = 0
   let terrainContactSampler: TerrainContactSampler | null = null
@@ -2830,6 +2847,38 @@ export const createScene = async (
   let lastFrameTime = performance.now()
 
   const snakes = new Map<string, SnakeVisual>()
+  type SnakeTubeCache = {
+    radialSegments: number
+    tubularSegments: number
+    ringVertexCount: number
+    ringCount: number
+    vertexCount: number
+    indexCount: number
+    positionAttr: THREE.BufferAttribute
+    normalAttr: THREE.BufferAttribute
+    uvAttr: THREE.BufferAttribute
+    indexAttr: THREE.BufferAttribute
+    positionArray: Float32Array
+    normalArray: Float32Array
+    uvArray: Float32Array
+    indexArray: Uint16Array | Uint32Array
+    circleCos: Float32Array
+    circleSin: Float32Array
+    tailCap: TailCapCache | null
+  }
+  type TailCapCache = {
+    geometry: THREE.BufferGeometry
+    radialSegments: number
+    rings: number
+    flip: boolean
+    positionAttr: THREE.BufferAttribute
+    uvAttr: THREE.BufferAttribute
+    indexAttr: THREE.BufferAttribute
+    indexAttrFlipped: THREE.BufferAttribute
+    positions: Float32Array
+    uvs: Float32Array
+  }
+  const snakeTubeCaches = new Map<string, SnakeTubeCache>()
   const boostTrails = new Map<string, BoostTrailState[]>()
   const boostTrailPool: BoostTrailState[] = []
   const deathStates = new Map<string, DeathState>()
@@ -3879,7 +3928,8 @@ export const createScene = async (
     const pebbleHideExtra = PLANET_OBJECT_HIDE_EXTRA + PEBBLE_EDGE_PRELOAD_HIDE_EXTRA * edgePreload
     const pebbleOcclusionLead = 1 + PEBBLE_EDGE_PRELOAD_OCCLUSION_LEAD * edgePreload
 
-    const nextTreeVisible: number[] = []
+    const nextTreeVisible = nextTreeVisibleScratch
+    nextTreeVisible.length = 0
     for (let i = 0; i < treeCullEntries.length; i += 1) {
       const entry = treeCullEntries[i]
       const wasVisible = treeVisibilityState[i] ?? false
@@ -3910,7 +3960,10 @@ export const createScene = async (
       if (visible) nextTreeVisible.push(i)
     }
     if (!arraysEqual(nextTreeVisible, treeVisibleIndices)) {
-      treeVisibleIndices = nextTreeVisible
+      treeVisibleIndices.length = nextTreeVisible.length
+      for (let i = 0; i < nextTreeVisible.length; i += 1) {
+        treeVisibleIndices[i] = nextTreeVisible[i]!
+      }
       if (treeTrunkMesh) {
         for (let write = 0; write < treeVisibleIndices.length; write += 1) {
           const source = treeTrunkSourceMatrices[treeVisibleIndices[write]]
@@ -3935,7 +3988,8 @@ export const createScene = async (
     }
     visibleTreeCount = treeVisibleIndices.length
 
-    const nextCactusVisible: number[] = []
+    const nextCactusVisible = nextCactusVisibleScratch
+    nextCactusVisible.length = 0
     for (let i = 0; i < cactusCullEntries.length; i += 1) {
       const entry = cactusCullEntries[i]
       const wasVisible = cactusVisibilityState[i] ?? false
@@ -3988,7 +4042,10 @@ export const createScene = async (
       if (visible) nextCactusVisible.push(i)
     }
     if (!arraysEqual(nextCactusVisible, cactusVisibleIndices)) {
-      cactusVisibleIndices = nextCactusVisible
+      cactusVisibleIndices.length = nextCactusVisible.length
+      for (let i = 0; i < nextCactusVisible.length; i += 1) {
+        cactusVisibleIndices[i] = nextCactusVisible[i]!
+      }
       if (cactusTrunkMesh) {
         for (let write = 0; write < cactusVisibleIndices.length; write += 1) {
           const source = cactusTrunkSourceMatrices[cactusVisibleIndices[write]]
@@ -4017,7 +4074,10 @@ export const createScene = async (
     for (let variant = 0; variant < mountainMeshes.length; variant += 1) {
       const entries = mountainCullEntriesByVariant[variant] ?? []
       const state = mountainVisibilityStateByVariant[variant] ?? []
-      const nextVariantVisible: number[] = []
+      const nextVariantVisible =
+        nextMountainVisibleScratchByVariant[variant] ??
+        (nextMountainVisibleScratchByVariant[variant] = [])
+      nextVariantVisible.length = 0
       for (let i = 0; i < entries.length; i += 1) {
         const entry = entries[i]
         const wasVisible = state[i] ?? false
@@ -4048,26 +4108,31 @@ export const createScene = async (
         if (visible) nextVariantVisible.push(i)
       }
       mountainVisibilityStateByVariant[variant] = state
-      const currentVisible = mountainVisibleIndicesByVariant[variant] ?? []
+      const currentVisible =
+        mountainVisibleIndicesByVariant[variant] ?? (mountainVisibleIndicesByVariant[variant] = [])
       if (!arraysEqual(nextVariantVisible, currentVisible)) {
-        mountainVisibleIndicesByVariant[variant] = nextVariantVisible
+        currentVisible.length = nextVariantVisible.length
+        for (let i = 0; i < nextVariantVisible.length; i += 1) {
+          currentVisible[i] = nextVariantVisible[i]!
+        }
         const mesh = mountainMeshes[variant]
         const sourceMatrices = mountainSourceMatricesByVariant[variant] ?? []
         if (mesh) {
-          for (let write = 0; write < nextVariantVisible.length; write += 1) {
-            const source = sourceMatrices[nextVariantVisible[write]]
+          for (let write = 0; write < currentVisible.length; write += 1) {
+            const source = sourceMatrices[currentVisible[write]]
             if (!source) continue
             mesh.setMatrixAt(write, source)
           }
-          mesh.count = nextVariantVisible.length
+          mesh.count = currentVisible.length
           mesh.instanceMatrix.needsUpdate = true
         }
       }
-      mountainVisibleTotal += (mountainVisibleIndicesByVariant[variant] ?? []).length
+      mountainVisibleTotal += currentVisible.length
     }
     visibleMountainCount = mountainVisibleTotal
 
-    const nextPebbleVisible: number[] = []
+    const nextPebbleVisible = nextPebbleVisibleScratch
+    nextPebbleVisible.length = 0
     for (let i = 0; i < pebbleCullEntries.length; i += 1) {
       const entry = pebbleCullEntries[i]
       const wasVisible = pebbleVisibilityState[i] ?? false
@@ -4086,7 +4151,10 @@ export const createScene = async (
       if (visible) nextPebbleVisible.push(i)
     }
     if (!arraysEqual(nextPebbleVisible, pebbleVisibleIndices)) {
-      pebbleVisibleIndices = nextPebbleVisible
+      pebbleVisibleIndices.length = nextPebbleVisible.length
+      for (let i = 0; i < nextPebbleVisible.length; i += 1) {
+        pebbleVisibleIndices[i] = nextPebbleVisible[i]!
+      }
       if (pebbleMesh) {
         for (let write = 0; write < pebbleVisibleIndices.length; write += 1) {
           const source = pebbleSourceMatrices[pebbleVisibleIndices[write]]
@@ -4892,7 +4960,9 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
     tubeMaterial.map = skinTexture
     tubeMaterial.emissiveMap = skinTexture
     tubeMaterial.emissive = new THREE.Color('#ffffff')
-    const tube = new THREE.Mesh(new THREE.BufferGeometry(), tubeMaterial)
+    // Keep tube + glow sharing the same geometry so updates are single-buffer writes.
+    const tubeGeometry = new THREE.BufferGeometry()
+    const tube = new THREE.Mesh(tubeGeometry, tubeMaterial)
     group.add(tube)
 
     const selfOverlapGlowMaterial = new THREE.MeshBasicMaterial({
@@ -4904,7 +4974,7 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
     })
     selfOverlapGlowMaterial.depthWrite = false
     selfOverlapGlowMaterial.depthTest = true
-    const selfOverlapGlow = new THREE.Mesh(new THREE.BufferGeometry(), selfOverlapGlowMaterial)
+    const selfOverlapGlow = new THREE.Mesh(tubeGeometry, selfOverlapGlowMaterial)
     selfOverlapGlow.visible = false
     selfOverlapGlow.renderOrder = 1
     group.add(selfOverlapGlow)
@@ -5996,30 +6066,60 @@ diffuseColor.a *= retireEdge;`,
     return centerlineRadius
   }
 
+  const ensureVectorScratchCapacity = (scratch: THREE.Vector3[], capacity: number) => {
+    for (let i = scratch.length; i < capacity; i += 1) {
+      scratch.push(new THREE.Vector3())
+    }
+  }
+
+  // Allocation-light snake curve generation scratch. Reused across all snakes each frame.
+  const snakeCurvePointsScratch: THREE.Vector3[] = []
+  const snakeNodeNormalsScratch: THREE.Vector3[] = []
+  const snakeNodeTangentsScratch: THREE.Vector3[] = []
+  let snakeNodeRadiiScratch = new Float32Array(0)
+  const snakeMidpointNormalTemp = new THREE.Vector3()
+  const snakeMidpointTangentTemp = new THREE.Vector3()
+
   const buildSnakeCurvePoints = (
     nodes: Point[],
     radiusOffset: number,
     snakeRadius: number,
     groundingInfo: SnakeGroundingInfo | null,
   ) => {
-    const curvePoints: THREE.Vector3[] = []
-    if (nodes.length === 0) return curvePoints
-
-    const nodeNormals = new Array<THREE.Vector3>(nodes.length)
-    for (let i = 0; i < nodes.length; i += 1) {
-      const node = nodes[i]
-      nodeNormals[i] = new THREE.Vector3(node.x, node.y, node.z).normalize()
+    if (nodes.length === 0) {
+      snakeCurvePointsScratch.length = 0
+      return snakeCurvePointsScratch
     }
 
-    const nodeTangents = new Array<THREE.Vector3>(nodes.length)
-    for (let i = 0; i < nodeNormals.length; i += 1) {
-      const normal = nodeNormals[i]
+    ensureVectorScratchCapacity(snakeNodeNormalsScratch, nodes.length)
+    ensureVectorScratchCapacity(snakeNodeTangentsScratch, nodes.length)
+    // Midpoint insertion can (worst case) double the number of curve points.
+    ensureVectorScratchCapacity(snakeCurvePointsScratch, nodes.length * 2 + 2)
+
+    if (snakeNodeRadiiScratch.length < nodes.length) {
+      const nextSize = Math.max(nodes.length, snakeNodeRadiiScratch.length > 0 ? snakeNodeRadiiScratch.length * 2 : 64)
+      snakeNodeRadiiScratch = new Float32Array(nextSize)
+    }
+
+    for (let i = 0; i < nodes.length; i += 1) {
+      const node = nodes[i]!
+      const normal = snakeNodeNormalsScratch[i]!
+      normal.set(node.x, node.y, node.z)
+      if (normal.lengthSq() <= 1e-10) {
+        normal.set(0, 0, 1)
+      } else {
+        normal.normalize()
+      }
+    }
+
+    for (let i = 0; i < nodes.length; i += 1) {
+      const normal = snakeNodeNormalsScratch[i]!
       snakeContactFallbackTemp.set(0, 0, 0)
-      if (i + 1 < nodeNormals.length) {
-        snakeContactFallbackTemp.add(nodeNormals[i + 1]).addScaledVector(normal, -1)
+      if (i + 1 < nodes.length) {
+        snakeContactFallbackTemp.add(snakeNodeNormalsScratch[i + 1]!).addScaledVector(normal, -1)
       }
       if (i > 0) {
-        snakeContactFallbackTemp.add(normal).addScaledVector(nodeNormals[i - 1], -1)
+        snakeContactFallbackTemp.add(normal).addScaledVector(snakeNodeNormalsScratch[i - 1]!, -1)
       }
       snakeContactFallbackTemp.addScaledVector(normal, -snakeContactFallbackTemp.dot(normal))
       if (snakeContactFallbackTemp.lengthSq() <= 1e-8) {
@@ -6027,13 +6127,12 @@ diffuseColor.a *= retireEdge;`,
       } else {
         snakeContactFallbackTemp.normalize()
       }
-      nodeTangents[i] = snakeContactFallbackTemp.clone()
+      snakeNodeTangentsScratch[i]!.copy(snakeContactFallbackTemp)
     }
 
-    const nodeRadii = new Array<number>(nodes.length)
-    for (let i = 0; i < nodeNormals.length; i += 1) {
-      const normal = nodeNormals[i]
-      const tangent = nodeTangents[i]
+    for (let i = 0; i < nodes.length; i += 1) {
+      const normal = snakeNodeNormalsScratch[i]!
+      const tangent = snakeNodeTangentsScratch[i]!
       let nodeRadius = getSnakeCenterlineRadius(normal, radiusOffset, snakeRadius)
       nodeRadius += applySnakeContactLift(
         normal,
@@ -6042,17 +6141,18 @@ diffuseColor.a *= retireEdge;`,
         snakeRadius,
         groundingInfo,
       )
-      nodeRadii[i] = nodeRadius
+      snakeNodeRadiiScratch[i] = nodeRadius
     }
 
     let prevNormal: THREE.Vector3 | null = null
     let prevTangent: THREE.Vector3 | null = null
-    let prevRadius = nodeRadii[0] ?? PLANET_RADIUS + radiusOffset
+    let prevRadius = snakeNodeRadiiScratch[0] ?? PLANET_RADIUS + radiusOffset
+    let writeIndex = 0
 
     for (let i = 0; i < nodes.length; i += 1) {
-      const normal = nodeNormals[i]
-      const tangent = nodeTangents[i]
-      const nodeRadius = nodeRadii[i]
+      const normal = snakeNodeNormalsScratch[i]!
+      const tangent = snakeNodeTangentsScratch[i]!
+      const nodeRadius = snakeNodeRadiiScratch[i] ?? (PLANET_RADIUS + radiusOffset)
       if (
         prevNormal &&
         prevTangent &&
@@ -6060,44 +6160,47 @@ diffuseColor.a *= retireEdge;`,
         i < nodes.length - 1 &&
         Math.abs(nodeRadius - prevRadius) >= SNAKE_SLOPE_INSERT_RADIUS_DELTA
       ) {
-        const midpointNormal = prevNormal.clone().add(normal)
-        if (midpointNormal.lengthSq() > 1e-8) {
-          midpointNormal.normalize()
+        snakeMidpointNormalTemp.copy(prevNormal).add(normal)
+        if (snakeMidpointNormalTemp.lengthSq() > 1e-8) {
+          snakeMidpointNormalTemp.normalize()
         } else {
-          midpointNormal.copy(normal)
+          snakeMidpointNormalTemp.copy(normal)
         }
-        snakeContactFallbackTemp.copy(prevTangent).add(tangent)
-        snakeContactFallbackTemp.addScaledVector(
-          midpointNormal,
-          -snakeContactFallbackTemp.dot(midpointNormal),
+        snakeMidpointTangentTemp.copy(prevTangent).add(tangent)
+        snakeMidpointTangentTemp.addScaledVector(
+          snakeMidpointNormalTemp,
+          -snakeMidpointTangentTemp.dot(snakeMidpointNormalTemp),
         )
-        if (snakeContactFallbackTemp.lengthSq() <= 1e-8) {
-          buildTangentBasis(midpointNormal, snakeContactFallbackTemp, snakeContactOffsetTemp)
+        if (snakeMidpointTangentTemp.lengthSq() <= 1e-8) {
+          buildTangentBasis(snakeMidpointNormalTemp, snakeMidpointTangentTemp, snakeContactOffsetTemp)
         } else {
-          snakeContactFallbackTemp.normalize()
+          snakeMidpointTangentTemp.normalize()
         }
         let midpointRadius = getSnakeCenterlineRadius(
-          midpointNormal,
+          snakeMidpointNormalTemp,
           radiusOffset,
           snakeRadius,
         )
         midpointRadius += applySnakeContactLift(
-          midpointNormal,
-          snakeContactFallbackTemp,
+          snakeMidpointNormalTemp,
+          snakeMidpointTangentTemp,
           midpointRadius,
           snakeRadius,
           groundingInfo,
         )
-        curvePoints.push(midpointNormal.multiplyScalar(midpointRadius))
+        snakeCurvePointsScratch[writeIndex]!.copy(snakeMidpointNormalTemp).multiplyScalar(midpointRadius)
+        writeIndex += 1
       }
 
-      curvePoints.push(normal.clone().multiplyScalar(nodeRadius))
+      snakeCurvePointsScratch[writeIndex]!.copy(normal).multiplyScalar(nodeRadius)
+      writeIndex += 1
       prevNormal = normal
       prevTangent = tangent
       prevRadius = nodeRadius
     }
 
-    return curvePoints
+    snakeCurvePointsScratch.length = writeIndex
+    return snakeCurvePointsScratch
   }
 
   const buildTailCapGeometry = (
@@ -6241,22 +6344,33 @@ diffuseColor.a *= retireEdge;`,
     return clamp(startNode / segmentCount, 0, 0.95)
   }
 
+  let digestionBulgeScratchA = new Float32Array(0)
+  let digestionBulgeScratchB = new Float32Array(0)
+
   const applyDigestionBulges = (
-    tubeGeometry: THREE.TubeGeometry,
+    tubeGeometry: THREE.BufferGeometry,
     digestions: DigestionVisual[],
     headStartOffset: number,
     bulgeScale: number,
   ) => {
     if (!digestions.length) return 0
-    const params = tubeGeometry.parameters as { radialSegments?: number; tubularSegments?: number }
-    const radialSegments = params.radialSegments ?? 8
-    const tubularSegments = params.tubularSegments ?? 1
+    const params = getTubeParams(tubeGeometry)
+    if (!params) return 0
+    const radialSegments = params.radialSegments
+    const tubularSegments = params.tubularSegments
     const ringVertexCount = radialSegments + 1
     const ringCount = tubularSegments + 1
-    const positions = tubeGeometry.attributes.position
-    if (!positions) return 0
+    const positionsAttr = tubeGeometry.getAttribute('position')
+    if (!(positionsAttr instanceof THREE.BufferAttribute)) return 0
+    const positions = positionsAttr.array as Float32Array
 
-    const bulgeByRing = new Array<number>(ringCount).fill(0)
+    if (digestionBulgeScratchA.length < ringCount) {
+      digestionBulgeScratchA = new Float32Array(ringCount)
+      digestionBulgeScratchB = new Float32Array(ringCount)
+    }
+    digestionBulgeScratchA.fill(0, 0, ringCount)
+
+    const bulgeByRing = digestionBulgeScratchA
     const startOffset = clamp(headStartOffset, 0, 0.95)
     const headStartRing = Math.ceil(startOffset * Math.max(1, ringCount - 1))
     for (const digestion of digestions) {
@@ -6283,12 +6397,13 @@ diffuseColor.a *= retireEdge;`,
       }
     }
     for (let pass = 0; pass < 2; pass += 1) {
-      const source = bulgeByRing.slice()
+      const source = pass === 0 ? digestionBulgeScratchA : digestionBulgeScratchB
+      const dest = pass === 0 ? digestionBulgeScratchB : digestionBulgeScratchA
       for (let ring = 0; ring < ringCount; ring += 1) {
-        const prev = source[Math.max(0, ring - 1)]
-        const current = source[ring]
-        const next = source[Math.min(ringCount - 1, ring + 1)]
-        bulgeByRing[ring] = prev * 0.22 + current * 0.56 + next * 0.22
+        const prev = source[Math.max(0, ring - 1)] ?? 0
+        const current = source[ring] ?? 0
+        const next = source[Math.min(ringCount - 1, ring + 1)] ?? 0
+        dest[ring] = prev * 0.22 + current * 0.56 + next * 0.22
       }
     }
     for (let ring = 0; ring < ringCount; ring += 1) {
@@ -6309,33 +6424,38 @@ diffuseColor.a *= retireEdge;`,
     }
 
     let maxAppliedBulge = 0
-    const center = new THREE.Vector3()
-    const vertex = new THREE.Vector3()
     for (let ring = 0; ring < ringCount; ring += 1) {
       const bulge = bulgeByRing[ring]
       if (bulge <= 0) continue
       if (bulge > maxAppliedBulge) maxAppliedBulge = bulge
-      center.set(0, 0, 0)
       const ringStart = ring * ringVertexCount
+      let centerX = 0
+      let centerY = 0
+      let centerZ = 0
       for (let i = 0; i < radialSegments; i += 1) {
-        const index = ringStart + i
-        center.x += positions.getX(index)
-        center.y += positions.getY(index)
-        center.z += positions.getZ(index)
+        const index = (ringStart + i) * 3
+        centerX += positions[index]
+        centerY += positions[index + 1]
+        centerZ += positions[index + 2]
       }
-      center.multiplyScalar(1 / radialSegments)
+      const invCount = radialSegments > 0 ? 1 / radialSegments : 1
+      centerX *= invCount
+      centerY *= invCount
+      centerZ *= invCount
 
       const scale = 1 + bulge
       for (let i = 0; i < ringVertexCount; i += 1) {
-        const index = ringStart + i
-        vertex.set(positions.getX(index), positions.getY(index), positions.getZ(index))
-        vertex.sub(center).multiplyScalar(scale).add(center)
-        positions.setXYZ(index, vertex.x, vertex.y, vertex.z)
+        const index = (ringStart + i) * 3
+        const dx = positions[index] - centerX
+        const dy = positions[index + 1] - centerY
+        const dz = positions[index + 2] - centerZ
+        positions[index] = centerX + dx * scale
+        positions[index + 1] = centerY + dy * scale
+        positions[index + 2] = centerZ + dz * scale
       }
     }
 
-    positions.needsUpdate = true
-    tubeGeometry.computeVertexNormals()
+    positionsAttr.needsUpdate = true
     return maxAppliedBulge
   }
 
@@ -7010,8 +7130,40 @@ diffuseColor.a *= retireEdge;`,
     return { intensities: blurred, maxIntensity }
   }
 
+  const getTubeParams = (
+    geometry: THREE.BufferGeometry,
+  ): { radialSegments: number; tubularSegments: number } | null => {
+    const params = (geometry as unknown as { parameters?: unknown }).parameters as
+      | { radialSegments?: number; tubularSegments?: number }
+      | undefined
+    if (
+      params &&
+      typeof params.radialSegments === 'number' &&
+      typeof params.tubularSegments === 'number'
+    ) {
+      return {
+        radialSegments: params.radialSegments,
+        tubularSegments: params.tubularSegments,
+      }
+    }
+    const userParams = (geometry.userData as { snakeTubeParams?: unknown }).snakeTubeParams as
+      | { radialSegments?: number; tubularSegments?: number }
+      | undefined
+    if (
+      userParams &&
+      typeof userParams.radialSegments === 'number' &&
+      typeof userParams.tubularSegments === 'number'
+    ) {
+      return {
+        radialSegments: userParams.radialSegments,
+        tubularSegments: userParams.tubularSegments,
+      }
+    }
+    return null
+  }
+
   const applySnakeSelfOverlapColors = (
-    geometry: THREE.TubeGeometry,
+    geometry: THREE.BufferGeometry,
     intensities: Float32Array,
     pointCount: number,
   ) => {
@@ -7019,15 +7171,23 @@ diffuseColor.a *= retireEdge;`,
     if (!(positionAttr instanceof THREE.BufferAttribute)) {
       return
     }
-    const params = geometry.parameters as { radialSegments?: number; tubularSegments?: number }
-    const radialSegments = params.radialSegments ?? 8
-    const tubularSegments = params.tubularSegments ?? 1
+    const params = getTubeParams(geometry)
+    if (!params) return
+    const radialSegments = params.radialSegments
+    const tubularSegments = params.tubularSegments
     const ringVertexCount = radialSegments + 1
     const ringCount = tubularSegments + 1
     const ringDenom = Math.max(1, ringCount - 1)
 
     const vertexCount = positionAttr.count
-    const colors = new Float32Array(vertexCount * 3)
+    let colorAttr = geometry.getAttribute('color')
+    if (!(colorAttr instanceof THREE.BufferAttribute) || colorAttr.count !== vertexCount) {
+      const colors = new Float32Array(vertexCount * 3)
+      colorAttr = new THREE.BufferAttribute(colors, 3)
+      colorAttr.setUsage(THREE.DynamicDrawUsage)
+      geometry.setAttribute('color', colorAttr)
+    }
+    const colors = colorAttr.array as Float32Array
     const scale = pointCount > 1 ? pointCount - 1 : 0
     for (let v = 0; v < vertexCount; v += 1) {
       const ring = ringVertexCount > 0 ? Math.floor(v / ringVertexCount) : 0
@@ -7039,23 +7199,25 @@ diffuseColor.a *= retireEdge;`,
       colors[out + 1] = intensity
       colors[out + 2] = intensity
     }
-    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+    colorAttr.needsUpdate = true
   }
 
   const applySnakeSkinUVs = (
-    geometry: THREE.TubeGeometry,
+    geometry: THREE.BufferGeometry,
     snakeStart: number,
     snakeLen: number,
   ) => {
     const uvAttr = geometry.getAttribute('uv')
     if (!(uvAttr instanceof THREE.BufferAttribute)) return
-    const params = geometry.parameters as { radialSegments?: number; tubularSegments?: number }
-    const radialSegments = params.radialSegments ?? 8
-    const tubularSegments = params.tubularSegments ?? 1
+    const params = getTubeParams(geometry)
+    if (!params) return
+    const radialSegments = params.radialSegments
+    const tubularSegments = params.tubularSegments
     const ringVertexCount = radialSegments + 1
     const ringCount = tubularSegments + 1
     const ringDenom = Math.max(1, ringCount - 1)
     const vDenom = Math.max(1, radialSegments)
+    const uvArray = uvAttr.array as Float32Array
 
     const safeStart = Number.isFinite(snakeStart) ? Math.max(0, snakeStart) : 0
     // snakeLen can be fractional (tail extension) so skin patterns advance smoothly as the tail grows.
@@ -7072,10 +7234,583 @@ diffuseColor.a *= retireEdge;`,
       const ringOffset = ring * ringVertexCount
       for (let i = 0; i < ringVertexCount; i += 1) {
         const v = i / vDenom
-        uvAttr.setXY(ringOffset + i, u, v)
+        const out = (ringOffset + i) * 2
+        uvArray[out] = u
+        uvArray[out + 1] = v
       }
     }
     uvAttr.needsUpdate = true
+  }
+
+	  const snakeTubeCircleCos = (() => {
+	    const radialSegments = SNAKE_TUBE_RADIAL_SEGMENTS
+	    const ringVertexCount = radialSegments + 1
+	    const values = new Float32Array(ringVertexCount)
+	    for (let i = 0; i < ringVertexCount; i += 1) {
+	      const theta = (i / radialSegments) * Math.PI * 2
+	      // Match THREE.TubeGeometry's vertex ordering (it uses `cos = -Math.cos( v )`).
+	      values[i] = -Math.cos(theta)
+	    }
+	    return values
+	  })()
+  const snakeTubeCircleSin = (() => {
+    const radialSegments = SNAKE_TUBE_RADIAL_SEGMENTS
+    const ringVertexCount = radialSegments + 1
+    const values = new Float32Array(ringVertexCount)
+    for (let i = 0; i < ringVertexCount; i += 1) {
+      const theta = (i / radialSegments) * Math.PI * 2
+      values[i] = Math.sin(theta)
+    }
+    return values
+  })()
+
+  const buildSnakeTubeIndices = (
+    target: Uint16Array | Uint32Array,
+    tubularSegments: number,
+    radialSegments: number,
+    ringVertexCount: number,
+  ) => {
+    let offset = 0
+    for (let i = 0; i < tubularSegments; i += 1) {
+      const ring = i * ringVertexCount
+      const nextRing = (i + 1) * ringVertexCount
+      for (let j = 0; j < radialSegments; j += 1) {
+        const a = ring + j
+        const b = nextRing + j
+        const c = nextRing + j + 1
+        const d = ring + j + 1
+        target[offset++] = a
+        target[offset++] = b
+        target[offset++] = d
+        target[offset++] = b
+        target[offset++] = c
+        target[offset++] = d
+      }
+    }
+  }
+
+  const createSnakeTubeCache = (
+    geometry: THREE.BufferGeometry,
+    tubularSegments: number,
+  ): SnakeTubeCache => {
+    const radialSegments = SNAKE_TUBE_RADIAL_SEGMENTS
+    const ringVertexCount = radialSegments + 1
+    const ringCount = tubularSegments + 1
+    const vertexCount = ringCount * ringVertexCount
+    const indexCount = tubularSegments * radialSegments * 6
+
+    const positionArray = new Float32Array(vertexCount * 3)
+    const normalArray = new Float32Array(vertexCount * 3)
+    const uvArray = new Float32Array(vertexCount * 2)
+    const indexArray: Uint16Array | Uint32Array =
+      vertexCount > 0xffff ? new Uint32Array(indexCount) : new Uint16Array(indexCount)
+    buildSnakeTubeIndices(indexArray, tubularSegments, radialSegments, ringVertexCount)
+
+    const positionAttr = new THREE.BufferAttribute(positionArray, 3)
+    positionAttr.setUsage(THREE.DynamicDrawUsage)
+    const normalAttr = new THREE.BufferAttribute(normalArray, 3)
+    normalAttr.setUsage(THREE.DynamicDrawUsage)
+    const uvAttr = new THREE.BufferAttribute(uvArray, 2)
+    uvAttr.setUsage(THREE.DynamicDrawUsage)
+    const indexAttr = new THREE.BufferAttribute(indexArray, 1)
+    indexAttr.setUsage(THREE.StaticDrawUsage)
+
+    geometry.setAttribute('position', positionAttr)
+    geometry.setAttribute('normal', normalAttr)
+    geometry.setAttribute('uv', uvAttr)
+    geometry.setIndex(indexAttr)
+    geometry.setDrawRange(0, indexCount)
+    // Snakes always live on/near the planet surface; keep bounds stable to avoid per-frame recomputes.
+    geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), PLANET_RADIUS + 2)
+    ;(geometry.userData as { snakeTubeParams?: unknown }).snakeTubeParams = {
+      radialSegments,
+      tubularSegments,
+    }
+
+    return {
+      radialSegments,
+      tubularSegments,
+      ringVertexCount,
+      ringCount,
+      vertexCount,
+      indexCount,
+      positionAttr,
+      normalAttr,
+      uvAttr,
+      indexAttr,
+      positionArray,
+      normalArray,
+      uvArray,
+      indexArray,
+      circleCos: snakeTubeCircleCos,
+      circleSin: snakeTubeCircleSin,
+      tailCap: null,
+    }
+  }
+
+  const ensureSnakeTubeCache = (
+    playerId: string,
+    geometry: THREE.BufferGeometry,
+    tubularSegments: number,
+  ): SnakeTubeCache => {
+    const existing = snakeTubeCaches.get(playerId) ?? null
+    if (existing && existing.tubularSegments === tubularSegments) {
+      return existing
+    }
+    const cache = createSnakeTubeCache(geometry, tubularSegments)
+    snakeTubeCaches.set(playerId, cache)
+    return cache
+  }
+
+  const snakeTubeCurve = new THREE.CatmullRomCurve3(
+    [new THREE.Vector3(), new THREE.Vector3()],
+    false,
+    'centripetal',
+  )
+
+  const snakeTubePointTemp = new THREE.Vector3()
+  const snakeTubeTangentTemp = new THREE.Vector3()
+  const snakeTubePrevTangentTemp = new THREE.Vector3()
+	  const snakeTubeNormalTemp = new THREE.Vector3()
+	  const snakeTubeBinormalTemp = new THREE.Vector3()
+	  const snakeTubeAxisTemp = new THREE.Vector3()
+	  const snakeTubeScratchTemp = new THREE.Vector3()
+	  const SNAKE_TUBE_ARC_LENGTH_DIVISIONS = 200
+	  const snakeTubeArcLengths = new Float32Array(SNAKE_TUBE_ARC_LENGTH_DIVISIONS + 1)
+	  const snakeTubeArcPrevPointTemp = new THREE.Vector3()
+	  const snakeTubeArcCurPointTemp = new THREE.Vector3()
+	  const snakeTubePrevPointTemp = new THREE.Vector3()
+	  const snakeTubeNextPointTemp = new THREE.Vector3()
+
+	  const mapArcLengthUToT = (
+	    arcLengths: Float32Array,
+	    divisions: number,
+	    u: number,
+	    totalLength: number,
+	  ) => {
+	    const uu = clamp(u, 0, 1)
+	    if (!(totalLength > 1e-8) || divisions <= 0) return uu
+
+	    const target = uu * totalLength
+	    let low = 0
+	    let high = divisions
+	    while (low <= high) {
+	      const mid = Math.floor(low + (high - low) * 0.5)
+	      const diff = (arcLengths[mid] ?? 0) - target
+	      if (diff < 0) {
+	        low = mid + 1
+	      } else if (diff > 0) {
+	        high = mid - 1
+	      } else {
+	        high = mid
+	        break
+	      }
+	    }
+
+	    const index = clamp(high, 0, divisions - 1)
+	    const lengthBefore = arcLengths[index] ?? 0
+	    const lengthAfter = arcLengths[index + 1] ?? lengthBefore
+	    const segmentLength = lengthAfter - lengthBefore
+	    const segmentFraction =
+	      segmentLength > 1e-8 ? clamp((target - lengthBefore) / segmentLength, 0, 1) : 0
+	    return (index + segmentFraction) / divisions
+	  }
+
+		  const pickTubeInitialNormal = (tangent: THREE.Vector3, normalOut: THREE.Vector3) => {
+		    const ax = Math.abs(tangent.x)
+		    const ay = Math.abs(tangent.y)
+	    const az = Math.abs(tangent.z)
+	    if (ax <= ay && ax <= az) {
+	      normalOut.set(1, 0, 0)
+	    } else if (ay <= ax && ay <= az) {
+	      normalOut.set(0, 1, 0)
+	    } else {
+	      normalOut.set(0, 0, 1)
+	    }
+	    // Match Curve.computeFrenetFrames initial frame selection (TubeGeometry uses this).
+	    snakeTubeScratchTemp.crossVectors(tangent, normalOut)
+	    if (snakeTubeScratchTemp.lengthSq() <= 1e-10) {
+	      // Fallback axis (extremely rare).
+	      normalOut.set(0, 1, 0)
+	      snakeTubeScratchTemp.crossVectors(tangent, normalOut)
+	    }
+	    if (snakeTubeScratchTemp.lengthSq() <= 1e-10) {
+	      normalOut.set(0, 0, 1)
+	      return
+	    }
+	    snakeTubeScratchTemp.normalize()
+
+	    normalOut.crossVectors(tangent, snakeTubeScratchTemp)
+	    if (normalOut.lengthSq() <= 1e-10) {
+	      normalOut.set(0, 0, 1)
+	    } else {
+	      normalOut.normalize()
+	    }
+	  }
+
+  const updateSnakeTubeGeometry = (
+    cache: SnakeTubeCache,
+    curve: THREE.CatmullRomCurve3,
+    radius: number,
+  ) => {
+    const tubularSegments = cache.tubularSegments
+    const ringVertexCount = cache.ringVertexCount
+    const ringCount = cache.ringCount
+    if (ringCount <= 1 || ringVertexCount <= 1) return
+
+	    const positions = cache.positionArray
+	    const normals = cache.normalArray
+	    const circleCos = cache.circleCos
+	    const circleSin = cache.circleSin
+
+	    // CatmullRomCurve3's built-in arc-length helpers allocate (Curve.getLengths() creates new
+	    // Vector3s). Keep sampling allocation-free by building a small arc-length LUT ourselves and
+	    // using chord-based tangents between successive rings.
+	    const arcDivisions = SNAKE_TUBE_ARC_LENGTH_DIVISIONS
+	    let totalLength = 0
+	    curve.getPoint(0, snakeTubeArcPrevPointTemp)
+	    snakeTubeArcLengths[0] = 0
+	    for (let p = 1; p <= arcDivisions; p += 1) {
+	      curve.getPoint(p / arcDivisions, snakeTubeArcCurPointTemp)
+	      totalLength += snakeTubeArcCurPointTemp.distanceTo(snakeTubeArcPrevPointTemp)
+	      snakeTubeArcLengths[p] = totalLength
+	      snakeTubeArcPrevPointTemp.copy(snakeTubeArcCurPointTemp)
+	    }
+
+	    const invSegments = tubularSegments > 0 ? 1 / tubularSegments : 0
+	    curve.getPoint(0, snakeTubePointTemp)
+	    snakeTubePrevPointTemp.copy(snakeTubePointTemp)
+
+	    const t1 = mapArcLengthUToT(snakeTubeArcLengths, arcDivisions, invSegments, totalLength)
+	    curve.getPoint(t1, snakeTubeNextPointTemp)
+
+	    // Initialize frame at the head.
+	    snakeTubeTangentTemp.copy(snakeTubeNextPointTemp).sub(snakeTubePointTemp)
+	    if (snakeTubeTangentTemp.lengthSq() <= 1e-10) {
+	      snakeTubeTangentTemp.set(0, 0, 1)
+	    } else {
+	      snakeTubeTangentTemp.normalize()
+	    }
+	    pickTubeInitialNormal(snakeTubeTangentTemp, snakeTubeNormalTemp)
+	    snakeTubeBinormalTemp.crossVectors(snakeTubeTangentTemp, snakeTubeNormalTemp)
+	    if (snakeTubeBinormalTemp.lengthSq() <= 1e-10) {
+	      buildTangentBasis(snakeTubeTangentTemp, snakeTubeNormalTemp, snakeTubeBinormalTemp)
+	    } else {
+	      snakeTubeBinormalTemp.normalize()
+	    }
+	    snakeTubePrevTangentTemp.copy(snakeTubeTangentTemp)
+
+	    // Ring 0.
+	    {
+	      const ringBase = 0
+	      for (let j = 0; j < ringVertexCount; j += 1) {
+	        const cos = circleCos[j] ?? 1
+	        const sin = circleSin[j] ?? 0
+	        const nx = snakeTubeNormalTemp.x * cos + snakeTubeBinormalTemp.x * sin
+	        const ny = snakeTubeNormalTemp.y * cos + snakeTubeBinormalTemp.y * sin
+	        const nz = snakeTubeNormalTemp.z * cos + snakeTubeBinormalTemp.z * sin
+	        const out = (ringBase + j) * 3
+	        positions[out] = snakeTubePointTemp.x + nx * radius
+	        positions[out + 1] = snakeTubePointTemp.y + ny * radius
+	        positions[out + 2] = snakeTubePointTemp.z + nz * radius
+	        normals[out] = nx
+	        normals[out + 1] = ny
+	        normals[out + 2] = nz
+	      }
+	    }
+
+	    for (let i = 1; i <= tubularSegments; i += 1) {
+	      snakeTubePointTemp.copy(snakeTubeNextPointTemp)
+	      if (i < tubularSegments) {
+	        const uNext = (i + 1) * invSegments
+	        const tNext = mapArcLengthUToT(snakeTubeArcLengths, arcDivisions, uNext, totalLength)
+	        curve.getPoint(tNext, snakeTubeNextPointTemp)
+	        snakeTubeTangentTemp.copy(snakeTubeNextPointTemp).sub(snakeTubePrevPointTemp)
+	      } else {
+	        snakeTubeTangentTemp.copy(snakeTubePointTemp).sub(snakeTubePrevPointTemp)
+	      }
+
+	      if (snakeTubeTangentTemp.lengthSq() <= 1e-10) {
+	        snakeTubeTangentTemp.copy(snakeTubePrevTangentTemp)
+	      } else {
+	        snakeTubeTangentTemp.normalize()
+	      }
+
+	      snakeTubeAxisTemp.crossVectors(snakeTubePrevTangentTemp, snakeTubeTangentTemp)
+	      if (snakeTubeAxisTemp.lengthSq() > 1e-12) {
+	        snakeTubeAxisTemp.normalize()
+	        const theta = Math.acos(clamp(snakeTubePrevTangentTemp.dot(snakeTubeTangentTemp), -1, 1))
+	        if (Number.isFinite(theta) && theta > 1e-6) {
+	          snakeTubeNormalTemp.applyAxisAngle(snakeTubeAxisTemp, theta)
+	        }
+	      }
+	      snakeTubeBinormalTemp.crossVectors(snakeTubeTangentTemp, snakeTubeNormalTemp)
+	      if (snakeTubeBinormalTemp.lengthSq() <= 1e-10) {
+	        buildTangentBasis(snakeTubeTangentTemp, snakeTubeNormalTemp, snakeTubeBinormalTemp)
+	      } else {
+	        snakeTubeBinormalTemp.normalize()
+	      }
+	      snakeTubePrevTangentTemp.copy(snakeTubeTangentTemp)
+
+	      const ringBase = i * ringVertexCount
+	      for (let j = 0; j < ringVertexCount; j += 1) {
+	        const cos = circleCos[j] ?? 1
+	        const sin = circleSin[j] ?? 0
+	        const nx = snakeTubeNormalTemp.x * cos + snakeTubeBinormalTemp.x * sin
+	        const ny = snakeTubeNormalTemp.y * cos + snakeTubeBinormalTemp.y * sin
+	        const nz = snakeTubeNormalTemp.z * cos + snakeTubeBinormalTemp.z * sin
+	        const out = (ringBase + j) * 3
+	        positions[out] = snakeTubePointTemp.x + nx * radius
+	        positions[out + 1] = snakeTubePointTemp.y + ny * radius
+	        positions[out + 2] = snakeTubePointTemp.z + nz * radius
+	        normals[out] = nx
+	        normals[out + 1] = ny
+	        normals[out + 2] = nz
+	      }
+
+	      snakeTubePrevPointTemp.copy(snakeTubePointTemp)
+	    }
+
+	    cache.positionAttr.needsUpdate = true
+	    cache.normalAttr.needsUpdate = true
+	  }
+
+  const tailCapRingVectorsScratch = Array.from(
+    { length: SNAKE_TUBE_RADIAL_SEGMENTS },
+    () => new THREE.Vector3(),
+  )
+  const tailCapCenterTemp = new THREE.Vector3()
+  const tailCapRingNormalTemp = new THREE.Vector3()
+  const tailCapDirTemp = new THREE.Vector3()
+  const tailCapTailDirTemp = new THREE.Vector3()
+
+  const createTailCapIndexAttributes = (radialSegments: number, rings: number) => {
+    const tipIndex = rings * radialSegments
+    const indexCount = (rings - 1) * radialSegments * 6 + radialSegments * 3
+    const indices = new Uint16Array(indexCount)
+    let offset = 0
+
+    // Body quads between rings.
+    for (let s = 0; s < rings - 1; s += 1) {
+      const ringStart = s * radialSegments
+      const nextRingStart = (s + 1) * radialSegments
+      for (let i = 0; i < radialSegments; i += 1) {
+        const next = (i + 1) % radialSegments
+        const a = ringStart + i
+        const b = ringStart + next
+        const c = nextRingStart + i
+        const d = nextRingStart + next
+        // Match buildTailCapGeometry's non-flip winding.
+        indices[offset++] = a
+        indices[offset++] = c
+        indices[offset++] = b
+        indices[offset++] = b
+        indices[offset++] = c
+        indices[offset++] = d
+      }
+    }
+
+    // Tip fan.
+    const lastRingStart = (rings - 1) * radialSegments
+    for (let i = 0; i < radialSegments; i += 1) {
+      const next = (i + 1) % radialSegments
+      const a = lastRingStart + i
+      const b = lastRingStart + next
+      indices[offset++] = a
+      indices[offset++] = tipIndex
+      indices[offset++] = b
+    }
+
+    const flipped = new Uint16Array(indices.length)
+    for (let i = 0; i < indices.length; i += 3) {
+      flipped[i] = indices[i]!
+      flipped[i + 1] = indices[i + 2]!
+      flipped[i + 2] = indices[i + 1]!
+    }
+
+    const indexAttr = new THREE.BufferAttribute(indices, 1)
+    indexAttr.setUsage(THREE.StaticDrawUsage)
+    const indexAttrFlipped = new THREE.BufferAttribute(flipped, 1)
+    indexAttrFlipped.setUsage(THREE.StaticDrawUsage)
+    return { indexAttr, indexAttrFlipped, indexCount }
+  }
+
+  const ensureSnakeTailCapCache = (tubeCache: SnakeTubeCache): TailCapCache => {
+    const radialSegments = tubeCache.radialSegments
+    const rings = Math.max(2, TAIL_CAP_SEGMENTS)
+    const existing = tubeCache.tailCap
+    if (existing && existing.radialSegments === radialSegments && existing.rings === rings) {
+      return existing
+    }
+
+    const geometry = new THREE.BufferGeometry()
+    const vertexCount = rings * radialSegments + 1
+    const positions = new Float32Array(vertexCount * 3)
+    const uvs = new Float32Array(vertexCount * 2)
+    const positionAttr = new THREE.BufferAttribute(positions, 3)
+    positionAttr.setUsage(THREE.DynamicDrawUsage)
+    const uvAttr = new THREE.BufferAttribute(uvs, 2)
+    uvAttr.setUsage(THREE.DynamicDrawUsage)
+    const { indexAttr, indexAttrFlipped, indexCount } = createTailCapIndexAttributes(
+      radialSegments,
+      rings,
+    )
+
+    geometry.setAttribute('position', positionAttr)
+    geometry.setAttribute('uv', uvAttr)
+    geometry.setIndex(indexAttr)
+    geometry.setDrawRange(0, indexCount)
+    geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), PLANET_RADIUS + 2)
+    geometry.computeVertexNormals()
+
+    const cache: TailCapCache = {
+      geometry,
+      radialSegments,
+      rings,
+      flip: false,
+      positionAttr,
+      uvAttr,
+      indexAttr,
+      indexAttrFlipped,
+      positions,
+      uvs,
+    }
+    tubeCache.tailCap = cache
+    return cache
+  }
+
+  const updateSnakeTailCap = (
+    playerId: string,
+    visual: SnakeVisual,
+    tubeGeometry: THREE.BufferGeometry,
+    tailDirection: THREE.Vector3,
+  ) => {
+    const tubeCache = snakeTubeCaches.get(playerId) ?? null
+    if (!tubeCache) return
+
+    const params = getTubeParams(tubeGeometry)
+    if (!params) return
+    const radialSegments = params.radialSegments
+    const tubularSegments = params.tubularSegments
+    if (radialSegments <= 2 || tubularSegments <= 0) return
+
+    const positionsAttr = tubeGeometry.getAttribute('position')
+    const uvAttr = tubeGeometry.getAttribute('uv')
+    if (!(positionsAttr instanceof THREE.BufferAttribute) || !(uvAttr instanceof THREE.BufferAttribute)) {
+      return
+    }
+    const tubePositions = positionsAttr.array as Float32Array
+    const tubeUvs = uvAttr.array as Float32Array
+
+    const ringVertexCount = radialSegments + 1
+    const ringStartVertex = tubularSegments * ringVertexCount
+    if (positionsAttr.count < ringStartVertex + radialSegments) return
+
+    // Compute center of the last tube ring and cache ring vectors (without the duplicate seam vertex).
+    tailCapCenterTemp.set(0, 0, 0)
+    for (let i = 0; i < radialSegments; i += 1) {
+      const index = (ringStartVertex + i) * 3
+      tailCapCenterTemp.x += tubePositions[index]
+      tailCapCenterTemp.y += tubePositions[index + 1]
+      tailCapCenterTemp.z += tubePositions[index + 2]
+    }
+    const invCount = radialSegments > 0 ? 1 / radialSegments : 1
+    tailCapCenterTemp.multiplyScalar(invCount)
+
+    let radius = 0
+    for (let i = 0; i < radialSegments; i += 1) {
+      const index = (ringStartVertex + i) * 3
+      const vec = tailCapRingVectorsScratch[i]!
+      vec.set(
+        tubePositions[index] - tailCapCenterTemp.x,
+        tubePositions[index + 1] - tailCapCenterTemp.y,
+        tubePositions[index + 2] - tailCapCenterTemp.z,
+      )
+      radius += vec.length()
+    }
+    radius = radius / radialSegments
+    if (!Number.isFinite(radius) || radius <= 1e-8) return
+
+    tailCapRingNormalTemp
+      .copy(tailCapRingVectorsScratch[1 % radialSegments]!)
+      .cross(tailCapRingVectorsScratch[0]!)
+    if (tailCapRingNormalTemp.lengthSq() < 1e-10) return
+    tailCapRingNormalTemp.normalize()
+    tailCapTailDirTemp.copy(tailDirection)
+    if (tailCapTailDirTemp.lengthSq() <= 1e-10) return
+    tailCapTailDirTemp.normalize()
+
+    const flip = tailCapRingNormalTemp.dot(tailCapTailDirTemp) < 0
+    tailCapDirTemp.copy(tailCapRingNormalTemp)
+    if (flip) tailCapDirTemp.multiplyScalar(-1)
+
+    const cap = ensureSnakeTailCapCache(tubeCache)
+    if (cap.flip !== flip) {
+      cap.flip = flip
+      cap.geometry.setIndex(flip ? cap.indexAttrFlipped : cap.indexAttr)
+    }
+
+    let baseU = 1
+    const baseUvOffset = ringStartVertex * 2
+    if (tubeUvs.length >= baseUvOffset + 1) {
+      const candidate = tubeUvs[baseUvOffset]
+      if (Number.isFinite(candidate)) baseU = candidate
+    }
+
+    const uSpan = Math.max(0, SNAKE_TAIL_CAP_U_SPAN)
+    const minU = Math.floor(baseU) + 0.0001
+    const capSpan = Math.min(uSpan, Math.max(0, baseU - minU))
+    const ringDenom = Math.max(1, cap.rings - 1)
+
+    const capPositions = cap.positions
+    const capUvs = cap.uvs
+    const centerX = tailCapCenterTemp.x
+    const centerY = tailCapCenterTemp.y
+    const centerZ = tailCapCenterTemp.z
+    const dirX = tailCapDirTemp.x
+    const dirY = tailCapDirTemp.y
+    const dirZ = tailCapDirTemp.z
+
+    for (let s = 0; s < cap.rings; s += 1) {
+      const theta = (s / cap.rings) * (Math.PI / 2)
+      const scale = Math.cos(theta)
+      const offset = Math.sin(theta) * radius
+      const u = baseU - (s / ringDenom) * capSpan
+      for (let i = 0; i < radialSegments; i += 1) {
+        const vec = tailCapRingVectorsScratch[i]!
+        const out = (s * radialSegments + i) * 3
+        capPositions[out] = centerX + vec.x * scale + dirX * offset
+        capPositions[out + 1] = centerY + vec.y * scale + dirY * offset
+        capPositions[out + 2] = centerZ + vec.z * scale + dirZ * offset
+
+        const uvOut = (s * radialSegments + i) * 2
+        capUvs[uvOut] = u
+        capUvs[uvOut + 1] = radialSegments > 0 ? i / radialSegments : 0
+      }
+    }
+
+    const tipOffset = cap.rings * radialSegments * 3
+    capPositions[tipOffset] = centerX + dirX * radius
+    capPositions[tipOffset + 1] = centerY + dirY * radius
+    capPositions[tipOffset + 2] = centerZ + dirZ * radius
+    const tipUvOffset = cap.rings * radialSegments * 2
+    capUvs[tipUvOffset] = baseU - capSpan
+    capUvs[tipUvOffset + 1] = 0
+
+    cap.positionAttr.needsUpdate = true
+    cap.uvAttr.needsUpdate = true
+    cap.geometry.computeVertexNormals()
+    const capNormals = cap.geometry.getAttribute('normal')
+    if (capNormals instanceof THREE.BufferAttribute) {
+      capNormals.needsUpdate = true
+    }
+
+    if (visual.tail.geometry !== cap.geometry) {
+      if (visual.tail.geometry !== tailGeometry) {
+        visual.tail.geometry.dispose()
+      }
+      visual.tail.geometry = cap.geometry
+    }
   }
 
 
@@ -7336,38 +8071,42 @@ diffuseColor.a *= retireEdge;`,
         tailCurvePrev = curvePoints[curvePoints.length - 2]
         tailCurveTail = curvePoints[curvePoints.length - 1]
       }
-      const baseCurve = new THREE.CatmullRomCurve3(curvePoints, false, 'centripetal')
-      const tubularSegments = Math.max(8, curvePoints.length * 4)
-      const tubeGeometry = new THREE.TubeGeometry(
-        baseCurve,
-        tubularSegments,
-        radius,
-        SNAKE_TUBE_RADIAL_SEGMENTS,
-        false,
-      )
+      // Update cached tube geometry in-place (avoid per-frame TubeGeometry allocations + disposals).
+      const tubeGeometry = visual.tube.geometry
+      if (!(tubeGeometry instanceof THREE.BufferGeometry)) {
+        // Should be unreachable; createSnakeVisual always supplies BufferGeometry.
+        visual.tube.geometry = new THREE.BufferGeometry()
+      }
+      const resolvedTubeGeometry =
+        (visual.tube.geometry as THREE.BufferGeometry) ?? new THREE.BufferGeometry()
+	      // Keep segment density consistent with the previous TubeGeometry path (visual parity).
+	      const tubularSegments = Math.max(8, curvePoints.length * 4)
+	      const tubeCache = ensureSnakeTubeCache(player.id, resolvedTubeGeometry, tubularSegments)
+	      snakeTubeCurve.points = curvePoints
+	      updateSnakeTubeGeometry(tubeCache, snakeTubeCurve, radius)
       // Keep skin UV progression continuous while the tail is fractionally extended.
-      applySnakeSkinUVs(tubeGeometry, player.snakeStart, nodes.length + extensionRatio)
+      applySnakeSkinUVs(resolvedTubeGeometry, player.snakeStart, nodes.length + extensionRatio)
       const digestionStartOffset = computeDigestionStartOffset(curvePoints)
       if (digestionVisuals.length) {
-        applyDigestionBulges(tubeGeometry, digestionVisuals, digestionStartOffset, digestionBulgeScale)
+        applyDigestionBulges(
+          resolvedTubeGeometry,
+          digestionVisuals,
+          digestionStartOffset,
+          digestionBulgeScale,
+        )
       }
       let overlapMax = 0
       if (SNAKE_SELF_OVERLAP_GLOW_ENABLED && curvePoints.length >= SNAKE_SELF_OVERLAP_MIN_POINTS) {
         const overlap = computeSnakeSelfOverlapPointIntensities(curvePoints, radius)
         overlapMax = overlap.maxIntensity
         if (overlapMax > SNAKE_SELF_OVERLAP_GLOW_VISIBILITY_THRESHOLD) {
-          applySnakeSelfOverlapColors(tubeGeometry, overlap.intensities, curvePoints.length)
+          applySnakeSelfOverlapColors(
+            resolvedTubeGeometry,
+            overlap.intensities,
+            curvePoints.length,
+          )
         }
       }
-
-      const oldTubeGeometry = visual.tube.geometry
-      const oldGlowGeometry = visual.selfOverlapGlow.geometry
-      visual.tube.geometry = tubeGeometry
-      visual.selfOverlapGlow.geometry = tubeGeometry
-      if (oldGlowGeometry !== oldTubeGeometry) {
-        oldGlowGeometry.dispose()
-      }
-      oldTubeGeometry.dispose()
 
       visual.selfOverlapGlowMaterial.opacity = opacity * SNAKE_SELF_OVERLAP_GLOW_OPACITY
       visual.selfOverlapGlowMaterial.color.set(visual.color)
@@ -7711,14 +8450,9 @@ diffuseColor.a *= retireEdge;`,
         lastTailDirections.set(player.id, tailDir.clone())
       }
       storeTailFrameState(player.id, tailNormal, tailDir)
-      if (visual.tube.geometry instanceof THREE.TubeGeometry) {
-        const capGeometry = buildTailCapGeometry(visual.tube.geometry, tailDir)
-        if (capGeometry) {
-          if (visual.tail.geometry !== tailGeometry) {
-            visual.tail.geometry.dispose()
-          }
-          visual.tail.geometry = capGeometry
-        }
+      const tubeGeometry = visual.tube.geometry
+      if (tubeGeometry instanceof THREE.BufferGeometry) {
+        updateSnakeTailCap(player.id, visual, tubeGeometry, tailDir)
       }
       visual.tail.position.set(0, 0, 0)
       visual.tail.quaternion.identity()
@@ -7761,6 +8495,7 @@ diffuseColor.a *= retireEdge;`,
     deathStates.delete(id)
     lastAliveStates.delete(id)
     lastSnakeStarts.delete(id)
+    snakeTubeCaches.delete(id)
   }
 
   const updateSnakes = (
@@ -8892,17 +9627,17 @@ diffuseColor.a *= retireEdge;`,
 				                    pointerArrowPositions[tipBase + 5] =
 				                      pointerArrowTipPointTemp.z + pointerTargetNormalTemp.z * POINTER_ARROW_THICKNESS
 
-				                    pointerArrowMesh.visible = true
-				                    pointerArrowPositionAttr.needsUpdate = true
-				                    pointerArrowGeometry.computeVertexNormals()
-				                    const normalAttr = pointerArrowGeometry.getAttribute('normal')
-				                    if (normalAttr instanceof THREE.BufferAttribute) {
-				                      normalAttr.needsUpdate = true
-				                    }
-				                    pointerOverlayRoot.visible = true
-				                  }
-			                }
-			              }
+					                    pointerArrowMesh.visible = true
+					                    pointerArrowPositionAttr.needsUpdate = true
+					                    pointerArrowGeometry.computeVertexNormals()
+					                    const normalAttr = pointerArrowGeometry.getAttribute('normal')
+					                    if (normalAttr instanceof THREE.BufferAttribute) {
+					                      normalAttr.needsUpdate = true
+					                    }
+					                    pointerOverlayRoot.visible = true
+					                  }
+				                }
+				              }
 		            }
 	          }
 	        }
@@ -9186,6 +9921,32 @@ diffuseColor.a *= retireEdge;`,
     menuPreviewGroup.position.x = width > 920 ? -0.65 : 0
   }
 
+  const setWebgpuWorldSamples = (requestedSamples: number) => {
+    if (!webgpuOffscreenEnabled) return
+    const rounded = Math.round(requestedSamples)
+    const nextSamples = rounded <= 1 ? 1 : 4
+    if (nextSamples === webgpuWorldSamples) return
+    webgpuWorldSamples = nextSamples
+    if (!webgpuWorldTarget || !webgpuPresentMaterial) return
+
+    const previousTarget = webgpuWorldTarget
+    const nextTarget = new THREE.RenderTarget(1, 1, {
+      depthBuffer: true,
+      stencilBuffer: false,
+      samples: webgpuWorldSamples,
+      colorSpace: THREE.LinearSRGBColorSpace,
+    })
+    nextTarget.texture.name = 'snake_world_target'
+    nextTarget.texture.colorSpace = THREE.LinearSRGBColorSpace
+    const rtW = Math.max(1, Math.floor(viewportWidth * viewportDpr))
+    const rtH = Math.max(1, Math.floor(viewportHeight * viewportDpr))
+    nextTarget.setSize(rtW, rtH)
+    webgpuWorldTarget = nextTarget
+    webgpuPresentMaterial.map = nextTarget.texture
+    webgpuPresentMaterial.needsUpdate = true
+    previousTarget.dispose()
+  }
+
 	  const dispose = () => {
 	    if (webgpuPresentQuad) {
 	      webgpuPresentQuad.geometry.dispose()
@@ -9322,6 +10083,7 @@ diffuseColor.a *= retireEdge;`,
 	    setMenuPreviewVisible,
 	    setMenuPreviewSkin,
 	    setMenuPreviewOrbit,
+      setWebgpuWorldSamples: webgpuOffscreenEnabled ? setWebgpuWorldSamples : undefined,
 	    setEnvironment,
     setDebugFlags,
     setDayNightDebugMode,

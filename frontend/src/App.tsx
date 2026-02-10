@@ -124,6 +124,35 @@ type MotionStabilityDebugInfo = {
   sampleCount: number
 }
 
+const LOCAL_STORAGE_ADAPTIVE_QUALITY = 'spherical_snake_adaptive_quality'
+const LOCAL_STORAGE_MIN_DPR = 'spherical_snake_min_dpr'
+const LOCAL_STORAGE_MAX_DPR = 'spherical_snake_max_dpr'
+const LOCAL_STORAGE_WEBGPU_MSAA_SAMPLES = 'spherical_snake_webgpu_msaa_samples'
+
+const readLocalStorage = (key: string) => {
+  if (typeof window === 'undefined') return null
+  try {
+    return window.localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+const readLocalStorageBool = (key: string, fallback: boolean) => {
+  const value = readLocalStorage(key)
+  if (value === '1') return true
+  if (value === '0') return false
+  return fallback
+}
+
+const readLocalStorageNumber = (key: string, fallback: number, min: number, max: number) => {
+  const value = readLocalStorage(key)
+  if (value === null) return fallback
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return fallback
+  return clamp(parsed, min, max)
+}
+
 type RafPerfFrame = {
   tMs: number
   totalMs: number
@@ -144,6 +173,17 @@ type RafPerfInfo = {
   lastFrame: RafPerfFrame | null
   slowFrames: RafPerfFrame[]
   lastSlowLogMs: number
+}
+
+type AdaptiveQualityState = {
+  enabled: boolean
+  minDpr: number
+  maxDprCap: number
+  currentDpr: number
+  ewmaFrameMs: number
+  lastAdjustAtMs: number
+  webgpuSamples: number
+  webgpuLastChangeMs: number
 }
 
 type NetLagEvent = {
@@ -418,6 +458,17 @@ export default function App() {
     lastFrame: null,
     slowFrames: [],
     lastSlowLogMs: 0,
+  })
+  const adaptiveQualityRef = useRef<AdaptiveQualityState>({
+    // Off by default: dynamic DPR can cause visible resolution shifts/brief flashes; keep it opt-in.
+    enabled: readLocalStorageBool(LOCAL_STORAGE_ADAPTIVE_QUALITY, false),
+    minDpr: readLocalStorageNumber(LOCAL_STORAGE_MIN_DPR, 1, 1, 2),
+    maxDprCap: readLocalStorageNumber(LOCAL_STORAGE_MAX_DPR, 2, 1, 2),
+    currentDpr: 0,
+    ewmaFrameMs: 16.7,
+    lastAdjustAtMs: 0,
+    webgpuSamples: readLocalStorageNumber(LOCAL_STORAGE_WEBGPU_MSAA_SAMPLES, 4, 1, 4) >= 2 ? 4 : 1,
+    webgpuLastChangeMs: 0,
   })
   const localSnakeDisplayRef = useRef<Point[] | null>(null)
   const lastRenderFrameMsRef = useRef<number | null>(null)
@@ -1402,11 +1453,27 @@ export default function App() {
         }
         webgl.setDebugFlags?.(debugFlagsRef.current)
         webgl.setDayNightDebugMode?.(dayNightDebugModeRef.current)
+        webgl.setWebgpuWorldSamples?.(adaptiveQualityRef.current.webgpuSamples)
 
         const handleResize = () => {
           const rect = glCanvas.getBoundingClientRect()
           if (!rect.width || !rect.height) return
-          const dpr = Math.min(window.devicePixelRatio || 1, 2)
+          const adaptive = adaptiveQualityRef.current
+          const baseMaxDpr = Math.min(window.devicePixelRatio || 1, 2)
+          const maxDpr = Math.min(baseMaxDpr, adaptive.maxDprCap)
+          const minDpr = adaptive.minDpr
+          let dpr = maxDpr
+          if (adaptive.enabled) {
+            if (!Number.isFinite(adaptive.currentDpr) || adaptive.currentDpr <= 0) {
+              adaptive.currentDpr = maxDpr
+            }
+            adaptive.currentDpr = clamp(adaptive.currentDpr, minDpr, maxDpr)
+            dpr = adaptive.currentDpr
+          } else {
+            adaptive.currentDpr = maxDpr
+            dpr = maxDpr
+          }
+          dpr = Math.round(dpr * 100) / 100
           webgl?.resize(rect.width, rect.height, dpr)
           hudCanvas.width = Math.round(rect.width * dpr)
           hudCanvas.height = Math.round(rect.height * dpr)
@@ -1436,18 +1503,21 @@ export default function App() {
 	          let afterSnapshotMs = 0
 	          let afterCameraMs = 0
 	          let afterRenderMs = 0
-		          let afterHudMs = 0
-		          let afterDebugMs = 0
-		          let snapshotPlayerCount = 0
-		          let snapshotPelletCount = 0
+	          let afterHudMs = 0
+	          let afterDebugMs = 0
+	          let snapshotPlayerCount = 0
+	          let snapshotPelletCount = 0
+            let frameDeltaSeconds = 1 / 60
 		          if (config && webgl) {
 		            nowMs = performance.now()
 		            if (rafPerfEnabled) {
 		              frameStartMs = nowMs
 	            }
 		            const lastRenderFrameMs = lastRenderFrameMsRef.current
-		            const frameDeltaSeconds =
-		              lastRenderFrameMs !== null ? Math.max(0, Math.min(0.1, (nowMs - lastRenderFrameMs) / 1000)) : 1 / 60
+		            frameDeltaSeconds =
+		              lastRenderFrameMs !== null
+		                ? Math.max(0, Math.min(0.1, (nowMs - lastRenderFrameMs) / 1000))
+		                : 1 / 60
 		            lastRenderFrameMsRef.current = nowMs
 			            const localId = playerIdRef.current
 			            const rawSnapshot = getRenderSnapshot()
@@ -2273,6 +2343,61 @@ export default function App() {
 		              }
 		            }
 		          }
+              // Adaptive quality: dynamic DPR (and WebGPU offscreen MSAA) to keep frametime stable.
+              const adaptive = adaptiveQualityRef.current
+              if (config && webgl && adaptive.enabled && updateConfig) {
+                const frameMs = clamp(frameDeltaSeconds * 1000, 0, 100)
+                const alpha = 0.08
+                adaptive.ewmaFrameMs = adaptive.ewmaFrameMs * (1 - alpha) + frameMs * alpha
+                const adjustIntervalMs = 250
+                if (adaptive.lastAdjustAtMs <= 0) {
+                  adaptive.lastAdjustAtMs = nowMs
+                }
+                if (nowMs - adaptive.lastAdjustAtMs >= adjustIntervalMs) {
+                  adaptive.lastAdjustAtMs = nowMs
+                  const baseMaxDpr = Math.min(window.devicePixelRatio || 1, 2)
+                  const maxDpr = Math.min(baseMaxDpr, adaptive.maxDprCap)
+                  const minDpr = adaptive.minDpr
+                  if (!Number.isFinite(adaptive.currentDpr) || adaptive.currentDpr <= 0) {
+                    adaptive.currentDpr = maxDpr
+                  }
+
+                  let nextDpr = adaptive.currentDpr
+                  const step = 0.05
+                  if (adaptive.ewmaFrameMs > 18 && adaptive.currentDpr > minDpr + 1e-3) {
+                    nextDpr = Math.max(minDpr, adaptive.currentDpr - step)
+                  } else if (adaptive.ewmaFrameMs < 14 && adaptive.currentDpr < maxDpr - 1e-3) {
+                    nextDpr = Math.min(maxDpr, adaptive.currentDpr + step)
+                  }
+                  nextDpr = Math.round(nextDpr * 100) / 100
+                  if (Math.abs(nextDpr - adaptive.currentDpr) > 1e-6) {
+                    adaptive.currentDpr = nextDpr
+                    updateConfig()
+                  }
+
+                  const setSamples = webgl.setWebgpuWorldSamples
+                  if (typeof setSamples === 'function') {
+                    const atMinDpr = adaptive.currentDpr <= minDpr + 0.01
+                    if (adaptive.webgpuSamples > 1) {
+                      if (
+                        atMinDpr &&
+                        adaptive.ewmaFrameMs > 22 &&
+                        nowMs - adaptive.webgpuLastChangeMs > 2000
+                      ) {
+                        adaptive.webgpuSamples = 1
+                        adaptive.webgpuLastChangeMs = nowMs
+                        setSamples(1)
+                      }
+                    } else {
+                      if (adaptive.ewmaFrameMs < 16 && nowMs - adaptive.webgpuLastChangeMs > 10_000) {
+                        adaptive.webgpuSamples = 4
+                        adaptive.webgpuLastChangeMs = nowMs
+                        setSamples(4)
+                      }
+                    }
+                  }
+                }
+              }
 		          frameId = window.requestAnimationFrame(renderLoop)
 		        }
 

@@ -80,6 +80,10 @@ Repo root (recommended for full stack):
 - Frontend renderer selection is controlled by URL query param `renderer=auto|webgpu|webgl` and persisted to localStorage key `spherical_snake_renderer`.
 - Default renderer mode is `auto`: it attempts WebGPU first and falls back to WebGL with a status note if WebGPU is unavailable or init fails.
 - Changing renderer mode from the control panel performs a full page reload (required because canvas context type cannot be switched in-place).
+- Optional adaptive quality (disabled by default as of February 10, 2026) can be toggled via localStorage:
+  - `spherical_snake_adaptive_quality=1|0` (dynamic DPR + optional WebGPU offscreen MSAA downgrades).
+  - `spherical_snake_min_dpr` / `spherical_snake_max_dpr` (clamped to `1..2`).
+  - `spherical_snake_webgpu_msaa_samples=1|4` (initial MSAA for the WebGPU offscreen world target; may be changed at runtime when adaptive quality is enabled).
 - Startup flow is a pre-spawn hero menu over the live world: before gameplay starts, the menu shows a pilot-name input, a primary play button (`Play` on initial load, `Play again` after returning from a death), and a lower-right `Change skin` button.
 - `Change skin` opens a 3D preview + saved-design picker plus a builder flow; builder designs can be seeded with `1..=8` colors and repeat to fill the 8-slot spawn pattern.
 - Pre-spawn hero copy is intentionally minimal: title text is `Slither World` with no subtitle or pilot-name label.
