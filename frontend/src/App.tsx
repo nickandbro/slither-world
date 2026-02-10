@@ -2902,8 +2902,8 @@ export default function App() {
     if (t <= JOY_DEADZONE_RATIO) {
       joystickAxisRef.current = null
     } else {
-      // Angle in screen space (dx right, dy down) with 0 pointing up.
-      const angle = Math.atan2(dx, -dy)
+      // Keep the original stick feel (angle mapping tuned by feel rather than strict screen direction).
+      const angle = Math.atan2(dy, dx)
       joystickAxisRef.current = axisFromPointer(angle, cameraRef.current)
     }
 
