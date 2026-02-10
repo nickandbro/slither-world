@@ -720,6 +720,12 @@ export type RenderScene = {
     cameraDistance: number,
     cameraVerticalOffset?: number,
   ) => { x: number; y: number } | null
+  // Screen-space pointer input for mouse/touch aiming. `active` should be false when gameplay input
+  // is disabled or the pointer leaves the canvas.
+  setPointerScreen?: (x: number, y: number, active: boolean) => void
+  // Returns a unit axis (local planet coordinates) representing the desired steering direction,
+  // or null when the pointer is inactive/off-planet or the local head is unavailable.
+  getPointerAxis?: () => Point | null
   setMenuPreviewVisible: (visible: boolean) => void
   setMenuPreviewSkin: (colors: string[] | null, previewLen?: number) => void
   setMenuPreviewOrbit: (yaw: number, pitch: number) => void
@@ -2425,10 +2431,145 @@ export const createScene = async (
   let menuPreviewYaw = -0.35
   let menuPreviewPitch = 0.08
 
-  const rebuildMenuPreviewGeometry = (nextLen: number) => {
-    const len = clamp(Math.floor(nextLen), 1, 8)
-    const pointCount = Math.max(2, len)
-    const points: THREE.Vector3[] = []
+  // Pointer aiming overlay (3D curved arrow rendered above everything).
+  const POINTER_ARROW_SEGMENTS = 16
+  const POINTER_ARROW_ARC_RADIANS = 0.12
+  const POINTER_ARROW_LIFT = SNAKE_RADIUS * 0.25
+  const POINTER_ARROW_HALF_WIDTH = SNAKE_RADIUS * 0.65
+  const POINTER_ARROW_HEAD_LENGTH = SNAKE_RADIUS * 3.2
+  const POINTER_ARROW_HEAD_WIDTH = SNAKE_RADIUS * 3.4
+  const POINTER_ARROW_HEAD_NECK_WIDTH = POINTER_ARROW_HALF_WIDTH * 2.1
+  const POINTER_ARROW_HEAD_DEPTH = SNAKE_RADIUS * 0.55
+  const POINTER_ARROW_HEAD_SHOULDER_T = 0.35
+
+  let pointerScreenX = Number.NaN
+  let pointerScreenY = Number.NaN
+  let pointerActive = false
+
+  const pointerAxisValue: Point = { x: 0, y: 0, z: 0 }
+  let pointerAxisActive = false
+
+  const pointerOverlayScene = new THREE.Scene()
+  const pointerOverlayRoot = new THREE.Group()
+  pointerOverlayRoot.visible = false
+  pointerOverlayScene.add(pointerOverlayRoot)
+
+  const pointerArrowShaftMaterial = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.9,
+    side: THREE.DoubleSide,
+    depthTest: false,
+    depthWrite: false,
+    fog: false,
+  })
+  pointerArrowShaftMaterial.depthTest = false
+  pointerArrowShaftMaterial.depthWrite = false
+  const pointerArrowHeadFaceMaterial = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    transparent: false,
+    opacity: 1,
+    side: THREE.DoubleSide,
+    depthTest: false,
+    depthWrite: false,
+    fog: false,
+  })
+  pointerArrowHeadFaceMaterial.depthTest = false
+  pointerArrowHeadFaceMaterial.depthWrite = false
+  // Slightly darker sides give a cheap 3D look without lighting.
+  const pointerArrowHeadSideMaterial = new THREE.MeshBasicMaterial({
+    color: 0xe7e7e7,
+    transparent: false,
+    opacity: 1,
+    side: THREE.DoubleSide,
+    depthTest: false,
+    depthWrite: false,
+    fog: false,
+  })
+  pointerArrowHeadSideMaterial.depthTest = false
+  pointerArrowHeadSideMaterial.depthWrite = false
+
+  const pointerArrowVertexCount = (POINTER_ARROW_SEGMENTS + 1) * 2
+  const pointerArrowPositions = new Float32Array(pointerArrowVertexCount * 3)
+  const pointerArrowPositionAttr = new THREE.BufferAttribute(pointerArrowPositions, 3)
+  const pointerArrowIndices = new Uint16Array(POINTER_ARROW_SEGMENTS * 6)
+  for (let i = 0; i < POINTER_ARROW_SEGMENTS; i += 1) {
+    const v0 = i * 2
+    const v1 = v0 + 1
+    const v2 = v0 + 2
+    const v3 = v0 + 3
+    const out = i * 6
+    pointerArrowIndices[out] = v0
+    pointerArrowIndices[out + 1] = v1
+    pointerArrowIndices[out + 2] = v2
+    pointerArrowIndices[out + 3] = v1
+    pointerArrowIndices[out + 4] = v3
+    pointerArrowIndices[out + 5] = v2
+  }
+  const pointerArrowShaftGeometry = new THREE.BufferGeometry()
+  pointerArrowShaftGeometry.setAttribute('position', pointerArrowPositionAttr)
+  pointerArrowShaftGeometry.setIndex(new THREE.BufferAttribute(pointerArrowIndices, 1))
+  const pointerArrowShaftMesh = new THREE.Mesh(pointerArrowShaftGeometry, pointerArrowShaftMaterial)
+  pointerArrowShaftMesh.frustumCulled = false
+  pointerArrowShaftMesh.renderOrder = 10_000
+  pointerOverlayRoot.add(pointerArrowShaftMesh)
+
+  const pointerArrowHeadHalfLen = POINTER_ARROW_HEAD_LENGTH * 0.5
+  const pointerArrowHeadHalfWidth = POINTER_ARROW_HEAD_WIDTH * 0.5
+  const pointerArrowHeadNeckHalfWidth = POINTER_ARROW_HEAD_NECK_WIDTH * 0.5
+  const pointerArrowHeadShoulderY =
+    -pointerArrowHeadHalfLen + POINTER_ARROW_HEAD_LENGTH * POINTER_ARROW_HEAD_SHOULDER_T
+  const pointerArrowHeadShape = new THREE.Shape()
+  pointerArrowHeadShape.moveTo(pointerArrowHeadNeckHalfWidth, -pointerArrowHeadHalfLen)
+  pointerArrowHeadShape.lineTo(pointerArrowHeadHalfWidth, pointerArrowHeadShoulderY)
+  pointerArrowHeadShape.lineTo(0, pointerArrowHeadHalfLen)
+  pointerArrowHeadShape.lineTo(-pointerArrowHeadHalfWidth, pointerArrowHeadShoulderY)
+  pointerArrowHeadShape.lineTo(-pointerArrowHeadNeckHalfWidth, -pointerArrowHeadHalfLen)
+  pointerArrowHeadShape.closePath()
+  const pointerArrowHeadGeometry = new THREE.ExtrudeGeometry(pointerArrowHeadShape, {
+    steps: 1,
+    depth: POINTER_ARROW_HEAD_DEPTH,
+    bevelEnabled: false,
+  })
+  pointerArrowHeadGeometry.translate(0, 0, -POINTER_ARROW_HEAD_DEPTH * 0.5)
+  const pointerArrowHeadMesh = new THREE.Mesh(pointerArrowHeadGeometry, [
+    pointerArrowHeadFaceMaterial,
+    pointerArrowHeadSideMaterial,
+  ])
+  pointerArrowHeadMesh.frustumCulled = false
+  pointerArrowHeadMesh.renderOrder = 10_001
+  pointerOverlayRoot.add(pointerArrowHeadMesh)
+
+  const pointerRaycaster = new THREE.Raycaster()
+  const pointerNdcTemp = new THREE.Vector2()
+  const pointerRayLocal = new THREE.Ray(new THREE.Vector3(), new THREE.Vector3(0, 0, -1))
+  const pointerSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), PLANET_RADIUS)
+  const pointerOriginLocalTemp = new THREE.Vector3()
+  const pointerDirLocalTemp = new THREE.Vector3()
+  const pointerHitLocalTemp = new THREE.Vector3()
+  const pointerTargetNormalTemp = new THREE.Vector3(0, 0, 1)
+  const pointerLocalHeadNormalTemp = new THREE.Vector3(0, 0, 1)
+  const pointerAxisVectorTemp = new THREE.Vector3()
+  const pointerArrowTipPointTemp = new THREE.Vector3()
+  const pointerArrowHeadBasisTemp = new THREE.Matrix4()
+  const pointerArrowDirs = Array.from({ length: POINTER_ARROW_SEGMENTS + 1 }, () => new THREE.Vector3())
+  const pointerArrowPoints = Array.from({ length: POINTER_ARROW_SEGMENTS + 1 }, () => new THREE.Vector3())
+  const pointerArrowTangentTemp = new THREE.Vector3()
+  const pointerArrowSideTemp = new THREE.Vector3()
+  const pointerArrowForwardTemp = new THREE.Vector3()
+
+  const setPointerScreen = (x: number, y: number, active: boolean) => {
+    pointerScreenX = x
+    pointerScreenY = y
+    pointerActive = active
+  }
+
+  const getPointerAxis = () => (pointerAxisActive ? pointerAxisValue : null)
+
+		  const rebuildMenuPreviewGeometry = (nextLen: number) => {
+		    const len = clamp(Math.floor(nextLen), 1, 8)
+		    const pointCount = Math.max(2, len)
+	    const points: THREE.Vector3[] = []
     const spacing = 0.21
     const half = (pointCount - 1) * 0.5
     for (let i = 0; i < pointCount; i += 1) {
@@ -8182,6 +8323,7 @@ diffuseColor.a *= retireEdge;`,
 	    } else {
 	      world.quaternion.identity()
     }
+    pointerOverlayRoot.quaternion.copy(world.quaternion)
     if (Number.isFinite(cameraDistance)) {
       camera.position.set(
         0,
@@ -8190,15 +8332,19 @@ diffuseColor.a *= retireEdge;`,
       )
     }
     camera.updateMatrixWorld()
-    const cycleNowMs = snapshot?.now ?? Date.now()
-    updateDayNightVisuals(cycleNowMs)
+	    const cycleNowMs = snapshot?.now ?? Date.now()
+		    updateDayNightVisuals(cycleNowMs)
+	
+		    let localHeadScreen: { x: number; y: number } | null = null
+		    let pointerHasLocalHead = false
+		    void pointerHasLocalHead
+		    pointerAxisActive = false
+		    pointerOverlayRoot.visible = false
 
-    let localHeadScreen: { x: number; y: number } | null = null
-
-    if (snapshot && localPlayerId) {
-      const localPlayer = snapshot.players.find((player) => player.id === localPlayerId)
-      const head = localPlayer?.snakeDetail !== 'stub' ? localPlayer?.snake[0] : undefined
-      if (head) {
+	    if (snapshot && localPlayerId) {
+	      const localPlayer = snapshot.players.find((player) => player.id === localPlayerId)
+	      const head = localPlayer?.snakeDetail !== 'stub' ? localPlayer?.snake[0] : undefined
+	      if (head) {
         const girthScale = clamp(
           localPlayer?.girthScale ?? 1,
           SNAKE_GIRTH_SCALE_MIN,
@@ -8207,7 +8353,9 @@ diffuseColor.a *= retireEdge;`,
         const radius = SNAKE_RADIUS * girthScale * 1.1
         const radiusOffset = radius * SNAKE_LIFT_FACTOR
         const headRadius = HEAD_RADIUS * (radius / SNAKE_RADIUS)
-        const headNormal = tempVectorC.set(head.x, head.y, head.z).normalize()
+	        const headNormal = tempVectorC.set(head.x, head.y, head.z).normalize()
+	        pointerLocalHeadNormalTemp.copy(headNormal)
+	        pointerHasLocalHead = true
         snakeContactTangentTemp.set(0, 0, 0)
         if (localPlayer && localPlayer.snake.length > 1) {
           const next = localPlayer.snake[1]
@@ -8254,16 +8402,211 @@ diffuseColor.a *= retireEdge;`,
     patchCenterQuat.copy(world.quaternion).invert()
     cameraLocalPosTemp.copy(camera.position).applyQuaternion(patchCenterQuat)
     const cameraLocalDistance = cameraLocalPosTemp.length()
-    if (!Number.isFinite(cameraLocalDistance) || cameraLocalDistance <= 1e-8) {
-      cameraLocalDirTemp.set(0, 0, 1)
-    } else {
-      cameraLocalDirTemp.copy(cameraLocalPosTemp).multiplyScalar(1 / cameraLocalDistance)
-    }
-	    const aspect = viewportHeight > 0 ? viewportWidth / viewportHeight : 1
-	    const viewAngle = computeVisibleSurfaceAngle(cameraLocalDistance, aspect)
-	    if (perfEnabled) {
-	      afterSetupMs = performance.now()
+	    if (!Number.isFinite(cameraLocalDistance) || cameraLocalDistance <= 1e-8) {
+	      cameraLocalDirTemp.set(0, 0, 1)
+	    } else {
+	      cameraLocalDirTemp.copy(cameraLocalPosTemp).multiplyScalar(1 / cameraLocalDistance)
 	    }
+
+	    // Resolve pointer screen coords to a terrain hit and build an always-on-top curved arrow.
+	    if (
+	      pointerActive &&
+	      pointerHasLocalHead &&
+	      Number.isFinite(pointerScreenX) &&
+	      Number.isFinite(pointerScreenY) &&
+	      viewportWidth > 0 &&
+	      viewportHeight > 0
+	    ) {
+	      const ndcX = (pointerScreenX / viewportWidth) * 2 - 1
+	      const ndcY = -(pointerScreenY / viewportHeight) * 2 + 1
+	      if (Number.isFinite(ndcX) && Number.isFinite(ndcY)) {
+	        pointerNdcTemp.set(ndcX, ndcY)
+	        pointerRaycaster.setFromCamera(pointerNdcTemp, camera)
+
+	        pointerOriginLocalTemp.copy(pointerRaycaster.ray.origin).applyQuaternion(patchCenterQuat)
+	        pointerDirLocalTemp.copy(pointerRaycaster.ray.direction).applyQuaternion(patchCenterQuat)
+	        const dirLenSq = pointerDirLocalTemp.lengthSq()
+	        if (dirLenSq > 1e-12) {
+	          pointerDirLocalTemp.multiplyScalar(1 / Math.sqrt(dirLenSq))
+	          pointerRayLocal.origin.copy(pointerOriginLocalTemp)
+	          pointerRayLocal.direction.copy(pointerDirLocalTemp)
+
+	          // Iteratively solve for intersection with the radial terrain surface (keeps the hit under the cursor).
+	          pointerSphere.radius = PLANET_RADIUS
+	          let hit = pointerRayLocal.intersectSphere(pointerSphere, pointerHitLocalTemp)
+	          if (hit) {
+	            let ok = true
+	            for (let iter = 0; iter < 3; iter += 1) {
+	              const hitLenSq = pointerHitLocalTemp.lengthSq()
+	              if (hitLenSq <= 1e-12) {
+	                ok = false
+	                break
+	              }
+	              const invHitLen = 1 / Math.sqrt(hitLenSq)
+	              pointerTargetNormalTemp.copy(pointerHitLocalTemp).multiplyScalar(invHitLen)
+	              const radius = getTerrainRadius(pointerTargetNormalTemp)
+	              if (!Number.isFinite(radius) || radius <= 0) {
+	                ok = false
+	                break
+	              }
+	              if (Math.abs(1 / invHitLen - radius) < 1e-4) {
+	                break
+	              }
+	              pointerSphere.radius = radius
+	              hit = pointerRayLocal.intersectSphere(pointerSphere, pointerHitLocalTemp)
+	              if (!hit) {
+	                ok = false
+	                break
+	              }
+	            }
+
+	            if (ok) {
+	              pointerTargetNormalTemp.copy(pointerHitLocalTemp).normalize()
+
+	              pointerAxisVectorTemp.crossVectors(pointerLocalHeadNormalTemp, pointerTargetNormalTemp)
+	              const axisLenSq = pointerAxisVectorTemp.lengthSq()
+	              if (axisLenSq > 1e-8) {
+	                pointerAxisVectorTemp.multiplyScalar(1 / Math.sqrt(axisLenSq))
+	                pointerAxisValue.x = pointerAxisVectorTemp.x
+	                pointerAxisValue.y = pointerAxisVectorTemp.y
+	                pointerAxisValue.z = pointerAxisVectorTemp.z
+	                pointerAxisActive = true
+
+	                const dotValue = clamp(
+	                  pointerLocalHeadNormalTemp.dot(pointerTargetNormalTemp),
+	                  -1,
+	                  1,
+	                )
+		                const angle = Math.acos(dotValue)
+		                if (Number.isFinite(angle) && angle > 1e-4) {
+			                  const arc = Math.min(POINTER_ARROW_ARC_RADIANS, angle)
+			                  const tStart = clamp(1 - arc / angle, 0, 1)
+			                  const tipRadius = getTerrainRadius(pointerTargetNormalTemp)
+			                  if (Number.isFinite(tipRadius) && tipRadius > 0) {
+			                    pointerArrowTipPointTemp
+			                      .copy(pointerTargetNormalTemp)
+			                      .multiplyScalar(tipRadius + POINTER_ARROW_LIFT)
+			                    const headAngle = POINTER_ARROW_HEAD_LENGTH / Math.max(1e-3, tipRadius)
+			                    const shaftEndT = clamp(1 - headAngle / angle, tStart, 1)
+			                    const shaftVisible = shaftEndT > tStart + 1e-4
+			                    pointerArrowShaftMesh.visible = shaftVisible
+
+		                  if (shaftVisible) {
+		                    for (let i = 0; i <= POINTER_ARROW_SEGMENTS; i += 1) {
+		                      const t =
+		                        tStart + (shaftEndT - tStart) * (i / POINTER_ARROW_SEGMENTS)
+		                      const dir = pointerArrowDirs[i]
+		                      const point = pointerArrowPoints[i]
+		                      slerpNormals(pointerLocalHeadNormalTemp, pointerTargetNormalTemp, t, dir)
+		                      const radius = getTerrainRadius(dir)
+		                      point.copy(dir).multiplyScalar(radius + POINTER_ARROW_LIFT)
+		                    }
+
+		                    for (let i = 0; i <= POINTER_ARROW_SEGMENTS; i += 1) {
+		                      const normal = pointerArrowDirs[i]
+		                      const point = pointerArrowPoints[i]
+		                      if (i === 0) {
+		                        pointerArrowTangentTemp.copy(pointerArrowPoints[1]).sub(point)
+		                      } else if (i === POINTER_ARROW_SEGMENTS) {
+		                        pointerArrowTangentTemp
+		                          .copy(point)
+		                          .sub(pointerArrowPoints[POINTER_ARROW_SEGMENTS - 1])
+		                      } else {
+		                        pointerArrowTangentTemp
+		                          .copy(pointerArrowPoints[i + 1])
+		                          .sub(pointerArrowPoints[i - 1])
+		                          .multiplyScalar(0.5)
+		                      }
+		                      pointerArrowTangentTemp.addScaledVector(
+		                        normal,
+		                        -pointerArrowTangentTemp.dot(normal),
+		                      )
+		                      if (pointerArrowTangentTemp.lengthSq() <= 1e-10) {
+		                        buildTangentBasis(normal, pointerArrowTangentTemp, pointerArrowSideTemp)
+		                      } else {
+		                        pointerArrowTangentTemp.normalize()
+		                        pointerArrowSideTemp.crossVectors(normal, pointerArrowTangentTemp)
+		                        if (pointerArrowSideTemp.lengthSq() <= 1e-10) {
+		                          buildTangentBasis(normal, pointerArrowTangentTemp, pointerArrowSideTemp)
+		                        } else {
+		                          pointerArrowSideTemp.normalize()
+		                        }
+		                      }
+
+		                      const widthT = i / POINTER_ARROW_SEGMENTS
+		                      const halfWidth = POINTER_ARROW_HALF_WIDTH * (0.75 + 0.25 * widthT)
+		                      const sx = pointerArrowSideTemp.x * halfWidth
+		                      const sy = pointerArrowSideTemp.y * halfWidth
+		                      const sz = pointerArrowSideTemp.z * halfWidth
+		                      const base = i * 2 * 3
+		                      pointerArrowPositions[base] = point.x + sx
+		                      pointerArrowPositions[base + 1] = point.y + sy
+		                      pointerArrowPositions[base + 2] = point.z + sz
+		                      pointerArrowPositions[base + 3] = point.x - sx
+		                      pointerArrowPositions[base + 4] = point.y - sy
+		                      pointerArrowPositions[base + 5] = point.z - sz
+		                    }
+		                    pointerArrowPositionAttr.needsUpdate = true
+		                  }
+
+		                  if (shaftVisible) {
+		                    pointerArrowForwardTemp
+		                      .copy(pointerArrowTipPointTemp)
+		                      .sub(pointerArrowPoints[POINTER_ARROW_SEGMENTS])
+		                  } else {
+		                    // Great-circle tangent at the cursor, pointing away from the head.
+		                    pointerArrowForwardTemp.crossVectors(
+		                      pointerAxisVectorTemp,
+		                      pointerTargetNormalTemp,
+		                    )
+		                  }
+		                  pointerArrowForwardTemp.addScaledVector(
+		                    pointerTargetNormalTemp,
+		                    -pointerArrowForwardTemp.dot(pointerTargetNormalTemp),
+		                  )
+		                  if (pointerArrowForwardTemp.lengthSq() <= 1e-10) {
+		                    buildTangentBasis(pointerTargetNormalTemp, pointerArrowForwardTemp, pointerArrowSideTemp)
+		                  } else {
+		                    pointerArrowForwardTemp.normalize()
+		                  }
+
+		                  // Stable basis: +Y = forward, +Z = surface normal.
+		                  pointerArrowSideTemp.crossVectors(pointerArrowForwardTemp, pointerTargetNormalTemp)
+		                  if (pointerArrowSideTemp.lengthSq() <= 1e-10) {
+		                    buildTangentBasis(pointerTargetNormalTemp, pointerArrowForwardTemp, pointerArrowSideTemp)
+		                  } else {
+		                    pointerArrowSideTemp.normalize()
+		                  }
+		                  pointerArrowForwardTemp.crossVectors(pointerTargetNormalTemp, pointerArrowSideTemp)
+		                  if (pointerArrowForwardTemp.lengthSq() <= 1e-10) {
+		                    buildTangentBasis(pointerTargetNormalTemp, pointerArrowForwardTemp, pointerArrowSideTemp)
+		                  } else {
+		                    pointerArrowForwardTemp.normalize()
+		                  }
+		                  pointerArrowHeadBasisTemp.makeBasis(
+		                    pointerArrowSideTemp,
+		                    pointerArrowForwardTemp,
+		                    pointerTargetNormalTemp,
+		                  )
+		                  pointerArrowHeadMesh.quaternion.setFromRotationMatrix(pointerArrowHeadBasisTemp)
+		                  pointerArrowHeadMesh.position
+		                    .copy(pointerArrowTipPointTemp)
+		                    .addScaledVector(pointerArrowForwardTemp, -POINTER_ARROW_HEAD_LENGTH * 0.5)
+
+		                  pointerOverlayRoot.visible = true
+			                  }
+		                }
+		              }
+		            }
+	          }
+	        }
+	      }
+	    }
+		    const aspect = viewportHeight > 0 ? viewportWidth / viewportHeight : 1
+		    const viewAngle = computeVisibleSurfaceAngle(cameraLocalDistance, aspect)
+		    if (perfEnabled) {
+		      afterSetupMs = performance.now()
+		    }
 
 	    if (snapshot) {
 	      const pelletOverride = updateSnakes(
@@ -8369,14 +8712,18 @@ diffuseColor.a *= retireEdge;`,
 	        passLakesMs = performance.now() - passStartMs
 	      }
 
-        if (menuPreviewVisible && menuPreviewGroup.visible) {
-          menuPreviewGroup.rotation.set(menuPreviewPitch, menuPreviewYaw, 0)
-          renderer.clearDepth()
-          renderer.render(menuPreviewScene, menuPreviewCamera)
-        }
-	    } finally {
-	      renderer.autoClear = savedAutoClear
-	    }
+	        if (menuPreviewVisible && menuPreviewGroup.visible) {
+	          menuPreviewGroup.rotation.set(menuPreviewPitch, menuPreviewYaw, 0)
+	          renderer.clearDepth()
+	          renderer.render(menuPreviewScene, menuPreviewCamera)
+	        }
+	        if (pointerOverlayRoot.visible) {
+	          renderer.clearDepth()
+	          renderer.render(pointerOverlayScene, camera)
+	        }
+		    } finally {
+		      renderer.autoClear = savedAutoClear
+		    }
 	    if (perfEnabled) {
 	      const frameEndMs = performance.now()
 	      const totalMs = frameEndMs - perfStartMs
@@ -8525,13 +8872,18 @@ diffuseColor.a *= retireEdge;`,
     tongueMaterial.dispose()
     boostDraftGeometry.dispose()
     boostDraftTexture?.dispose()
-    menuPreviewMaterial.dispose()
-    menuPreviewHeadMaterial.dispose()
-    menuPreviewTube.geometry.dispose()
-    menuPreviewTail.geometry.dispose()
-    for (const texture of snakeSkinTextureCache.values()) {
-      texture.dispose()
-    }
+	    menuPreviewMaterial.dispose()
+	    menuPreviewHeadMaterial.dispose()
+	    menuPreviewTube.geometry.dispose()
+	    menuPreviewTail.geometry.dispose()
+	    pointerArrowShaftMaterial.dispose()
+	    pointerArrowHeadFaceMaterial.dispose()
+	    pointerArrowHeadSideMaterial.dispose()
+	    pointerArrowShaftGeometry.dispose()
+	    pointerArrowHeadGeometry.dispose()
+	    for (const texture of snakeSkinTextureCache.values()) {
+	      texture.dispose()
+	    }
     snakeSkinTextureCache.clear()
     for (let i = 0; i < pelletBuckets.length; i += 1) {
       const bucket = pelletBuckets[i]
@@ -8579,13 +8931,15 @@ diffuseColor.a *= retireEdge;`,
     }
   }
 
-  return {
-    resize,
-    render,
-    setMenuPreviewVisible,
-    setMenuPreviewSkin,
-    setMenuPreviewOrbit,
-    setEnvironment,
+	  return {
+	    resize,
+	    render,
+	    setPointerScreen,
+	    getPointerAxis,
+	    setMenuPreviewVisible,
+	    setMenuPreviewSkin,
+	    setMenuPreviewOrbit,
+	    setEnvironment,
     setDebugFlags,
     setDayNightDebugMode,
     dispose,

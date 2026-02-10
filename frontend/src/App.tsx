@@ -8,7 +8,7 @@ import {
   type RendererPreference,
 } from './render/webglScene'
 import type { Camera, Environment, GameStateSnapshot, Point } from './game/types'
-import { axisFromPointer, updateCamera } from './game/camera'
+import { updateCamera } from './game/camera'
 import { IDENTITY_QUAT, clamp, lerpPoint, normalize } from './game/math'
 import { buildInterpolatedSnapshot, type TimedSnapshot } from './game/snapshots'
 import { drawHud, type RenderConfig } from './game/hud'
@@ -56,7 +56,6 @@ import {
   MENU_OVERLAY_FADE_OUT_MS,
   MENU_TO_GAMEPLAY_BLEND_MS,
   MOTION_BACKWARD_DOT_THRESHOLD,
-  POINTER_MAX_RANGE_RATIO,
   REALTIME_LEADERBOARD_LIMIT,
   SCORE_RADIAL_BLOCKED_FLASH_MS,
   SCORE_RADIAL_FADE_IN_RATE,
@@ -310,13 +309,10 @@ export default function App() {
   const webglRef = useRef<RenderScene | null>(null)
   const renderConfigRef = useRef<RenderConfig | null>(null)
   const pointerRef = useRef({
-    angle: 0,
     boost: false,
     active: false,
     screenX: Number.NaN,
     screenY: Number.NaN,
-    distance: 0,
-    maxRange: 0,
   })
   const boostInputRef = useRef({
     keyboard: false,
@@ -1313,6 +1309,7 @@ export default function App() {
     inputEnabledRef.current = menuPhase === 'playing'
     if (menuPhase !== 'playing') {
       pointerRef.current.active = false
+      webglRef.current?.setPointerScreen?.(Number.NaN, Number.NaN, false)
       clearBoostInputs()
     }
     if (menuPhase === 'preplay' && !allowPreplayAutoResumeRef.current) {
@@ -1640,6 +1637,7 @@ export default function App() {
             } else if (localLifeSpawnedRef.current && deathStartedAtMsRef.current === null) {
               deathStartedAtMsRef.current = nowMs
               pointerRef.current.active = false
+              webglRef.current?.setPointerScreen?.(Number.NaN, Number.NaN, false)
               clearBoostInputs()
             }
 
@@ -1803,6 +1801,7 @@ export default function App() {
             localHeadRef.current = hasSpawnedSnake && localHead ? normalize(localHead) : MENU_CAMERA_TARGET
             if (!hasSpawnedSnake) {
               pointerRef.current.active = false
+              webglRef.current?.setPointerScreen?.(Number.NaN, Number.NaN, false)
               clearBoostInputs()
             }
 	            boostActive =
@@ -1985,17 +1984,17 @@ export default function App() {
               if (!scoreRadialVisibleTarget && scoreRadialState.opacity <= 0.001) {
                 scoreRadialState.blockedVisualHold = false
               }
-              drawHud(
-                hudCtx,
-                config,
-                pointerRef.current.active ? pointerRef.current.angle : null,
-                headScreen,
-                pointerRef.current.active ? pointerRef.current.distance : null,
-                pointerRef.current.active ? pointerRef.current.maxRange : null,
-                {
-                  pct: oxygenPct,
-                  low: oxygenPct !== null && oxygenPct <= 35,
-                  anchor: headScreen,
+                drawHud(
+                  hudCtx,
+                  config,
+                  null,
+                  headScreen,
+                  null,
+                  null,
+                  {
+                    pct: oxygenPct,
+                    low: oxygenPct !== null && oxygenPct <= 35,
+                    anchor: headScreen,
                 },
                 {
                   active: scoreRadialState.opacity > 0.001,
@@ -2395,6 +2394,7 @@ export default function App() {
       }
       setMenuOverlayExiting(false)
       pointerRef.current.active = false
+      webglRef.current?.setPointerScreen?.(Number.NaN, Number.NaN, false)
       clearBoostInputs()
       setConnectionStatus('Matchmaking')
       setGameState(null)
@@ -2530,36 +2530,16 @@ export default function App() {
   }, [])
 
   const updatePointer = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!inputEnabledRef.current) {
-      pointerRef.current.active = false
-      return
-    }
     const canvas = glCanvasRef.current
     if (!canvas) return
     const rect = canvas.getBoundingClientRect()
     const localX = event.clientX - rect.left
     const localY = event.clientY - rect.top
-    const origin = headScreenRef.current
-    const originX = origin?.x ?? rect.width / 2
-    const originY = origin?.y ?? rect.height / 2
-    const dx = localX - originX
-    const dy = localY - originY
-    const distance2d = Math.hypot(dx, dy)
-    const maxRange = Math.min(rect.width, rect.height) * POINTER_MAX_RANGE_RATIO
     pointerRef.current.screenX = localX
     pointerRef.current.screenY = localY
-    pointerRef.current.distance = distance2d
-    pointerRef.current.maxRange = maxRange
-    if (!Number.isFinite(distance2d) || !Number.isFinite(maxRange) || maxRange <= 0) {
-      pointerRef.current.active = false
-      return
-    }
-    if (distance2d > maxRange) {
-      pointerRef.current.active = false
-      return
-    }
-    pointerRef.current.angle = Math.atan2(dy, dx)
-    pointerRef.current.active = true
+    const active = inputEnabledRef.current
+    pointerRef.current.active = active
+    webglRef.current?.setPointerScreen?.(localX, localY, active)
   }
 
   const startInputLoop = () => {
@@ -2567,9 +2547,10 @@ export default function App() {
     sendIntervalRef.current = window.setInterval(() => {
       const socket = socketRef.current
       if (!socket || socket.readyState !== WebSocket.OPEN) return
-      const axis = inputEnabledRef.current && pointerRef.current.active
-        ? axisFromPointer(pointerRef.current.angle, cameraRef.current)
-        : null
+      const axis =
+        inputEnabledRef.current && pointerRef.current.active
+          ? webglRef.current?.getPointerAxis?.() ?? null
+          : null
       const config = renderConfigRef.current
       const aspect = config && config.height > 0 ? config.width / config.height : 1
       const cameraDistance = renderCameraDistanceRef.current
@@ -2625,6 +2606,7 @@ export default function App() {
     pointerRef.current.active = false
     pointerRef.current.screenX = Number.NaN
     pointerRef.current.screenY = Number.NaN
+    webglRef.current?.setPointerScreen?.(Number.NaN, Number.NaN, false)
     setPointerButtonBoostInput(false)
   }
 
@@ -2632,6 +2614,7 @@ export default function App() {
     pointerRef.current.active = false
     pointerRef.current.screenX = Number.NaN
     pointerRef.current.screenY = Number.NaN
+    webglRef.current?.setPointerScreen?.(Number.NaN, Number.NaN, false)
     setPointerButtonBoostInput(false)
   }
 
@@ -2699,6 +2682,7 @@ export default function App() {
       }
 
       pointerRef.current.active = false
+      webglRef.current?.setPointerScreen?.(Number.NaN, Number.NaN, false)
       clearBoostInputs()
       localHeadRef.current = MENU_CAMERA_TARGET
       cameraBlendRef.current = 0
