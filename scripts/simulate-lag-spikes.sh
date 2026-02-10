@@ -298,7 +298,10 @@ cmd_stop() {
   loop_pid="$(read_state_var LOOP_PID || true)"
   cleanup_from_state "${pf_token}" "${loop_pid}"
 
-  rm -f "${STATE_FILE}" "${ANCHOR_FILE}"
+  # Treat stop as a full cleanup of all local artifacts, including the loop log.
+  # Leaving the loop log behind is confusing because `status` will tail it even
+  # when shaping is fully disabled (rules/pipe removed).
+  rm -f "${STATE_FILE}" "${ANCHOR_FILE}" "${LOOP_LOG_FILE}"
 
   echo "Lag simulation disabled."
 }

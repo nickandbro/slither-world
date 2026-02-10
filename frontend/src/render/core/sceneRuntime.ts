@@ -2470,13 +2470,15 @@ export const createScene = async (
 	    roughness: 0.5,
 	    metalness: 0.04,
 	    flatShading: true,
+	    // Overlay pass clears depth before rendering, so we can keep depth testing enabled for correct
+	    // self-occlusion (prevents weird diagonal artifacts from backfaces drawing over frontfaces).
 	    side: THREE.DoubleSide,
-	    depthTest: false,
-	    depthWrite: false,
+	    depthTest: true,
+	    depthWrite: true,
 	    fog: false,
 	  })
-	  pointerArrowMaterial.depthTest = false
-	  pointerArrowMaterial.depthWrite = false
+	  pointerArrowMaterial.depthTest = true
+	  pointerArrowMaterial.depthWrite = true
 
 	  const pointerArrowRingCount = POINTER_ARROW_SEGMENTS + 1
 	  // Each ring has 4 vertices (bottomLeft, bottomRight, topLeft, topRight) plus 2 tip vertices.
@@ -8580,9 +8582,11 @@ diffuseColor.a *= retireEdge;`,
 				                      const sx = pointerArrowSideTemp.x * halfWidth
 				                      const sy = pointerArrowSideTemp.y * halfWidth
 				                      const sz = pointerArrowSideTemp.z * halfWidth
-				                      const nx = normal.x * POINTER_ARROW_THICKNESS
-				                      const ny = normal.y * POINTER_ARROW_THICKNESS
-				                      const nz = normal.z * POINTER_ARROW_THICKNESS
+				                      // Straight extrusion: use a single extrusion direction so side quads are
+				                      // planar (no "weird" diagonal creases from non-coplanar quads).
+				                      const nx = pointerTargetNormalTemp.x * POINTER_ARROW_THICKNESS
+				                      const ny = pointerTargetNormalTemp.y * POINTER_ARROW_THICKNESS
+				                      const nz = pointerTargetNormalTemp.z * POINTER_ARROW_THICKNESS
 				                      const base = i * 4 * 3
 
 				                      // bottomLeft

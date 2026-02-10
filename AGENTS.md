@@ -29,7 +29,7 @@ Spherical Snake is a multiplayer, slither-style snake game where players steer g
 ## Build, Test, and Development Commands
 Repo root (recommended for full stack):
 - `./run-e2e.sh` — start backend + frontend for Playwright E2E (ports 8790 + 5177 by default).
-- `./run-local-dev-copy.sh` — run a localhost production-like copy (standalone backend + local Wrangler Worker) on ports 8788 + 8818 by default. Requires `ROOM_TOKEN_SECRET` and `ROOM_PROXY_SECRET` in `.env` or shell env.
+- `./run-local-dev-copy.sh` — local stack runner on ports 8788 + 8818 by default. `--worker` mode (default) is production-like (standalone backend + local Wrangler Worker) and defaults to watch mode (backend restarts via `cargo watch`; frontend rebuilds via `vite build --watch` with a browser refresh). Use `WATCH=0` or `--no-watch` for one-shot; use `--vite` for Vite dev server HMR (no rebuild, backend accessed directly).
 - `./scripts/simulate-lag-spikes.sh start|stop|status` — macOS-only PF/dummynet lag simulation helper. Defaults to backend-only shaping (`BACKEND_PORT`, default `8788`); use `PORTS=...` only when intentionally shaping additional ports.
 - `./scripts/run-lag-automation.sh` — single automated lag scenario run (bot drives movement/boost while lag shaping is active). Writes `report.json` under `output/lag-tests/<run-label>/`.
 - `./scripts/lag-autotune.sh` — multi-candidate lag tuning sweep. Runs repeated `run-lag-automation.sh` scenarios and ranks candidates by motion stability + delay metrics.
