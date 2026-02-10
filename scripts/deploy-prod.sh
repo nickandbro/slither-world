@@ -258,7 +258,7 @@ if [[ "$SKIP_VERIFY" -eq 0 ]]; then
     -H "Sec-WebSocket-Key: ${ws_key}" \
     "${PROD_ORIGIN%/}/api/room/${room_id}?rt=${room_token}" 2>/dev/null || true)"
 
-  if ! grep -qE '^HTTP/1\\.1 101 ' <<<"$ws_headers"; then
+  if ! grep -qE '^HTTP/1\.1 101 ' <<<"$ws_headers"; then
     echo "WebSocket upgrade failed; headers:" >&2
     echo "$ws_headers" >&2
     exit 1
