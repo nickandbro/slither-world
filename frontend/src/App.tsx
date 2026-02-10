@@ -8,7 +8,7 @@ import {
   type RendererPreference,
 } from './render/webglScene'
 import type { Camera, Environment, GameStateSnapshot, Point } from './game/types'
-import { updateCamera } from './game/camera'
+import { axisFromPointer, updateCamera } from './game/camera'
 import { IDENTITY_QUAT, clamp, lerpPoint, normalize } from './game/math'
 import { buildInterpolatedSnapshot, type TimedSnapshot } from './game/snapshots'
 import { drawHud, type RenderConfig } from './game/hud'
@@ -326,13 +326,15 @@ const TAIL_EVENT_LOG_LIMIT = 900
 const TAIL_RENDER_SAMPLE_INTERVAL_MS = 140
 const ARRIVAL_GAP_REENTRY_COOLDOWN_MS = 480
 const SCORE_RADIAL_DEPLETION_EPS = 0.05
-const TOUCH_BOOST_THRESHOLD_SCALE = 2.75
-const TOUCH_BOOST_ON_RATIO = 0.17
-const TOUCH_BOOST_OFF_RATIO = 0.14
-const TOUCH_BOOST_ON_PX_MIN = 60
-const TOUCH_BOOST_ON_PX_MAX = 160
-const TOUCH_BOOST_OFF_PX_MIN = 50
-const TOUCH_BOOST_OFF_PX_MAX = 150
+
+const JOY_ZONE_MIN_X_RATIO = 0.55
+const JOY_ZONE_MIN_Y_RATIO = 0.55
+const JOY_RADIUS_MIN_PX = 54
+const JOY_RADIUS_MAX_PX = 88
+const JOY_RADIUS_VIEWPORT_RATIO = 0.15
+const JOY_DEADZONE_RATIO = 0.12
+const JOY_BOOST_ON_RATIO = 0.86
+const JOY_BOOST_OFF_RATIO = 0.78
 
 const PINCH_ZOOM_RATIO_MIN = 0.85
 const PINCH_ZOOM_RATIO_MAX = 1.15
@@ -369,8 +371,17 @@ export default function App() {
     pointers: new Map<number, { x: number; y: number }>(),
     pinchActive: false,
     pinchPrevDistancePx: null as number | null,
+  })
+  const joystickAxisRef = useRef<Point | null>(null)
+  const joystickUiRef = useRef({
+    active: false,
+    pointerId: null as number | null,
+    centerX: 0,
+    centerY: 0,
+    radius: 0,
     boostWanted: false,
   })
+  const joystickRootRef = useRef<HTMLDivElement | null>(null)
   const boostInputRef = useRef({
     keyboard: false,
     pointerButton: false,
@@ -1381,7 +1392,7 @@ export default function App() {
       touchControlRef.current.pointers.clear()
       touchControlRef.current.pinchActive = false
       touchControlRef.current.pinchPrevDistancePx = null
-      touchControlRef.current.boostWanted = false
+      stopJoystick()
       clearBoostInputs()
     }
     if (menuPhase === 'preplay' && !allowPreplayAutoResumeRef.current) {
@@ -2711,7 +2722,6 @@ export default function App() {
     touch.pointers.clear()
     touch.pinchActive = false
     touch.pinchPrevDistancePx = null
-    touch.boostWanted = false
   }
 
   const updatePointer = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -2729,10 +2739,10 @@ export default function App() {
     sendIntervalRef.current = window.setInterval(() => {
       const socket = socketRef.current
       if (!socket || socket.readyState !== WebSocket.OPEN) return
-      const axis =
-        inputEnabledRef.current && pointerRef.current.active
-          ? webglRef.current?.getPointerAxis?.() ?? null
-          : null
+      const axis = inputEnabledRef.current
+        ? joystickAxisRef.current ??
+          (pointerRef.current.active ? webglRef.current?.getPointerAxis?.() ?? null : null)
+        : null
       const config = renderConfigRef.current
       const aspect = config && config.height > 0 ? config.width / config.height : 1
       const cameraDistance = renderCameraDistanceRef.current
@@ -2766,46 +2776,135 @@ export default function App() {
   const isPointerBoostButtonPressed = (event: React.PointerEvent<HTMLCanvasElement>) =>
     (event.buttons & (1 | 2)) !== 0
 
-  const updateTouchBoostGate = () => {
-    const touch = touchControlRef.current
-    if (!inputEnabledRef.current) {
-      touch.boostWanted = false
-      setPointerButtonBoostInput(false)
-      return
-    }
-
-    const head = headScreenRef.current
-    const pointerX = pointerRef.current.screenX
-    const pointerY = pointerRef.current.screenY
-    if (!head || !Number.isFinite(pointerX) || !Number.isFinite(pointerY)) {
-      touch.boostWanted = false
-      setPointerButtonBoostInput(false)
-      return
-    }
-
+  const getJoystickRadiusPx = () => {
     let minDim = getViewportMinDim()
     if (!(minDim > 0)) minDim = 400
-    const thresholdOn = clamp(
-      minDim * TOUCH_BOOST_ON_RATIO * TOUCH_BOOST_THRESHOLD_SCALE,
-      TOUCH_BOOST_ON_PX_MIN * TOUCH_BOOST_THRESHOLD_SCALE,
-      TOUCH_BOOST_ON_PX_MAX * TOUCH_BOOST_THRESHOLD_SCALE,
-    )
-    const thresholdOff = clamp(
-      minDim * TOUCH_BOOST_OFF_RATIO * TOUCH_BOOST_THRESHOLD_SCALE,
-      TOUCH_BOOST_OFF_PX_MIN * TOUCH_BOOST_THRESHOLD_SCALE,
-      TOUCH_BOOST_OFF_PX_MAX * TOUCH_BOOST_THRESHOLD_SCALE,
-    )
-
-    const dist = Math.hypot(pointerX - head.x, pointerY - head.y)
-    const wanted = touch.boostWanted ? dist >= thresholdOff : dist >= thresholdOn
-    touch.boostWanted = wanted
-    setPointerButtonBoostInput(wanted)
+    return clamp(minDim * JOY_RADIUS_VIEWPORT_RATIO, JOY_RADIUS_MIN_PX, JOY_RADIUS_MAX_PX)
   }
 
-  const disableTouchSteeringAndBoost = () => {
-    touchControlRef.current.boostWanted = false
-    setPointerButtonBoostInput(false)
+  const isPointInJoystickZone = (x: number, y: number, width: number, height: number) => {
+    if (!(width > 0) || !(height > 0)) return false
+    return x >= width * JOY_ZONE_MIN_X_RATIO && y >= height * JOY_ZONE_MIN_Y_RATIO
+  }
+
+  const setJoystickUiVisible = (visible: boolean) => {
+    const el = joystickRootRef.current
+    if (!el) return
+    el.classList.toggle('touch-joystick--visible', visible)
+  }
+
+  const setJoystickUiBoost = (boost: boolean) => {
+    const el = joystickRootRef.current
+    if (!el) return
+    el.classList.toggle('touch-joystick--boost', boost)
+  }
+
+  const setJoystickUiVars = (
+    centerX: number,
+    centerY: number,
+    radius: number,
+    knobX: number,
+    knobY: number,
+  ) => {
+    const el = joystickRootRef.current
+    if (!el) return
+    el.style.setProperty('--joy-x', `${centerX.toFixed(1)}px`)
+    el.style.setProperty('--joy-y', `${centerY.toFixed(1)}px`)
+    el.style.setProperty('--joy-radius', `${Math.max(0, radius).toFixed(1)}px`)
+    el.style.setProperty('--joy-knob-x', `${knobX.toFixed(1)}px`)
+    el.style.setProperty('--joy-knob-y', `${knobY.toFixed(1)}px`)
+  }
+
+  const startJoystick = (
+    pointerId: number,
+    localX: number,
+    localY: number,
+    width: number,
+    height: number,
+  ) => {
+    if (!inputEnabledRef.current) return
+
+    // Ensure the 3D pointer arrow doesn't linger on hybrid devices when touch takes over.
     setPointerScreen(Number.NaN, Number.NaN, false)
+
+    const radius = getJoystickRadiusPx()
+    const margin = 12
+    const centerX =
+      width > 0 ? clamp(localX, radius + margin, Math.max(radius + margin, width - radius - margin)) : localX
+    const centerY =
+      height > 0 ? clamp(localY, radius + margin, Math.max(radius + margin, height - radius - margin)) : localY
+
+    const joy = joystickUiRef.current
+    joy.active = true
+    joy.pointerId = pointerId
+    joy.centerX = centerX
+    joy.centerY = centerY
+    joy.radius = radius
+    joy.boostWanted = false
+
+    joystickAxisRef.current = null
+    setPointerButtonBoostInput(false)
+    setJoystickUiBoost(false)
+    setJoystickUiVars(centerX, centerY, radius, 0, 0)
+    setJoystickUiVisible(true)
+  }
+
+  const stopJoystick = () => {
+    const joy = joystickUiRef.current
+    if (!joy.active) {
+      joystickAxisRef.current = null
+      setPointerButtonBoostInput(false)
+      setJoystickUiBoost(false)
+      setJoystickUiVisible(false)
+      return
+    }
+
+    joy.active = false
+    joy.pointerId = null
+    joy.boostWanted = false
+    joystickAxisRef.current = null
+    setPointerButtonBoostInput(false)
+    setJoystickUiBoost(false)
+    setJoystickUiVars(joy.centerX, joy.centerY, joy.radius, 0, 0)
+    setJoystickUiVisible(false)
+  }
+
+  const updateJoystick = (pointerId: number, localX: number, localY: number) => {
+    if (!inputEnabledRef.current) return
+    const joy = joystickUiRef.current
+    if (!joy.active || joy.pointerId !== pointerId) return
+
+    const radius = joy.radius > 0 ? joy.radius : getJoystickRadiusPx()
+    const dx0 = localX - joy.centerX
+    const dy0 = localY - joy.centerY
+    let dx = dx0
+    let dy = dy0
+    let dist = Math.hypot(dx, dy)
+    if (!Number.isFinite(dist) || dist < 1e-8) dist = 0
+    if (radius > 0 && dist > radius && dist > 1e-8) {
+      const scale = radius / dist
+      dx *= scale
+      dy *= scale
+      dist = radius
+    }
+
+    const t = radius > 0 ? clamp(dist / radius, 0, 1) : 0
+    setJoystickUiVars(joy.centerX, joy.centerY, radius, dx, dy)
+
+    if (t <= JOY_DEADZONE_RATIO) {
+      joystickAxisRef.current = null
+    } else {
+      // Angle in screen space (dx right, dy down) chosen so stick direction matches steering direction.
+      const angle = Math.atan2(dy, dx)
+      joystickAxisRef.current = axisFromPointer(angle, cameraRef.current)
+    }
+
+    const wanted = joy.boostWanted ? t >= JOY_BOOST_OFF_RATIO : t >= JOY_BOOST_ON_RATIO
+    if (wanted !== joy.boostWanted) {
+      joy.boostWanted = wanted
+      setPointerButtonBoostInput(wanted)
+      setJoystickUiBoost(wanted)
+    }
   }
 
   const updatePinchZoom = () => {
@@ -2842,10 +2941,16 @@ export default function App() {
     if (isTouchLikePointer(event)) {
       if (event.cancelable) event.preventDefault()
       const canvas = glCanvasRef.current
+      let localX = Number.NaN
+      let localY = Number.NaN
+      let viewportWidth = 0
+      let viewportHeight = 0
       if (canvas) {
         const rect = canvas.getBoundingClientRect()
-        const localX = event.clientX - rect.left
-        const localY = event.clientY - rect.top
+        viewportWidth = rect.width
+        viewportHeight = rect.height
+        localX = event.clientX - rect.left
+        localY = event.clientY - rect.top
         touchControlRef.current.pointers.set(event.pointerId, { x: localX, y: localY })
       }
 
@@ -2853,15 +2958,21 @@ export default function App() {
       if (touch.pointers.size >= 2) {
         touch.pinchActive = true
         touch.pinchPrevDistancePx = null
-        disableTouchSteeringAndBoost()
+        stopJoystick()
         updatePinchZoom()
         return
       }
 
       touch.pinchActive = false
       touch.pinchPrevDistancePx = null
-      updatePointer(event)
-      updateTouchBoostGate()
+      if (
+        inputEnabledRef.current &&
+        Number.isFinite(localX) &&
+        Number.isFinite(localY) &&
+        isPointInJoystickZone(localX, localY, viewportWidth, viewportHeight)
+      ) {
+        startJoystick(event.pointerId, localX, localY, viewportWidth, viewportHeight)
+      }
       return
     }
 
@@ -2873,10 +2984,12 @@ export default function App() {
     if (isTouchLikePointer(event)) {
       if (event.cancelable) event.preventDefault()
       const canvas = glCanvasRef.current
+      let localX = Number.NaN
+      let localY = Number.NaN
       if (canvas) {
         const rect = canvas.getBoundingClientRect()
-        const localX = event.clientX - rect.left
-        const localY = event.clientY - rect.top
+        localX = event.clientX - rect.left
+        localY = event.clientY - rect.top
         touchControlRef.current.pointers.set(event.pointerId, { x: localX, y: localY })
       }
 
@@ -2885,7 +2998,7 @@ export default function App() {
         if (!touch.pinchActive) {
           touch.pinchActive = true
           touch.pinchPrevDistancePx = null
-          disableTouchSteeringAndBoost()
+          stopJoystick()
         }
         updatePinchZoom()
         return
@@ -2895,8 +3008,9 @@ export default function App() {
         touch.pinchActive = false
         touch.pinchPrevDistancePx = null
       }
-      updatePointer(event)
-      updateTouchBoostGate()
+      if (Number.isFinite(localX) && Number.isFinite(localY)) {
+        updateJoystick(event.pointerId, localX, localY)
+      }
       return
     }
 
@@ -2913,10 +3027,14 @@ export default function App() {
       const touch = touchControlRef.current
       touch.pointers.delete(event.pointerId)
 
+      if (joystickUiRef.current.active && joystickUiRef.current.pointerId === event.pointerId) {
+        stopJoystick()
+      }
+
       if (touch.pointers.size >= 2) {
         touch.pinchActive = true
         touch.pinchPrevDistancePx = null
-        disableTouchSteeringAndBoost()
+        stopJoystick()
         updatePinchZoom()
         return
       }
@@ -2924,18 +3042,26 @@ export default function App() {
       if (touch.pointers.size === 1) {
         touch.pinchActive = false
         touch.pinchPrevDistancePx = null
-        const remaining = touch.pointers.values().next().value as { x: number; y: number } | undefined
-        if (remaining) {
-          const active = inputEnabledRef.current
-          setPointerScreen(remaining.x, remaining.y, active)
-          updateTouchBoostGate()
-          return
+        const remaining = touch.pointers.entries().next().value as
+          | [number, { x: number; y: number }]
+          | undefined
+        if (remaining && inputEnabledRef.current) {
+          const canvas = glCanvasRef.current
+          if (canvas) {
+            const rect = canvas.getBoundingClientRect()
+            const [remainingId, remainingPos] = remaining
+            if (isPointInJoystickZone(remainingPos.x, remainingPos.y, rect.width, rect.height)) {
+              startJoystick(remainingId, remainingPos.x, remainingPos.y, rect.width, rect.height)
+              return
+            }
+          }
         }
       }
 
-      clearTouchState()
-      setPointerScreen(Number.NaN, Number.NaN, false)
-      setPointerButtonBoostInput(false)
+      if (touch.pointers.size === 0) {
+        clearTouchState()
+        stopJoystick()
+      }
       return
     }
 
@@ -2945,6 +3071,7 @@ export default function App() {
   const handlePointerLeave = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (isTouchLikePointer(event)) {
       clearTouchState()
+      stopJoystick()
     }
     setPointerScreen(Number.NaN, Number.NaN, false)
     setPointerButtonBoostInput(false)
@@ -2956,13 +3083,18 @@ export default function App() {
     }
 
     if (isTouchLikePointer(event)) {
+      if (event.cancelable) event.preventDefault()
       const touch = touchControlRef.current
       touch.pointers.delete(event.pointerId)
+
+      if (joystickUiRef.current.active && joystickUiRef.current.pointerId === event.pointerId) {
+        stopJoystick()
+      }
 
       if (touch.pointers.size >= 2) {
         touch.pinchActive = true
         touch.pinchPrevDistancePx = null
-        disableTouchSteeringAndBoost()
+        stopJoystick()
         updatePinchZoom()
         return
       }
@@ -2970,16 +3102,26 @@ export default function App() {
       if (touch.pointers.size === 1) {
         touch.pinchActive = false
         touch.pinchPrevDistancePx = null
-        const remaining = touch.pointers.values().next().value as { x: number; y: number } | undefined
-        if (remaining) {
-          const active = inputEnabledRef.current
-          setPointerScreen(remaining.x, remaining.y, active)
-          updateTouchBoostGate()
-          return
+        const remaining = touch.pointers.entries().next().value as
+          | [number, { x: number; y: number }]
+          | undefined
+        if (remaining && inputEnabledRef.current) {
+          const canvas = glCanvasRef.current
+          if (canvas) {
+            const rect = canvas.getBoundingClientRect()
+            const [remainingId, remainingPos] = remaining
+            if (isPointInJoystickZone(remainingPos.x, remainingPos.y, rect.width, rect.height)) {
+              startJoystick(remainingId, remainingPos.x, remainingPos.y, rect.width, rect.height)
+              return
+            }
+          }
         }
       }
 
-      clearTouchState()
+      if (touch.pointers.size === 0) {
+        clearTouchState()
+        stopJoystick()
+      }
     }
 
     setPointerScreen(Number.NaN, Number.NaN, false)
@@ -3289,6 +3431,10 @@ export default function App() {
             />
             <canvas ref={hudCanvasRef} className='hud-canvas' aria-hidden='true' />
             <div ref={boostFxRef} className='boost-fx' aria-hidden='true' />
+            <div ref={joystickRootRef} className='touch-joystick' aria-hidden='true'>
+              <div className='touch-joystick__base' />
+              <div className='touch-joystick__knob' />
+            </div>
           </div>
           {showMenuOverlay && menuUiMode === 'home' && (
             <MenuOverlay

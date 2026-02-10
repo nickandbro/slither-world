@@ -23,6 +23,16 @@ body {
     linear-gradient(160deg, #e1f0f5 0%, #d5edf5 45%, #c9e5ef 100%);
 }
 
+html,
+body,
+#root {
+  /* Prevent iOS/Android long-press text selection/callouts while playing. */
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
 #root {
   min-height: 100vh;
 }
@@ -35,4 +45,12 @@ a {
 button,
 input {
   font-family: inherit;
+}
+
+input,
+textarea {
+  /* Allow normal text selection/copy/paste inside inputs. */
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
 }
