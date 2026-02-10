@@ -6,6 +6,8 @@ This project now supports three backend runtime roles via `SNAKE_ROLE`:
 - `control`: matchmaking + autoscaler + Hetzner API provisioning.
 - `room`: one authoritative game room per server.
 
+Note: this repo tracks the currently deployed production backend image tag in `infra/prod-backend-image.txt` (updated by `scripts/deploy-prod.sh`).
+
 ## 1) Build and publish the room image
 
 Publish an image that runs the backend binary and exposes port `8787`.
