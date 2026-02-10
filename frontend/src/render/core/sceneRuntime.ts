@@ -8511,11 +8511,15 @@ diffuseColor.a *= retireEdge;`,
 		                if (Number.isFinite(angle) && angle > 1e-4) {
 			                  const arc = Math.min(POINTER_ARROW_ARC_RADIANS, angle)
 			                  const tStart = clamp(1 - arc / angle, 0, 1)
-				                  const tipRadius = getTerrainRadius(pointerTargetNormalTemp)
-				                  if (Number.isFinite(tipRadius) && tipRadius > 0) {
+					                  const tipRadius = getTerrainRadius(pointerTargetNormalTemp)
+					                  if (Number.isFinite(tipRadius) && tipRadius > 0) {
+					                    // Keep the arrow stable over sharp low-poly terrain (dunes): once we have a
+					                    // valid cursor hit radius, keep the arrow body on a constant-radius shell
+					                    // instead of resampling per-segment terrain height.
+					                    const arrowBaseRadius = tipRadius + POINTER_ARROW_LIFT
 					                    pointerArrowTipPointTemp
 					                      .copy(pointerTargetNormalTemp)
-					                      .multiplyScalar(tipRadius + POINTER_ARROW_LIFT)
+					                      .multiplyScalar(arrowBaseRadius)
 					                    const desiredHeadAngle =
 					                      POINTER_ARROW_HEAD_LENGTH / Math.max(1e-3, tipRadius)
 					                    // Keep a visible shaft even when the cursor is very close: cap the head to
@@ -8523,15 +8527,14 @@ diffuseColor.a *= retireEdge;`,
 					                    const headAngle = Math.min(desiredHeadAngle, arc * 0.65, angle)
 					                    const headStartT = clamp(1 - headAngle / angle, tStart, 1)
 
-				                    // Build the full arc up to the cursor so the head/tail are one continuous mesh.
-				                    for (let i = 0; i <= POINTER_ARROW_SEGMENTS; i += 1) {
-				                      const t = tStart + (1 - tStart) * (i / POINTER_ARROW_SEGMENTS)
-				                      const dir = pointerArrowDirs[i]
-				                      const point = pointerArrowPoints[i]
-				                      slerpNormals(pointerLocalHeadNormalTemp, pointerTargetNormalTemp, t, dir)
-				                      const radius = getTerrainRadius(dir)
-				                      point.copy(dir).multiplyScalar(radius + POINTER_ARROW_LIFT)
-				                    }
+					                    // Build the full arc up to the cursor so the head/tail are one continuous mesh.
+					                    for (let i = 0; i <= POINTER_ARROW_SEGMENTS; i += 1) {
+					                      const t = tStart + (1 - tStart) * (i / POINTER_ARROW_SEGMENTS)
+					                      const dir = pointerArrowDirs[i]
+					                      const point = pointerArrowPoints[i]
+					                      slerpNormals(pointerLocalHeadNormalTemp, pointerTargetNormalTemp, t, dir)
+					                      point.copy(dir).multiplyScalar(arrowBaseRadius)
+					                    }
 
 				                    for (let i = 0; i <= POINTER_ARROW_SEGMENTS; i += 1) {
 				                      const normal = pointerArrowDirs[i]
