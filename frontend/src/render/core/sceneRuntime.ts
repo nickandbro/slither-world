@@ -2431,16 +2431,15 @@ export const createScene = async (
   let menuPreviewYaw = -0.35
   let menuPreviewPitch = 0.08
 
-  // Pointer aiming overlay (3D curved arrow rendered above everything).
-  const POINTER_ARROW_SEGMENTS = 16
-  const POINTER_ARROW_ARC_RADIANS = 0.12
-  const POINTER_ARROW_LIFT = SNAKE_RADIUS * 0.25
-  const POINTER_ARROW_HALF_WIDTH = SNAKE_RADIUS * 0.65
-  const POINTER_ARROW_HEAD_LENGTH = SNAKE_RADIUS * 3.2
-  const POINTER_ARROW_HEAD_WIDTH = SNAKE_RADIUS * 3.4
-  const POINTER_ARROW_HEAD_NECK_WIDTH = POINTER_ARROW_HALF_WIDTH * 2.1
-  const POINTER_ARROW_HEAD_DEPTH = SNAKE_RADIUS * 0.55
-  const POINTER_ARROW_HEAD_SHOULDER_T = 0.35
+	  // Pointer aiming overlay (3D curved arrow rendered above everything).
+	  const POINTER_ARROW_SEGMENTS = 16
+	  const POINTER_ARROW_ARC_RADIANS = 0.09
+	  const POINTER_ARROW_LIFT = SNAKE_RADIUS * 0.25
+	  const POINTER_ARROW_HALF_WIDTH = SNAKE_RADIUS * 0.65
+	  const POINTER_ARROW_HEAD_HALF_WIDTH = SNAKE_RADIUS * 1.7
+	  const POINTER_ARROW_THICKNESS = SNAKE_RADIUS * 0.55
+	  const POINTER_ARROW_HEAD_LENGTH = SNAKE_RADIUS * 3.2
+	  const POINTER_ARROW_TIP_HALF_WIDTH = POINTER_ARROW_HALF_WIDTH * 0.04
 
   let pointerScreenX = Number.NaN
   let pointerScreenY = Number.NaN
@@ -2449,114 +2448,143 @@ export const createScene = async (
   const pointerAxisValue: Point = { x: 0, y: 0, z: 0 }
   let pointerAxisActive = false
 
-  const pointerOverlayScene = new THREE.Scene()
-  const pointerOverlayRoot = new THREE.Group()
-  pointerOverlayRoot.visible = false
-  pointerOverlayScene.add(pointerOverlayRoot)
+	  const pointerOverlayScene = new THREE.Scene()
+	  const pointerOverlayRoot = new THREE.Group()
+	  pointerOverlayRoot.visible = false
+	  pointerOverlayScene.add(pointerOverlayRoot)
 
-  const pointerArrowShaftMaterial = new THREE.MeshBasicMaterial({
-    color: 0xffffff,
-    transparent: true,
-    opacity: 0.9,
-    side: THREE.DoubleSide,
-    depthTest: false,
-    depthWrite: false,
-    fog: false,
-  })
-  pointerArrowShaftMaterial.depthTest = false
-  pointerArrowShaftMaterial.depthWrite = false
-  const pointerArrowHeadFaceMaterial = new THREE.MeshBasicMaterial({
-    color: 0xffffff,
-    transparent: false,
-    opacity: 1,
-    side: THREE.DoubleSide,
-    depthTest: false,
-    depthWrite: false,
-    fog: false,
-  })
-  pointerArrowHeadFaceMaterial.depthTest = false
-  pointerArrowHeadFaceMaterial.depthWrite = false
-  // Slightly darker sides give a cheap 3D look without lighting.
-  const pointerArrowHeadSideMaterial = new THREE.MeshBasicMaterial({
-    color: 0xe7e7e7,
-    transparent: false,
-    opacity: 1,
-    side: THREE.DoubleSide,
-    depthTest: false,
-    depthWrite: false,
-    fog: false,
-  })
-  pointerArrowHeadSideMaterial.depthTest = false
-  pointerArrowHeadSideMaterial.depthWrite = false
+	  // Keep contrast so faces read as low-poly shaded instead of flat white.
+	  const pointerOverlayAmbient = new THREE.AmbientLight(0xffffff, 0.34)
+	  const pointerOverlayKeyLight = new THREE.DirectionalLight(0xffffff, 1.08)
+	  pointerOverlayKeyLight.position.set(2.2, 3.1, 3.4)
+	  const pointerOverlayRimLight = new THREE.DirectionalLight(0x9bd7ff, 0.34)
+	  pointerOverlayRimLight.position.set(-3.2, -1.4, -2.6)
+	  pointerOverlayScene.add(pointerOverlayAmbient)
+	  pointerOverlayScene.add(pointerOverlayKeyLight)
+	  pointerOverlayScene.add(pointerOverlayRimLight)
+	  pointerOverlayScene.add(pointerOverlayKeyLight.target)
+	  pointerOverlayScene.add(pointerOverlayRimLight.target)
 
-  const pointerArrowVertexCount = (POINTER_ARROW_SEGMENTS + 1) * 2
-  const pointerArrowPositions = new Float32Array(pointerArrowVertexCount * 3)
-  const pointerArrowPositionAttr = new THREE.BufferAttribute(pointerArrowPositions, 3)
-  const pointerArrowIndices = new Uint16Array(POINTER_ARROW_SEGMENTS * 6)
-  for (let i = 0; i < POINTER_ARROW_SEGMENTS; i += 1) {
-    const v0 = i * 2
-    const v1 = v0 + 1
-    const v2 = v0 + 2
-    const v3 = v0 + 3
-    const out = i * 6
-    pointerArrowIndices[out] = v0
-    pointerArrowIndices[out + 1] = v1
-    pointerArrowIndices[out + 2] = v2
-    pointerArrowIndices[out + 3] = v1
-    pointerArrowIndices[out + 4] = v3
-    pointerArrowIndices[out + 5] = v2
+	  const pointerArrowMaterial = new THREE.MeshStandardMaterial({
+	    color: 0xe7e7e7,
+	    roughness: 0.5,
+	    metalness: 0.04,
+	    flatShading: true,
+	    side: THREE.DoubleSide,
+	    depthTest: false,
+	    depthWrite: false,
+	    fog: false,
+	  })
+	  pointerArrowMaterial.depthTest = false
+	  pointerArrowMaterial.depthWrite = false
+
+	  const pointerArrowRingCount = POINTER_ARROW_SEGMENTS + 1
+	  // Each ring has 4 vertices (bottomLeft, bottomRight, topLeft, topRight) plus 2 tip vertices.
+	  const pointerArrowVertexCount = pointerArrowRingCount * 4 + 2
+	  const pointerArrowPositions = new Float32Array(pointerArrowVertexCount * 3)
+	  const pointerArrowPositionAttr = new THREE.BufferAttribute(pointerArrowPositions, 3)
+	  // 24 indices per segment (top/bottom/left/right), plus 6 for the tail cap, plus 18 for the tip wedge.
+	  const pointerArrowIndexCount = POINTER_ARROW_SEGMENTS * 24 + 6 + 18
+	  const pointerArrowIndices = new Uint16Array(pointerArrowIndexCount)
+	  let pointerArrowIndexOffset = 0
+	  for (let i = 0; i < POINTER_ARROW_SEGMENTS; i += 1) {
+	    const base0 = i * 4
+    const base1 = (i + 1) * 4
+    const bl0 = base0
+    const br0 = base0 + 1
+    const tl0 = base0 + 2
+    const tr0 = base0 + 3
+    const bl1 = base1
+    const br1 = base1 + 1
+    const tl1 = base1 + 2
+    const tr1 = base1 + 3
+
+    // Top surface (+normal).
+    pointerArrowIndices[pointerArrowIndexOffset++] = tl0
+    pointerArrowIndices[pointerArrowIndexOffset++] = tr0
+    pointerArrowIndices[pointerArrowIndexOffset++] = tl1
+    pointerArrowIndices[pointerArrowIndexOffset++] = tr0
+    pointerArrowIndices[pointerArrowIndexOffset++] = tr1
+    pointerArrowIndices[pointerArrowIndexOffset++] = tl1
+
+    // Bottom surface (-normal).
+    pointerArrowIndices[pointerArrowIndexOffset++] = bl0
+    pointerArrowIndices[pointerArrowIndexOffset++] = bl1
+    pointerArrowIndices[pointerArrowIndexOffset++] = br0
+    pointerArrowIndices[pointerArrowIndexOffset++] = br0
+    pointerArrowIndices[pointerArrowIndexOffset++] = bl1
+    pointerArrowIndices[pointerArrowIndexOffset++] = br1
+
+    // Left side (+side).
+    pointerArrowIndices[pointerArrowIndexOffset++] = bl0
+    pointerArrowIndices[pointerArrowIndexOffset++] = tl0
+    pointerArrowIndices[pointerArrowIndexOffset++] = bl1
+    pointerArrowIndices[pointerArrowIndexOffset++] = tl0
+    pointerArrowIndices[pointerArrowIndexOffset++] = tl1
+    pointerArrowIndices[pointerArrowIndexOffset++] = bl1
+
+    // Right side (-side).
+    pointerArrowIndices[pointerArrowIndexOffset++] = br0
+    pointerArrowIndices[pointerArrowIndexOffset++] = br1
+    pointerArrowIndices[pointerArrowIndexOffset++] = tr0
+    pointerArrowIndices[pointerArrowIndexOffset++] = tr0
+    pointerArrowIndices[pointerArrowIndexOffset++] = br1
+    pointerArrowIndices[pointerArrowIndexOffset++] = tr1
   }
-  const pointerArrowShaftGeometry = new THREE.BufferGeometry()
-  pointerArrowShaftGeometry.setAttribute('position', pointerArrowPositionAttr)
-  pointerArrowShaftGeometry.setIndex(new THREE.BufferAttribute(pointerArrowIndices, 1))
-  const pointerArrowShaftMesh = new THREE.Mesh(pointerArrowShaftGeometry, pointerArrowShaftMaterial)
-  pointerArrowShaftMesh.frustumCulled = false
-  pointerArrowShaftMesh.renderOrder = 10_000
-  pointerOverlayRoot.add(pointerArrowShaftMesh)
+	  // Tail cap.
+	  pointerArrowIndices[pointerArrowIndexOffset++] = 0
+	  pointerArrowIndices[pointerArrowIndexOffset++] = 1
+	  pointerArrowIndices[pointerArrowIndexOffset++] = 2
+	  pointerArrowIndices[pointerArrowIndexOffset++] = 1
+	  pointerArrowIndices[pointerArrowIndexOffset++] = 3
+	  pointerArrowIndices[pointerArrowIndexOffset++] = 2
+	  // Tip wedge (connect the final ring to the tip edge). This keeps the arrowhead and tail as one
+	  // seamless low-poly mesh and avoids the tail clipping through a separate head mesh.
+	  const pointerArrowLastBase = POINTER_ARROW_SEGMENTS * 4
+	  const pointerArrowTipBottomIndex = pointerArrowRingCount * 4
+	  const pointerArrowTipTopIndex = pointerArrowTipBottomIndex + 1
+	  pointerArrowIndices[pointerArrowIndexOffset++] = pointerArrowLastBase + 2
+	  pointerArrowIndices[pointerArrowIndexOffset++] = pointerArrowLastBase + 3
+	  pointerArrowIndices[pointerArrowIndexOffset++] = pointerArrowTipTopIndex
+	  pointerArrowIndices[pointerArrowIndexOffset++] = pointerArrowLastBase + 0
+	  pointerArrowIndices[pointerArrowIndexOffset++] = pointerArrowTipBottomIndex
+	  pointerArrowIndices[pointerArrowIndexOffset++] = pointerArrowLastBase + 1
+	  pointerArrowIndices[pointerArrowIndexOffset++] = pointerArrowLastBase + 0
+	  pointerArrowIndices[pointerArrowIndexOffset++] = pointerArrowLastBase + 2
+	  pointerArrowIndices[pointerArrowIndexOffset++] = pointerArrowTipBottomIndex
+	  pointerArrowIndices[pointerArrowIndexOffset++] = pointerArrowLastBase + 2
+	  pointerArrowIndices[pointerArrowIndexOffset++] = pointerArrowTipTopIndex
+	  pointerArrowIndices[pointerArrowIndexOffset++] = pointerArrowTipBottomIndex
+	  pointerArrowIndices[pointerArrowIndexOffset++] = pointerArrowLastBase + 1
+	  pointerArrowIndices[pointerArrowIndexOffset++] = pointerArrowTipBottomIndex
+	  pointerArrowIndices[pointerArrowIndexOffset++] = pointerArrowLastBase + 3
+	  pointerArrowIndices[pointerArrowIndexOffset++] = pointerArrowLastBase + 3
+	  pointerArrowIndices[pointerArrowIndexOffset++] = pointerArrowTipBottomIndex
+	  pointerArrowIndices[pointerArrowIndexOffset++] = pointerArrowTipTopIndex
 
-  const pointerArrowHeadHalfLen = POINTER_ARROW_HEAD_LENGTH * 0.5
-  const pointerArrowHeadHalfWidth = POINTER_ARROW_HEAD_WIDTH * 0.5
-  const pointerArrowHeadNeckHalfWidth = POINTER_ARROW_HEAD_NECK_WIDTH * 0.5
-  const pointerArrowHeadShoulderY =
-    -pointerArrowHeadHalfLen + POINTER_ARROW_HEAD_LENGTH * POINTER_ARROW_HEAD_SHOULDER_T
-  const pointerArrowHeadShape = new THREE.Shape()
-  pointerArrowHeadShape.moveTo(pointerArrowHeadNeckHalfWidth, -pointerArrowHeadHalfLen)
-  pointerArrowHeadShape.lineTo(pointerArrowHeadHalfWidth, pointerArrowHeadShoulderY)
-  pointerArrowHeadShape.lineTo(0, pointerArrowHeadHalfLen)
-  pointerArrowHeadShape.lineTo(-pointerArrowHeadHalfWidth, pointerArrowHeadShoulderY)
-  pointerArrowHeadShape.lineTo(-pointerArrowHeadNeckHalfWidth, -pointerArrowHeadHalfLen)
-  pointerArrowHeadShape.closePath()
-  const pointerArrowHeadGeometry = new THREE.ExtrudeGeometry(pointerArrowHeadShape, {
-    steps: 1,
-    depth: POINTER_ARROW_HEAD_DEPTH,
-    bevelEnabled: false,
-  })
-  pointerArrowHeadGeometry.translate(0, 0, -POINTER_ARROW_HEAD_DEPTH * 0.5)
-  const pointerArrowHeadMesh = new THREE.Mesh(pointerArrowHeadGeometry, [
-    pointerArrowHeadFaceMaterial,
-    pointerArrowHeadSideMaterial,
-  ])
-  pointerArrowHeadMesh.frustumCulled = false
-  pointerArrowHeadMesh.renderOrder = 10_001
-  pointerOverlayRoot.add(pointerArrowHeadMesh)
+	  const pointerArrowGeometry = new THREE.BufferGeometry()
+	  pointerArrowGeometry.setAttribute('position', pointerArrowPositionAttr)
+	  pointerArrowGeometry.setIndex(new THREE.BufferAttribute(pointerArrowIndices, 1))
+	  const pointerArrowMesh = new THREE.Mesh(pointerArrowGeometry, pointerArrowMaterial)
+	  pointerArrowMesh.frustumCulled = false
+	  pointerArrowMesh.renderOrder = 10_000
+	  pointerOverlayRoot.add(pointerArrowMesh)
 
-  const pointerRaycaster = new THREE.Raycaster()
-  const pointerNdcTemp = new THREE.Vector2()
-  const pointerRayLocal = new THREE.Ray(new THREE.Vector3(), new THREE.Vector3(0, 0, -1))
-  const pointerSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), PLANET_RADIUS)
+	  const pointerRaycaster = new THREE.Raycaster()
+	  const pointerNdcTemp = new THREE.Vector2()
+	  const pointerRayLocal = new THREE.Ray(new THREE.Vector3(), new THREE.Vector3(0, 0, -1))
+	  const pointerSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), PLANET_RADIUS)
   const pointerOriginLocalTemp = new THREE.Vector3()
   const pointerDirLocalTemp = new THREE.Vector3()
   const pointerHitLocalTemp = new THREE.Vector3()
   const pointerTargetNormalTemp = new THREE.Vector3(0, 0, 1)
   const pointerLocalHeadNormalTemp = new THREE.Vector3(0, 0, 1)
-  const pointerAxisVectorTemp = new THREE.Vector3()
-  const pointerArrowTipPointTemp = new THREE.Vector3()
-  const pointerArrowHeadBasisTemp = new THREE.Matrix4()
-  const pointerArrowDirs = Array.from({ length: POINTER_ARROW_SEGMENTS + 1 }, () => new THREE.Vector3())
-  const pointerArrowPoints = Array.from({ length: POINTER_ARROW_SEGMENTS + 1 }, () => new THREE.Vector3())
-  const pointerArrowTangentTemp = new THREE.Vector3()
-  const pointerArrowSideTemp = new THREE.Vector3()
-  const pointerArrowForwardTemp = new THREE.Vector3()
+	  const pointerAxisVectorTemp = new THREE.Vector3()
+	  const pointerArrowTipPointTemp = new THREE.Vector3()
+	  const pointerArrowDirs = Array.from({ length: POINTER_ARROW_SEGMENTS + 1 }, () => new THREE.Vector3())
+	  const pointerArrowPoints = Array.from({ length: POINTER_ARROW_SEGMENTS + 1 }, () => new THREE.Vector3())
+	  const pointerArrowTangentTemp = new THREE.Vector3()
+	  const pointerArrowSideTemp = new THREE.Vector3()
 
   const setPointerScreen = (x: number, y: number, active: boolean) => {
     pointerScreenX = x
@@ -8481,122 +8509,132 @@ diffuseColor.a *= retireEdge;`,
 		                if (Number.isFinite(angle) && angle > 1e-4) {
 			                  const arc = Math.min(POINTER_ARROW_ARC_RADIANS, angle)
 			                  const tStart = clamp(1 - arc / angle, 0, 1)
-			                  const tipRadius = getTerrainRadius(pointerTargetNormalTemp)
-			                  if (Number.isFinite(tipRadius) && tipRadius > 0) {
-			                    pointerArrowTipPointTemp
-			                      .copy(pointerTargetNormalTemp)
-			                      .multiplyScalar(tipRadius + POINTER_ARROW_LIFT)
-			                    const headAngle = POINTER_ARROW_HEAD_LENGTH / Math.max(1e-3, tipRadius)
-			                    const shaftEndT = clamp(1 - headAngle / angle, tStart, 1)
-			                    const shaftVisible = shaftEndT > tStart + 1e-4
-			                    pointerArrowShaftMesh.visible = shaftVisible
+				                  const tipRadius = getTerrainRadius(pointerTargetNormalTemp)
+				                  if (Number.isFinite(tipRadius) && tipRadius > 0) {
+					                    pointerArrowTipPointTemp
+					                      .copy(pointerTargetNormalTemp)
+					                      .multiplyScalar(tipRadius + POINTER_ARROW_LIFT)
+					                    const desiredHeadAngle =
+					                      POINTER_ARROW_HEAD_LENGTH / Math.max(1e-3, tipRadius)
+					                    // Keep a visible shaft even when the cursor is very close: cap the head to
+					                    // a fraction of the visible arrow arc.
+					                    const headAngle = Math.min(desiredHeadAngle, arc * 0.65, angle)
+					                    const headStartT = clamp(1 - headAngle / angle, tStart, 1)
 
-		                  if (shaftVisible) {
-		                    for (let i = 0; i <= POINTER_ARROW_SEGMENTS; i += 1) {
-		                      const t =
-		                        tStart + (shaftEndT - tStart) * (i / POINTER_ARROW_SEGMENTS)
-		                      const dir = pointerArrowDirs[i]
-		                      const point = pointerArrowPoints[i]
-		                      slerpNormals(pointerLocalHeadNormalTemp, pointerTargetNormalTemp, t, dir)
-		                      const radius = getTerrainRadius(dir)
-		                      point.copy(dir).multiplyScalar(radius + POINTER_ARROW_LIFT)
-		                    }
+				                    // Build the full arc up to the cursor so the head/tail are one continuous mesh.
+				                    for (let i = 0; i <= POINTER_ARROW_SEGMENTS; i += 1) {
+				                      const t = tStart + (1 - tStart) * (i / POINTER_ARROW_SEGMENTS)
+				                      const dir = pointerArrowDirs[i]
+				                      const point = pointerArrowPoints[i]
+				                      slerpNormals(pointerLocalHeadNormalTemp, pointerTargetNormalTemp, t, dir)
+				                      const radius = getTerrainRadius(dir)
+				                      point.copy(dir).multiplyScalar(radius + POINTER_ARROW_LIFT)
+				                    }
 
-		                    for (let i = 0; i <= POINTER_ARROW_SEGMENTS; i += 1) {
-		                      const normal = pointerArrowDirs[i]
-		                      const point = pointerArrowPoints[i]
-		                      if (i === 0) {
-		                        pointerArrowTangentTemp.copy(pointerArrowPoints[1]).sub(point)
-		                      } else if (i === POINTER_ARROW_SEGMENTS) {
-		                        pointerArrowTangentTemp
-		                          .copy(point)
-		                          .sub(pointerArrowPoints[POINTER_ARROW_SEGMENTS - 1])
-		                      } else {
-		                        pointerArrowTangentTemp
-		                          .copy(pointerArrowPoints[i + 1])
-		                          .sub(pointerArrowPoints[i - 1])
-		                          .multiplyScalar(0.5)
-		                      }
-		                      pointerArrowTangentTemp.addScaledVector(
-		                        normal,
-		                        -pointerArrowTangentTemp.dot(normal),
-		                      )
-		                      if (pointerArrowTangentTemp.lengthSq() <= 1e-10) {
-		                        buildTangentBasis(normal, pointerArrowTangentTemp, pointerArrowSideTemp)
-		                      } else {
-		                        pointerArrowTangentTemp.normalize()
-		                        pointerArrowSideTemp.crossVectors(normal, pointerArrowTangentTemp)
-		                        if (pointerArrowSideTemp.lengthSq() <= 1e-10) {
-		                          buildTangentBasis(normal, pointerArrowTangentTemp, pointerArrowSideTemp)
-		                        } else {
-		                          pointerArrowSideTemp.normalize()
-		                        }
-		                      }
+				                    for (let i = 0; i <= POINTER_ARROW_SEGMENTS; i += 1) {
+				                      const normal = pointerArrowDirs[i]
+				                      const point = pointerArrowPoints[i]
+				                      if (i === 0) {
+				                        pointerArrowTangentTemp.copy(pointerArrowPoints[1]).sub(point)
+				                      } else if (i === POINTER_ARROW_SEGMENTS) {
+				                        pointerArrowTangentTemp
+				                          .copy(point)
+				                          .sub(pointerArrowPoints[POINTER_ARROW_SEGMENTS - 1])
+				                      } else {
+				                        pointerArrowTangentTemp
+				                          .copy(pointerArrowPoints[i + 1])
+				                          .sub(pointerArrowPoints[i - 1])
+				                          .multiplyScalar(0.5)
+				                      }
+				                      pointerArrowTangentTemp.addScaledVector(
+				                        normal,
+				                        -pointerArrowTangentTemp.dot(normal),
+				                      )
+				                      if (pointerArrowTangentTemp.lengthSq() <= 1e-10) {
+				                        buildTangentBasis(normal, pointerArrowTangentTemp, pointerArrowSideTemp)
+				                      } else {
+				                        pointerArrowTangentTemp.normalize()
+				                        pointerArrowSideTemp.crossVectors(normal, pointerArrowTangentTemp)
+				                        if (pointerArrowSideTemp.lengthSq() <= 1e-10) {
+				                          buildTangentBasis(normal, pointerArrowTangentTemp, pointerArrowSideTemp)
+				                        } else {
+				                          pointerArrowSideTemp.normalize()
+				                        }
+				                      }
 
-		                      const widthT = i / POINTER_ARROW_SEGMENTS
-		                      const halfWidth = POINTER_ARROW_HALF_WIDTH * (0.75 + 0.25 * widthT)
-		                      const sx = pointerArrowSideTemp.x * halfWidth
-		                      const sy = pointerArrowSideTemp.y * halfWidth
-		                      const sz = pointerArrowSideTemp.z * halfWidth
-		                      const base = i * 2 * 3
-		                      pointerArrowPositions[base] = point.x + sx
-		                      pointerArrowPositions[base + 1] = point.y + sy
-		                      pointerArrowPositions[base + 2] = point.z + sz
-		                      pointerArrowPositions[base + 3] = point.x - sx
-		                      pointerArrowPositions[base + 4] = point.y - sy
-		                      pointerArrowPositions[base + 5] = point.z - sz
-		                    }
-		                    pointerArrowPositionAttr.needsUpdate = true
-		                  }
+				                      const t = tStart + (1 - tStart) * (i / POINTER_ARROW_SEGMENTS)
+				                      const headDenom = Math.max(1e-4, 1 - headStartT)
+				                      const headProgress = clamp((t - headStartT) / headDenom, 0, 1)
+				                      let halfWidth =
+				                        t >= headStartT
+				                          ? lerp(
+				                              POINTER_ARROW_HEAD_HALF_WIDTH,
+				                              POINTER_ARROW_TIP_HALF_WIDTH,
+				                              headProgress,
+				                            )
+				                          : POINTER_ARROW_HALF_WIDTH
+				                      if (i === POINTER_ARROW_SEGMENTS) {
+				                        halfWidth = POINTER_ARROW_TIP_HALF_WIDTH
+				                      }
 
-		                  if (shaftVisible) {
-		                    pointerArrowForwardTemp
-		                      .copy(pointerArrowTipPointTemp)
-		                      .sub(pointerArrowPoints[POINTER_ARROW_SEGMENTS])
-		                  } else {
-		                    // Great-circle tangent at the cursor, pointing away from the head.
-		                    pointerArrowForwardTemp.crossVectors(
-		                      pointerAxisVectorTemp,
-		                      pointerTargetNormalTemp,
-		                    )
-		                  }
-		                  pointerArrowForwardTemp.addScaledVector(
-		                    pointerTargetNormalTemp,
-		                    -pointerArrowForwardTemp.dot(pointerTargetNormalTemp),
-		                  )
-		                  if (pointerArrowForwardTemp.lengthSq() <= 1e-10) {
-		                    buildTangentBasis(pointerTargetNormalTemp, pointerArrowForwardTemp, pointerArrowSideTemp)
-		                  } else {
-		                    pointerArrowForwardTemp.normalize()
-		                  }
+				                      const sx = pointerArrowSideTemp.x * halfWidth
+				                      const sy = pointerArrowSideTemp.y * halfWidth
+				                      const sz = pointerArrowSideTemp.z * halfWidth
+				                      const nx = normal.x * POINTER_ARROW_THICKNESS
+				                      const ny = normal.y * POINTER_ARROW_THICKNESS
+				                      const nz = normal.z * POINTER_ARROW_THICKNESS
+				                      const base = i * 4 * 3
 
-		                  // Stable basis: +Y = forward, +Z = surface normal.
-		                  pointerArrowSideTemp.crossVectors(pointerArrowForwardTemp, pointerTargetNormalTemp)
-		                  if (pointerArrowSideTemp.lengthSq() <= 1e-10) {
-		                    buildTangentBasis(pointerTargetNormalTemp, pointerArrowForwardTemp, pointerArrowSideTemp)
-		                  } else {
-		                    pointerArrowSideTemp.normalize()
-		                  }
-		                  pointerArrowForwardTemp.crossVectors(pointerTargetNormalTemp, pointerArrowSideTemp)
-		                  if (pointerArrowForwardTemp.lengthSq() <= 1e-10) {
-		                    buildTangentBasis(pointerTargetNormalTemp, pointerArrowForwardTemp, pointerArrowSideTemp)
-		                  } else {
-		                    pointerArrowForwardTemp.normalize()
-		                  }
-		                  pointerArrowHeadBasisTemp.makeBasis(
-		                    pointerArrowSideTemp,
-		                    pointerArrowForwardTemp,
-		                    pointerTargetNormalTemp,
-		                  )
-		                  pointerArrowHeadMesh.quaternion.setFromRotationMatrix(pointerArrowHeadBasisTemp)
-		                  pointerArrowHeadMesh.position
-		                    .copy(pointerArrowTipPointTemp)
-		                    .addScaledVector(pointerArrowForwardTemp, -POINTER_ARROW_HEAD_LENGTH * 0.5)
+				                      // bottomLeft
+				                      const blx = point.x + sx
+				                      const bly = point.y + sy
+				                      const blz = point.z + sz
+				                      pointerArrowPositions[base] = blx
+				                      pointerArrowPositions[base + 1] = bly
+				                      pointerArrowPositions[base + 2] = blz
 
-		                  pointerOverlayRoot.visible = true
-			                  }
-		                }
-		              }
+				                      // bottomRight
+				                      const brx = point.x - sx
+				                      const bry = point.y - sy
+				                      const brz = point.z - sz
+				                      pointerArrowPositions[base + 3] = brx
+				                      pointerArrowPositions[base + 4] = bry
+				                      pointerArrowPositions[base + 5] = brz
+
+				                      // topLeft
+				                      pointerArrowPositions[base + 6] = blx + nx
+				                      pointerArrowPositions[base + 7] = bly + ny
+				                      pointerArrowPositions[base + 8] = blz + nz
+
+				                      // topRight
+				                      pointerArrowPositions[base + 9] = brx + nx
+				                      pointerArrowPositions[base + 10] = bry + ny
+				                      pointerArrowPositions[base + 11] = brz + nz
+				                    }
+
+				                    // Tip edge vertices (centerline) used by the wedge indices.
+				                    const tipBase = pointerArrowRingCount * 4 * 3
+				                    pointerArrowPositions[tipBase] = pointerArrowTipPointTemp.x
+				                    pointerArrowPositions[tipBase + 1] = pointerArrowTipPointTemp.y
+				                    pointerArrowPositions[tipBase + 2] = pointerArrowTipPointTemp.z
+				                    pointerArrowPositions[tipBase + 3] =
+				                      pointerArrowTipPointTemp.x + pointerTargetNormalTemp.x * POINTER_ARROW_THICKNESS
+				                    pointerArrowPositions[tipBase + 4] =
+				                      pointerArrowTipPointTemp.y + pointerTargetNormalTemp.y * POINTER_ARROW_THICKNESS
+				                    pointerArrowPositions[tipBase + 5] =
+				                      pointerArrowTipPointTemp.z + pointerTargetNormalTemp.z * POINTER_ARROW_THICKNESS
+
+				                    pointerArrowMesh.visible = true
+				                    pointerArrowPositionAttr.needsUpdate = true
+				                    pointerArrowGeometry.computeVertexNormals()
+				                    const normalAttr = pointerArrowGeometry.getAttribute('normal')
+				                    if (normalAttr instanceof THREE.BufferAttribute) {
+				                      normalAttr.needsUpdate = true
+				                    }
+				                    pointerOverlayRoot.visible = true
+				                  }
+			                }
+			              }
 		            }
 	          }
 	        }
@@ -8870,20 +8908,17 @@ diffuseColor.a *= retireEdge;`,
     tongueBaseGeometry.dispose()
     tongueForkGeometry.dispose()
     tongueMaterial.dispose()
-    boostDraftGeometry.dispose()
-    boostDraftTexture?.dispose()
-	    menuPreviewMaterial.dispose()
-	    menuPreviewHeadMaterial.dispose()
-	    menuPreviewTube.geometry.dispose()
-	    menuPreviewTail.geometry.dispose()
-	    pointerArrowShaftMaterial.dispose()
-	    pointerArrowHeadFaceMaterial.dispose()
-	    pointerArrowHeadSideMaterial.dispose()
-	    pointerArrowShaftGeometry.dispose()
-	    pointerArrowHeadGeometry.dispose()
-	    for (const texture of snakeSkinTextureCache.values()) {
-	      texture.dispose()
-	    }
+	    boostDraftGeometry.dispose()
+	    boostDraftTexture?.dispose()
+		    menuPreviewMaterial.dispose()
+		    menuPreviewHeadMaterial.dispose()
+		    menuPreviewTube.geometry.dispose()
+		    menuPreviewTail.geometry.dispose()
+		    pointerArrowMaterial.dispose()
+		    pointerArrowGeometry.dispose()
+		    for (const texture of snakeSkinTextureCache.values()) {
+		      texture.dispose()
+		    }
     snakeSkinTextureCache.clear()
     for (let i = 0; i < pelletBuckets.length; i += 1) {
       const bucket = pelletBuckets[i]
