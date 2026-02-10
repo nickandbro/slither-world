@@ -115,11 +115,19 @@ SSH_TARGET="${CONTROL_USER}@${CONTROL_HOST}"
 IMAGE_FILE="${IMAGE_FILE:-infra/prod-backend-image.txt}"
 PROD_ORIGIN="${PROD_ORIGIN:-https://slitherworld.com}"
 
+flag_to_yesno() {
+  if [[ "$1" -eq 0 ]]; then
+    echo yes
+  else
+    echo no
+  fi
+}
+
 echo "Deploy plan:"
-echo "  backend:  $([[ \"$SKIP_BACKEND\" -eq 0 ]] && echo yes || echo no)"
-echo "  frontend: $([[ \"$SKIP_FRONTEND\" -eq 0 ]] && echo yes || echo no)"
-echo "  rooms:    $([[ \"$SKIP_ROOM_ROLLOUT\" -eq 0 ]] && echo yes || echo no)"
-echo "  verify:   $([[ \"$SKIP_VERIFY\" -eq 0 ]] && echo yes || echo no)"
+echo "  backend:  $(flag_to_yesno "$SKIP_BACKEND")"
+echo "  frontend: $(flag_to_yesno "$SKIP_FRONTEND")"
+echo "  rooms:    $(flag_to_yesno "$SKIP_ROOM_ROLLOUT")"
+echo "  verify:   $(flag_to_yesno "$SKIP_VERIFY")"
 echo "  image:    ${IMAGE}"
 
 ssh_control() {
@@ -239,16 +247,16 @@ fi
 if [[ "$SKIP_VERIFY" -eq 0 ]]; then
   echo "Verifying production endpoints..."
   matchmake_json="$(curl -fsS -X POST "${PROD_ORIGIN%/}/api/matchmake" -H 'content-type: application/json' -d '{}')"
-  room_id="$(python3 -c 'import json,sys; print(json.load(sys.stdin)[\"roomId\"])' <<<"$matchmake_json")"
-  room_token="$(python3 -c 'import json,sys; print(json.load(sys.stdin)[\"roomToken\"])' <<<"$matchmake_json")"
+  room_id="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["roomId"])' <<<"$matchmake_json")"
+  room_token="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["roomToken"])' <<<"$matchmake_json")"
 
   ws_key="$(openssl rand -base64 16)"
   ws_headers="$(curl --http1.1 -sS --max-time 5 -D - -o /dev/null \
     -H 'Connection: Upgrade' \
     -H 'Upgrade: websocket' \
     -H 'Sec-WebSocket-Version: 13' \
-    -H \"Sec-WebSocket-Key: ${ws_key}\" \
-    \"${PROD_ORIGIN%/}/api/room/${room_id}?rt=${room_token}\" 2>/dev/null || true)"
+    -H "Sec-WebSocket-Key: ${ws_key}" \
+    "${PROD_ORIGIN%/}/api/room/${room_id}?rt=${room_token}" 2>/dev/null || true)"
 
   if ! grep -qE '^HTTP/1\\.1 101 ' <<<"$ws_headers"; then
     echo "WebSocket upgrade failed; headers:" >&2
