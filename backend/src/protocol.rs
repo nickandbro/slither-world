@@ -1,15 +1,18 @@
 use crate::game::types::Point;
 use uuid::Uuid;
 
-pub const VERSION: u8 = 13;
+pub const VERSION: u8 = 14;
 
 pub const TYPE_JOIN: u8 = 0x01;
 pub const TYPE_INPUT: u8 = 0x02;
 pub const TYPE_RESPAWN: u8 = 0x03;
+pub const TYPE_VIEW: u8 = 0x04;
 
 pub const TYPE_INIT: u8 = 0x10;
 pub const TYPE_STATE: u8 = 0x11;
 pub const TYPE_PLAYER_META: u8 = 0x12;
+pub const TYPE_PELLET_DELTA: u8 = 0x13;
+pub const TYPE_PELLET_RESET: u8 = 0x14;
 
 pub const FLAG_JOIN_PLAYER_ID: u16 = 1 << 0;
 pub const FLAG_JOIN_NAME: u16 = 1 << 1;
@@ -18,9 +21,10 @@ pub const FLAG_JOIN_SKIN: u16 = 1 << 3;
 
 pub const FLAG_INPUT_AXIS: u16 = 1 << 0;
 pub const FLAG_INPUT_BOOST: u16 = 1 << 1;
-pub const FLAG_INPUT_VIEW_CENTER: u16 = 1 << 2;
-pub const FLAG_INPUT_VIEW_RADIUS: u16 = 1 << 3;
-pub const FLAG_INPUT_CAMERA_DISTANCE: u16 = 1 << 4;
+
+pub const FLAG_VIEW_CENTER: u16 = 1 << 0;
+pub const FLAG_VIEW_RADIUS: u16 = 1 << 1;
+pub const FLAG_VIEW_CAMERA_DISTANCE: u16 = 1 << 2;
 
 pub const SNAKE_DETAIL_FULL: u8 = 0;
 pub const SNAKE_DETAIL_WINDOW: u8 = 1;
@@ -38,6 +42,8 @@ pub enum ClientMessage {
     Input {
         axis: Option<Point>,
         boost: bool,
+    },
+    View {
         view_center: Option<Point>,
         view_radius: Option<f32>,
         camera_distance: Option<f32>,
@@ -100,7 +106,10 @@ pub fn decode_client_message(data: &[u8]) -> Option<ClientMessage> {
                 None
             };
             let boost = flags & FLAG_INPUT_BOOST != 0;
-            let view_center = if flags & FLAG_INPUT_VIEW_CENTER != 0 {
+            Some(ClientMessage::Input { axis, boost })
+        }
+        TYPE_VIEW => {
+            let view_center = if flags & FLAG_VIEW_CENTER != 0 {
                 Some(Point {
                     x: reader.read_f32()? as f64,
                     y: reader.read_f32()? as f64,
@@ -109,19 +118,17 @@ pub fn decode_client_message(data: &[u8]) -> Option<ClientMessage> {
             } else {
                 None
             };
-            let view_radius = if flags & FLAG_INPUT_VIEW_RADIUS != 0 {
+            let view_radius = if flags & FLAG_VIEW_RADIUS != 0 {
                 Some(reader.read_f32()?)
             } else {
                 None
             };
-            let camera_distance = if flags & FLAG_INPUT_CAMERA_DISTANCE != 0 {
+            let camera_distance = if flags & FLAG_VIEW_CAMERA_DISTANCE != 0 {
                 Some(reader.read_f32()?)
             } else {
                 None
             };
-            Some(ClientMessage::Input {
-                axis,
-                boost,
+            Some(ClientMessage::View {
                 view_center,
                 view_radius,
                 camera_distance,
@@ -349,39 +356,24 @@ mod tests {
 
         let message = decode_client_message(&data).expect("message");
         match message {
-            ClientMessage::Input {
-                axis,
-                boost,
-                view_center,
-                view_radius,
-                camera_distance,
-            } => {
+            ClientMessage::Input { axis, boost } => {
                 let axis = axis.expect("axis");
                 assert!(boost);
                 assert!((axis.x - 1.5).abs() < 1e-6);
                 assert!((axis.y + 2.0).abs() < 1e-6);
                 assert!((axis.z - 0.25).abs() < 1e-6);
-                assert!(view_center.is_none());
-                assert!(view_radius.is_none());
-                assert!(camera_distance.is_none());
             }
             _ => panic!("unexpected message"),
         }
     }
 
     #[test]
-    fn decode_input_with_view_fields() {
+    fn decode_view_message() {
         let mut encoder = Encoder::with_capacity(64);
         encoder.write_header(
-            TYPE_INPUT,
-            FLAG_INPUT_AXIS
-                | FLAG_INPUT_VIEW_CENTER
-                | FLAG_INPUT_VIEW_RADIUS
-                | FLAG_INPUT_CAMERA_DISTANCE,
+            TYPE_VIEW,
+            FLAG_VIEW_CENTER | FLAG_VIEW_RADIUS | FLAG_VIEW_CAMERA_DISTANCE,
         );
-        encoder.write_f32(0.1);
-        encoder.write_f32(0.2);
-        encoder.write_f32(0.3);
         encoder.write_f32(0.4);
         encoder.write_f32(0.5);
         encoder.write_f32(0.6);
@@ -391,19 +383,11 @@ mod tests {
 
         let message = decode_client_message(&data).expect("message");
         match message {
-            ClientMessage::Input {
-                axis,
-                boost,
+            ClientMessage::View {
                 view_center,
                 view_radius,
                 camera_distance,
             } => {
-                assert!(!boost);
-                let axis = axis.expect("axis");
-                assert!((axis.x - 0.1).abs() < 1e-6);
-                assert!((axis.y - 0.2).abs() < 1e-6);
-                assert!((axis.z - 0.3).abs() < 1e-6);
-
                 let view_center = view_center.expect("view_center");
                 assert!((view_center.x - 0.4).abs() < 1e-6);
                 assert!((view_center.y - 0.5).abs() < 1e-6);

@@ -16,9 +16,20 @@
 
 ## Current Runtime Image
 - Backend image in use:
-  - `ghcr.io/nickandbro/slither-world-backend:prod-20260210-84f6dfa`
+  - `ghcr.io/nickandbro/slither-world-backend:prod-20260210-780916c`
 
 ## Latest Deploy (2026-02-10)
+- Control-plane container restarted on `snake-control-prod` to `prod-20260210-780916c` and `ROOM_IMAGE` updated to match.
+- Worker deployed (`snake-game`) version id: `09ff5891-9fc0-4bde-9067-d0d8429eb2b0`.
+- Room fleet rollout:
+  - Provisioned new warm room: `room-d0d8844733d047c7a74f956eb6b66803` (Hetzner server `120657440`).
+  - Deleted old warm room: `room-b3883cf1d58f4f5dae124ce38e25b5c0` (Hetzner server `120606856`).
+  - Restarted control-plane to reseed registry after deletion and provision a fresh warm room.
+- Verification:
+  - `POST https://slitherworld.com/api/matchmake` returns `200`.
+  - WebSocket upgrade via `https://slitherworld.com/api/room/:room?rt=...` returns `101`.
+
+## Deploy (2026-02-10)
 - Control-plane container restarted on `snake-control-prod` to `prod-20260210-84f6dfa` and `ROOM_IMAGE` updated to match.
 - Worker deployed (`snake-game`) version id: `35346354-fc41-474a-9535-8d60b0a5b24e`.
 - Room fleet rollout:

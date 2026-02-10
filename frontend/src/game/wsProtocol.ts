@@ -13,15 +13,18 @@ export type PlayerMeta = {
   skinColors?: string[]
 }
 
-const VERSION = 13
+const VERSION = 14
 
 const TYPE_JOIN = 0x01
 const TYPE_INPUT = 0x02
 const TYPE_RESPAWN = 0x03
+const TYPE_VIEW = 0x04
 
 const TYPE_INIT = 0x10
 const TYPE_STATE = 0x11
 const TYPE_PLAYER_META = 0x12
+const TYPE_PELLET_DELTA = 0x13
+const TYPE_PELLET_RESET = 0x14
 
 const FLAG_JOIN_PLAYER_ID = 1 << 0
 const FLAG_JOIN_NAME = 1 << 1
@@ -30,9 +33,10 @@ const FLAG_JOIN_SKIN = 1 << 3
 
 const FLAG_INPUT_AXIS = 1 << 0
 const FLAG_INPUT_BOOST = 1 << 1
-const FLAG_INPUT_VIEW_CENTER = 1 << 2
-const FLAG_INPUT_VIEW_RADIUS = 1 << 3
-const FLAG_INPUT_CAMERA_DISTANCE = 1 << 4
+
+const FLAG_VIEW_CENTER = 1 << 0
+const FLAG_VIEW_RADIUS = 1 << 1
+const FLAG_VIEW_CAMERA_DISTANCE = 1 << 2
 
 const SNAKE_DETAIL_FULL = 0
 const SNAKE_DETAIL_WINDOW = 1
@@ -55,6 +59,15 @@ export type DecodedMessage =
       tickMs: number
     }
   | { type: 'state'; state: GameStateSnapshot }
+  | { type: 'pellet_reset'; now: number; seq: number; pellets: PelletSnapshot[] }
+  | {
+      type: 'pellet_delta'
+      now: number
+      seq: number
+      adds: PelletSnapshot[]
+      updates: PelletSnapshot[]
+      removes: number[]
+    }
   | { type: 'meta' }
 
 export function encodeJoin(
@@ -100,31 +113,14 @@ export function encodeJoin(
   return buffer
 }
 
-export function encodeInput(
-  axis: Point | null,
-  boost: boolean,
-  viewCenter: Point | null = null,
-  viewRadius: number | null = null,
-  cameraDistance: number | null = null,
-): ArrayBuffer {
+export function encodeInputFast(axis: Point | null, boost: boolean): ArrayBuffer {
   const hasAxis = !!axis
-  const hasViewCenter = !!viewCenter
-  const hasViewRadius = Number.isFinite(viewRadius)
-  const hasCameraDistance = Number.isFinite(cameraDistance)
 
   let flags = 0
   if (hasAxis) flags |= FLAG_INPUT_AXIS
   if (boost) flags |= FLAG_INPUT_BOOST
-  if (hasViewCenter) flags |= FLAG_INPUT_VIEW_CENTER
-  if (hasViewRadius) flags |= FLAG_INPUT_VIEW_RADIUS
-  if (hasCameraDistance) flags |= FLAG_INPUT_CAMERA_DISTANCE
 
-  const length =
-    4 +
-    (hasAxis ? 12 : 0) +
-    (hasViewCenter ? 12 : 0) +
-    (hasViewRadius ? 4 : 0) +
-    (hasCameraDistance ? 4 : 0)
+  const length = 4 + (hasAxis ? 12 : 0)
   const buffer = new ArrayBuffer(length)
   const view = new DataView(buffer)
   let offset = 0
@@ -135,6 +131,29 @@ export function encodeInput(
     view.setFloat32(offset + 8, axis.z, true)
     offset += 12
   }
+  return buffer
+}
+
+export function encodeView(
+  viewCenter: Point | null,
+  viewRadius: number | null,
+  cameraDistance: number | null,
+): ArrayBuffer {
+  const hasViewCenter = !!viewCenter
+  const hasViewRadius = Number.isFinite(viewRadius)
+  const hasCameraDistance = Number.isFinite(cameraDistance)
+
+  let flags = 0
+  if (hasViewCenter) flags |= FLAG_VIEW_CENTER
+  if (hasViewRadius) flags |= FLAG_VIEW_RADIUS
+  if (hasCameraDistance) flags |= FLAG_VIEW_CAMERA_DISTANCE
+
+  const length =
+    4 + (hasViewCenter ? 12 : 0) + (hasViewRadius ? 4 : 0) + (hasCameraDistance ? 4 : 0)
+  const buffer = new ArrayBuffer(length)
+  const view = new DataView(buffer)
+  let offset = 0
+  offset = writeHeader(view, offset, TYPE_VIEW, flags)
   if (viewCenter) {
     view.setFloat32(offset, viewCenter.x, true)
     view.setFloat32(offset + 4, viewCenter.y, true)
@@ -161,6 +180,7 @@ export function encodeRespawn(): ArrayBuffer {
 export function decodeServerMessage(
   buffer: ArrayBuffer,
   meta: Map<string, PlayerMeta>,
+  idByNetId: Map<number, string>,
 ): DecodedMessage | null {
   const reader = new Reader(buffer)
   const version = reader.readU8()
@@ -172,43 +192,46 @@ export function decodeServerMessage(
 
   switch (messageType) {
     case TYPE_INIT:
-      return decodeInit(reader, meta)
+      return decodeInit(reader, meta, idByNetId)
     case TYPE_STATE:
-      return decodeState(reader, meta)
+      return decodeState(reader, meta, idByNetId)
     case TYPE_PLAYER_META:
-      decodeMeta(reader, meta)
+      decodeMeta(reader, meta, idByNetId)
       return { type: 'meta' }
+    case TYPE_PELLET_RESET:
+      return decodePelletReset(reader)
+    case TYPE_PELLET_DELTA:
+      return decodePelletDelta(reader)
     default:
       return null
   }
 }
 
-function decodeInit(reader: Reader, meta: Map<string, PlayerMeta>): DecodedMessage | null {
+function decodeInit(
+  reader: Reader,
+  meta: Map<string, PlayerMeta>,
+  idByNetId: Map<number, string>,
+): DecodedMessage | null {
   const playerId = reader.readUuid()
   const now = reader.readI64()
   const seq = reader.readU32()
   const tickMs = reader.readU16()
-  const pelletsCount = reader.readU16()
-  if (playerId === null || now === null || seq === null || tickMs === null || pelletsCount === null) {
-    return null
-  }
-
-  const pellets = readPellets(reader, pelletsCount)
-  if (!pellets) return null
-
+  if (playerId === null || now === null || seq === null || tickMs === null) return null
   const totalPlayers = reader.readU16()
   const metaCount = reader.readU16()
   if (totalPlayers === null || metaCount === null) return null
   for (let i = 0; i < metaCount; i += 1) {
+    const netId = reader.readU16()
     const id = reader.readUuid()
     const name = reader.readString()
     const color = reader.readString()
     const skinColors = readSkinColors(reader)
-    if (id === null || name === null || color === null || skinColors === null) return null
+    if (netId === null || id === null || name === null || color === null || skinColors === null) return null
+    idByNetId.set(netId, id)
     meta.set(id, { name, color, skinColors: skinColors ?? undefined })
   }
 
-  const players = readPlayerStates(reader, meta)
+  const players = readPlayerStates(reader, meta, idByNetId)
   if (!players) return null
   const environment = readEnvironment(reader)
   if (!environment) return null
@@ -217,74 +240,116 @@ function decodeInit(reader: Reader, meta: Map<string, PlayerMeta>): DecodedMessa
     type: 'init',
     playerId,
     tickMs,
-    state: { now, seq, pellets, players, totalPlayers },
+    state: { now, seq, pellets: [], players, totalPlayers },
     environment,
   }
 }
 
-function decodeState(reader: Reader, meta: Map<string, PlayerMeta>): DecodedMessage | null {
+function decodeState(
+  reader: Reader,
+  meta: Map<string, PlayerMeta>,
+  idByNetId: Map<number, string>,
+): DecodedMessage | null {
   const now = reader.readI64()
   const seq = reader.readU32()
-  const pelletsCount = reader.readU16()
-  if (now === null || seq === null || pelletsCount === null) return null
-
-  const pellets = readPellets(reader, pelletsCount)
-  if (!pellets) return null
-
   const totalPlayers = reader.readU16()
-  if (totalPlayers === null) return null
-  const players = readPlayerStates(reader, meta)
+  if (now === null || seq === null || totalPlayers === null) return null
+  const players = readPlayerStates(reader, meta, idByNetId)
   if (!players) return null
 
   return {
     type: 'state',
-    state: { now, seq, pellets, players, totalPlayers },
+    state: { now, seq, pellets: [], players, totalPlayers },
   }
 }
 
-function decodeMeta(reader: Reader, meta: Map<string, PlayerMeta>) {
+function decodeMeta(reader: Reader, meta: Map<string, PlayerMeta>, idByNetId: Map<number, string>) {
   const metaCount = reader.readU16()
   if (metaCount === null) return
   for (let i = 0; i < metaCount; i += 1) {
+    const netId = reader.readU16()
     const id = reader.readUuid()
     const name = reader.readString()
     const color = reader.readString()
     const skinColors = readSkinColors(reader)
-    if (id === null || name === null || color === null || skinColors === null) return
+    if (netId === null || id === null || name === null || color === null || skinColors === null) return
+    idByNetId.set(netId, id)
     meta.set(id, { name, color, skinColors: skinColors ?? undefined })
   }
 }
 
-function readPlayerStates(reader: Reader, meta: Map<string, PlayerMeta>): PlayerSnapshot[] | null {
+function decodePelletReset(reader: Reader): DecodedMessage | null {
+  const now = reader.readI64()
+  const seq = reader.readU32()
+  const pelletCount = reader.readU16()
+  if (now === null || seq === null || pelletCount === null) return null
+  const pellets = readPellets(reader, pelletCount)
+  if (!pellets) return null
+  return { type: 'pellet_reset', now, seq, pellets }
+}
+
+function decodePelletDelta(reader: Reader): DecodedMessage | null {
+  const now = reader.readI64()
+  const seq = reader.readU32()
+  const addCount = reader.readU16()
+  if (now === null || seq === null || addCount === null) return null
+  const adds = readPellets(reader, addCount)
+  if (!adds) return null
+  const updateCount = reader.readU16()
+  if (updateCount === null) return null
+  const updates = readPellets(reader, updateCount)
+  if (!updates) return null
+  const removeCount = reader.readU16()
+  if (removeCount === null) return null
+  const removes: number[] = []
+  for (let i = 0; i < removeCount; i += 1) {
+    const id = reader.readU32()
+    if (id === null) return null
+    removes.push(id)
+  }
+  return { type: 'pellet_delta', now, seq, adds, updates, removes }
+}
+
+function readPlayerStates(
+  reader: Reader,
+  meta: Map<string, PlayerMeta>,
+  idByNetId: Map<number, string>,
+): PlayerSnapshot[] | null {
   const playerCount = reader.readU16()
   if (playerCount === null) return null
 
   const players: PlayerSnapshot[] = []
   for (let i = 0; i < playerCount; i += 1) {
-    const id = reader.readUuid()
-    const aliveRaw = reader.readU8()
+    const netId = reader.readU16()
+    const flags = reader.readU8()
     const score = reader.readI32()
-    const scoreFraction = reader.readF32()
-    const oxygen = reader.readF32()
-    const isBoostingRaw = reader.readU8()
-    const girthScale = reader.readF32()
-    const tailExtension = reader.readF32()
+    const scoreFractionQ = reader.readU16()
+    const oxygenQ = reader.readU16()
+    const girthQ = reader.readU8()
+    const tailExtQ = reader.readU8()
     const snakeDetailRaw = reader.readU8()
     const snakeTotalLen = reader.readU16()
     if (
-      id === null ||
-      aliveRaw === null ||
+      netId === null ||
+      flags === null ||
       score === null ||
-      scoreFraction === null ||
-      oxygen === null ||
-      isBoostingRaw === null ||
-      girthScale === null ||
-      tailExtension === null ||
+      scoreFractionQ === null ||
+      oxygenQ === null ||
+      girthQ === null ||
+      tailExtQ === null ||
       snakeDetailRaw === null ||
       snakeTotalLen === null
     ) {
       return null
     }
+
+    const id = idByNetId.get(netId) ?? `net:${netId}`
+    const alive = (flags & 0x01) !== 0
+    const isBoosting = (flags & 0x02) !== 0
+    const scoreFraction = Math.min(0.999_999, Math.max(0, scoreFractionQ / 65535))
+    const oxygen = Math.min(1, Math.max(0, oxygenQ / 65535))
+    const girthScale = 1 + (girthQ / 255) * 1
+    const tailExtension = Math.min(1, Math.max(0, tailExtQ / 255))
 
     let snakeDetail: PlayerSnapshot['snakeDetail'] = 'full'
     let snakeStart = 0
@@ -314,7 +379,7 @@ function readPlayerStates(reader: Reader, meta: Map<string, PlayerMeta>): Player
       return null
     }
 
-    const snake = readPoints(reader, snakeLen)
+    const snake = readOctPoints(reader, snakeLen)
     if (!snake) return null
 
     const digestionsLen = reader.readU8()
@@ -337,10 +402,10 @@ function readPlayerStates(reader: Reader, meta: Map<string, PlayerMeta>): Player
       score,
       scoreFraction,
       oxygen,
-      isBoosting: isBoostingRaw === 1,
+      isBoosting,
       girthScale,
       tailExtension,
-      alive: aliveRaw === 1,
+      alive,
       snakeDetail,
       snakeStart,
       snakeTotalLen,
@@ -482,14 +547,30 @@ function readEnvironment(reader: Reader): Environment | null {
   return { lakes, trees, mountains }
 }
 
-function readPoints(reader: Reader, count: number): Point[] | null {
+function decodeOctI16ToPoint(xq: number, yq: number): Point {
+  const inv = 1 / PELLET_NORMAL_MAX
+  let x = xq * inv
+  let y = yq * inv
+  let z = 1 - Math.abs(x) - Math.abs(y)
+  const t = Math.max(-z, 0)
+  x += x >= 0 ? -t : t
+  y += y >= 0 ? -t : t
+  // Important: do NOT add `t` to `z` here.
+  // The octahedral fold for the negative hemisphere is inverted by adjusting x/y only while
+  // keeping the negative z value. Adding `t` collapses all negative-z vectors onto z=0.
+  const len = Math.hypot(x, y, z)
+  if (!Number.isFinite(len) || len <= 1e-6) return { x: 0, y: 0, z: 1 }
+  const invLen = 1 / len
+  return { x: x * invLen, y: y * invLen, z: z * invLen }
+}
+
+function readOctPoints(reader: Reader, count: number): Point[] | null {
   const points: Point[] = []
   for (let i = 0; i < count; i += 1) {
-    const x = reader.readF32()
-    const y = reader.readF32()
-    const z = reader.readF32()
-    if (x === null || y === null || z === null) return null
-    points.push({ x, y, z })
+    const x = reader.readI16()
+    const y = reader.readI16()
+    if (x === null || y === null) return null
+    points.push(decodeOctI16ToPoint(x, y))
   }
   return points
 }

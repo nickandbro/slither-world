@@ -7,7 +7,7 @@ import {
   type RendererBackend,
   type RendererPreference,
 } from './render/webglScene'
-import type { Camera, Environment, GameStateSnapshot, Point } from './game/types'
+import type { Camera, Environment, GameStateSnapshot, PelletSnapshot, Point } from './game/types'
 import { axisFromPointer, updateCamera } from './game/camera'
 import { IDENTITY_QUAT, clamp, lerpPoint, normalize } from './game/math'
 import { buildInterpolatedSnapshot, type TimedSnapshot } from './game/snapshots'
@@ -24,7 +24,14 @@ import {
   storeRoomName,
   storeRendererPreference,
 } from './game/storage'
-import { decodeServerMessage, encodeInput, encodeJoin, encodeRespawn, type PlayerMeta } from './game/wsProtocol'
+import {
+  decodeServerMessage,
+  encodeInputFast,
+  encodeJoin,
+  encodeRespawn,
+  encodeView,
+  type PlayerMeta,
+} from './game/wsProtocol'
 import {
   DEFAULT_SOLID_SKIN,
   MAX_SAVED_SKIN_DESIGNS,
@@ -397,6 +404,10 @@ export default function App() {
   const receiveIntervalMsRef = useRef(50)
   const receiveJitterMsRef = useRef(0)
   const receiveJitterDelayMsRef = useRef(0)
+  const netRxWindowStartMsRef = useRef<number | null>(null)
+  const netRxWindowBytesRef = useRef(0)
+  const netRxBpsRef = useRef(0)
+  const netRxTotalBytesRef = useRef(0)
   const playoutDelayMsRef = useRef(100)
   const delayBoostMsRef = useRef(0)
   const lastDelayUpdateMsRef = useRef<number | null>(null)
@@ -425,6 +436,9 @@ export default function App() {
   const localHeadRef = useRef<Point | null>(MENU_CAMERA_TARGET)
   const headScreenRef = useRef<{ x: number; y: number } | null>(null)
   const playerMetaRef = useRef<Map<string, PlayerMeta>>(new Map())
+  const playerIdByNetIdRef = useRef<Map<number, string>>(new Map())
+  const pelletMapRef = useRef<Map<number, PelletSnapshot>>(new Map())
+  const pelletsArrayRef = useRef<PelletSnapshot[]>([])
   const menuPhaseRef = useRef<MenuPhase>('preplay')
   const menuUiModeRef = useRef<MenuUiMode>('home')
   const menuOverlayExitingRef = useRef(false)
@@ -2127,12 +2141,14 @@ export default function App() {
               if (elapsedSinceSummary >= 5000) {
                 const netInfo = netDebugInfoRef.current
                 const motionInfo = motionDebugInfoRef.current
+                const rxKiBps = netRxBpsRef.current / 1024
+                const rxTotalMiB = netRxTotalBytesRef.current / (1024 * 1024)
                 appendNetLagEvent(
                   'summary',
-                  `summary lag=${netInfo.lagSpikeActive ? '1' : '0'} cause=${netInfo.lagSpikeCause} delay=${netInfo.playoutDelayMs.toFixed(1)}ms boost=${netInfo.delayBoostMs.toFixed(1)}ms jitter=${netInfo.jitterMs.toFixed(1)}ms jitterDelay=${netInfo.jitterDelayMs.toFixed(1)}ms interval=${netInfo.receiveIntervalMs.toFixed(1)}ms stale=${netInfo.staleMs.toFixed(1)}ms impair=${netInfo.impairmentMsRemaining.toFixed(0)}ms tuningRev=${netInfo.tuningRevision} backward=${motionInfo.backwardCorrectionCount}/${motionInfo.sampleCount} minDot=${motionInfo.minHeadDot.toFixed(4)}`,
+                  `summary lag=${netInfo.lagSpikeActive ? '1' : '0'} cause=${netInfo.lagSpikeCause} delay=${netInfo.playoutDelayMs.toFixed(1)}ms boost=${netInfo.delayBoostMs.toFixed(1)}ms jitter=${netInfo.jitterMs.toFixed(1)}ms jitterDelay=${netInfo.jitterDelayMs.toFixed(1)}ms interval=${netInfo.receiveIntervalMs.toFixed(1)}ms stale=${netInfo.staleMs.toFixed(1)}ms impair=${netInfo.impairmentMsRemaining.toFixed(0)}ms rx=${rxKiBps.toFixed(1)}KiB/s total=${rxTotalMiB.toFixed(2)}MiB tuningRev=${netInfo.tuningRevision} backward=${motionInfo.backwardCorrectionCount}/${motionInfo.sampleCount} minDot=${motionInfo.minHeadDot.toFixed(4)}`,
                 )
                 console.info(
-                  `[net] summary lag=${netInfo.lagSpikeActive} cause=${netInfo.lagSpikeCause} delay=${netInfo.playoutDelayMs.toFixed(1)}ms boost=${netInfo.delayBoostMs.toFixed(1)}ms jitter=${netInfo.jitterMs.toFixed(1)}ms jitterDelay=${netInfo.jitterDelayMs.toFixed(1)}ms interval=${netInfo.receiveIntervalMs.toFixed(1)}ms stale=${netInfo.staleMs.toFixed(1)}ms impair=${netInfo.impairmentMsRemaining.toFixed(0)}ms tuningRev=${netInfo.tuningRevision} backward=${motionInfo.backwardCorrectionCount}/${motionInfo.sampleCount} minDot=${motionInfo.minHeadDot.toFixed(4)}`,
+                  `[net] summary lag=${netInfo.lagSpikeActive} cause=${netInfo.lagSpikeCause} delay=${netInfo.playoutDelayMs.toFixed(1)}ms boost=${netInfo.delayBoostMs.toFixed(1)}ms jitter=${netInfo.jitterMs.toFixed(1)}ms jitterDelay=${netInfo.jitterDelayMs.toFixed(1)}ms interval=${netInfo.receiveIntervalMs.toFixed(1)}ms stale=${netInfo.staleMs.toFixed(1)}ms impair=${netInfo.impairmentMsRemaining.toFixed(0)}ms rx=${rxKiBps.toFixed(1)}KiB/s total=${rxTotalMiB.toFixed(2)}MiB tuningRev=${netInfo.tuningRevision} backward=${motionInfo.backwardCorrectionCount}/${motionInfo.sampleCount} minDot=${motionInfo.minHeadDot.toFixed(4)}`,
                 )
                 lastNetSummaryLogMsRef.current = nowMs
               }
@@ -2155,6 +2171,19 @@ export default function App() {
                   }
                 ).getNetSmoothingInfo = () => ({
                   ...netDebugInfoRef.current,
+                })
+                ;(
+                  rootDebugApi as {
+                    getNetTrafficInfo?: () => {
+                      rxBps: number
+                      rxTotalBytes: number
+                      rxWindowBytes: number
+                    }
+                  }
+                ).getNetTrafficInfo = () => ({
+                  rxBps: netRxBpsRef.current,
+                  rxTotalBytes: netRxTotalBytesRef.current,
+                  rxWindowBytes: netRxWindowBytesRef.current,
                 })
                 ;(
                   rootDebugApi as {
@@ -2485,6 +2514,10 @@ export default function App() {
       receiveIntervalMsRef.current = 50
       receiveJitterMsRef.current = 0
       receiveJitterDelayMsRef.current = 0
+      netRxWindowStartMsRef.current = null
+      netRxWindowBytesRef.current = 0
+      netRxBpsRef.current = 0
+      netRxTotalBytesRef.current = 0
       playoutDelayMsRef.current = 100
       delayBoostMsRef.current = 0
       lastDelayUpdateMsRef.current = null
@@ -2500,6 +2533,9 @@ export default function App() {
       netTuningRef.current = resolveNetTuning(netTuningOverridesRef.current)
       tickIntervalRef.current = 50
       playerMetaRef.current = new Map()
+      playerIdByNetIdRef.current = new Map()
+      pelletMapRef.current = new Map()
+      pelletsArrayRef.current = []
       resetScoreRadialState(scoreRadialStateRef.current)
       netDebugInfoRef.current = {
         lagSpikeActive: false,
@@ -2598,14 +2634,64 @@ export default function App() {
 
       socket.addEventListener('message', (event) => {
         if (!(event.data instanceof ArrayBuffer)) return
-        const decoded = decodeServerMessage(event.data, playerMetaRef.current)
-	        if (!decoded) return
-	        if (decoded.type === 'init') {
-	          setPlayerId(decoded.playerId)
-	          playerIdRef.current = decoded.playerId
-	          storePlayerId(decoded.playerId)
-	          if (Number.isFinite(decoded.tickMs) && decoded.tickMs > 0) {
-	            const normalizedTickMs = Math.max(16, decoded.tickMs)
+        const bytes = event.data.byteLength
+        netRxTotalBytesRef.current += bytes
+        netRxWindowBytesRef.current += bytes
+        const nowMs = performance.now()
+        if (netRxWindowStartMsRef.current === null) {
+          netRxWindowStartMsRef.current = nowMs
+        } else {
+          const elapsedMs = nowMs - netRxWindowStartMsRef.current
+          if (elapsedMs >= 1000) {
+            netRxBpsRef.current = (netRxWindowBytesRef.current * 1000) / Math.max(1, elapsedMs)
+            netRxWindowStartMsRef.current = nowMs
+            netRxWindowBytesRef.current = 0
+          }
+        }
+        const decoded = decodeServerMessage(
+          event.data,
+          playerMetaRef.current,
+          playerIdByNetIdRef.current,
+        )
+        if (!decoded) return
+
+        const rebuildPelletsArray = () => {
+          const pellets = Array.from(pelletMapRef.current.values())
+          pellets.sort((a, b) => a.id - b.id)
+          pelletsArrayRef.current = pellets
+          return pellets
+        }
+
+        const getCurrentPellets = () => pelletsArrayRef.current
+
+        if (decoded.type === 'pellet_reset') {
+          pelletMapRef.current = new Map(decoded.pellets.map((pellet) => [pellet.id, pellet]))
+          const pellets = rebuildPelletsArray()
+          const buffer = snapshotBufferRef.current
+          if (buffer.length > 0) {
+            for (const snapshot of buffer) snapshot.pellets = pellets
+          }
+          setGameState((previous) => (previous ? { ...previous, pellets } : previous))
+          return
+        }
+
+        if (decoded.type === 'pellet_delta') {
+          for (const pellet of decoded.adds) pelletMapRef.current.set(pellet.id, pellet)
+          for (const pellet of decoded.updates) pelletMapRef.current.set(pellet.id, pellet)
+          for (const id of decoded.removes) pelletMapRef.current.delete(id)
+          const pellets = rebuildPelletsArray()
+          const buffer = snapshotBufferRef.current
+          if (buffer.length > 0) buffer[buffer.length - 1].pellets = pellets
+          setGameState((previous) => (previous ? { ...previous, pellets } : previous))
+          return
+        }
+
+        if (decoded.type === 'init') {
+          setPlayerId(decoded.playerId)
+          playerIdRef.current = decoded.playerId
+          storePlayerId(decoded.playerId)
+          if (Number.isFinite(decoded.tickMs) && decoded.tickMs > 0) {
+            const normalizedTickMs = Math.max(16, decoded.tickMs)
             serverTickMsRef.current = normalizedTickMs
             tickIntervalRef.current = normalizedTickMs
             receiveIntervalMsRef.current = normalizedTickMs
@@ -2615,13 +2701,17 @@ export default function App() {
             }
           }
           setEnvironment(decoded.environment)
-          pushSnapshot(decoded.state)
-          setGameState(decoded.state)
+          const state: GameStateSnapshot = { ...decoded.state, pellets: getCurrentPellets() }
+          pushSnapshot(state)
+          setGameState(state)
           return
         }
+
         if (decoded.type === 'state') {
-          pushSnapshot(decoded.state)
-          setGameState(decoded.state)
+          const state: GameStateSnapshot = { ...decoded.state, pellets: getCurrentPellets() }
+          pushSnapshot(state)
+          setGameState(state)
+          return
         }
       })
 
@@ -2740,6 +2830,7 @@ export default function App() {
     // Send input more frequently than the server tick so pointer steering feels responsive.
     // The server consumes the latest input each tick; higher cadence reduces worst-case input latency.
     const intervalMs = Math.max(16, Math.round(tickIntervalRef.current / 2))
+    let lastViewSentAtMs = 0
     sendIntervalRef.current = window.setInterval(() => {
       const socket = socketRef.current
       if (!socket || socket.readyState !== WebSocket.OPEN) return
@@ -2753,15 +2844,14 @@ export default function App() {
       const cameraVerticalOffset = renderCameraVerticalOffsetRef.current
       const effectiveCameraDistance = Math.hypot(cameraDistance, cameraVerticalOffset)
       const viewRadius = computeViewRadius(effectiveCameraDistance, aspect)
-      socket.send(
-        encodeInput(
-          axis,
-          inputEnabledRef.current && pointerRef.current.boost,
-          localHeadRef.current,
-          viewRadius,
-          effectiveCameraDistance,
-        ),
-      )
+      const boost = inputEnabledRef.current && pointerRef.current.boost
+      socket.send(encodeInputFast(axis, boost))
+
+      const nowMs = performance.now()
+      if (nowMs - lastViewSentAtMs >= 100) {
+        socket.send(encodeView(localHeadRef.current, viewRadius, effectiveCameraDistance))
+        lastViewSentAtMs = nowMs
+      }
     }, intervalMs)
   }
 

@@ -254,6 +254,7 @@ mod tests {
         Player {
             id: "player".to_string(),
             id_bytes: [0u8; 16],
+            net_id: 1,
             name: "Player".to_string(),
             color: "#fff".to_string(),
             skin: None,

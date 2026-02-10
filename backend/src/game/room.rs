@@ -91,6 +91,8 @@ struct SessionEntry {
     view_center: Option<Point>,
     view_radius: Option<f64>,
     camera_distance: Option<f64>,
+    pellet_view_ids: HashSet<u32>,
+    pellet_view_initialized: bool,
 }
 
 #[derive(Debug)]
@@ -100,6 +102,7 @@ struct RoomState {
     pellets: Vec<Pellet>,
     next_pellet_id: u32,
     next_state_seq: u32,
+    next_player_net_id: u16,
     next_evasive_spawn_at: HashMap<String, i64>,
     environment: Environment,
 }
@@ -221,6 +224,7 @@ impl Room {
                 pellets: Vec::new(),
                 next_pellet_id: 0,
                 next_state_seq: 1,
+                next_player_net_id: 1,
                 next_evasive_spawn_at: HashMap::new(),
                 environment: Environment::generate(),
             }),
@@ -240,6 +244,8 @@ impl Room {
                 view_center: None,
                 view_radius: None,
                 camera_distance: None,
+                pellet_view_ids: HashSet::new(),
+                pellet_view_initialized: false,
             },
         );
         session_id
@@ -254,36 +260,41 @@ impl Room {
         let Ok(message) = serde_json::from_str::<JsonClientMessage>(text) else {
             return true;
         };
-        let message = match message {
+        match message {
             JsonClientMessage::Join {
                 name,
                 player_id,
                 defer_spawn,
             } => {
                 let player_id = player_id.and_then(|value| Uuid::parse_str(&value).ok());
-                protocol::ClientMessage::Join {
-                    name,
-                    player_id,
-                    defer_spawn: defer_spawn.unwrap_or(false),
-                    skin: None,
-                }
+                self.handle_client_message(
+                    session_id,
+                    protocol::ClientMessage::Join {
+                        name,
+                        player_id,
+                        defer_spawn: defer_spawn.unwrap_or(false),
+                        skin: None,
+                    },
+                )
+                .await
             }
-            JsonClientMessage::Respawn => protocol::ClientMessage::Respawn,
+            JsonClientMessage::Respawn => {
+                self.handle_client_message(session_id, protocol::ClientMessage::Respawn)
+                    .await
+            }
             JsonClientMessage::Input {
                 axis,
                 boost,
                 view_center,
                 view_radius,
                 camera_distance,
-            } => protocol::ClientMessage::Input {
-                axis,
-                boost: boost.unwrap_or(false),
-                view_center,
-                view_radius,
-                camera_distance,
-            },
-        };
-        self.handle_client_message(session_id, message).await
+            } => {
+                let mut state = self.state.lock().await;
+                state.handle_input(session_id, axis, boost.unwrap_or(false));
+                state.handle_view(session_id, view_center, view_radius, camera_distance);
+                true
+            }
+        }
     }
 
     pub async fn handle_binary_message(self: &Arc<Self>, session_id: &str, data: &[u8]) -> bool {
@@ -325,21 +336,16 @@ impl Room {
                 state.handle_respawn(session_id);
                 true
             }
-            protocol::ClientMessage::Input {
-                axis,
-                boost,
+            protocol::ClientMessage::Input { axis, boost } => {
+                state.handle_input(session_id, axis, boost);
+                true
+            }
+            protocol::ClientMessage::View {
                 view_center,
                 view_radius,
                 camera_distance,
             } => {
-                state.handle_input(
-                    session_id,
-                    axis,
-                    boost,
-                    view_center,
-                    view_radius,
-                    camera_distance,
-                );
+                state.handle_view(session_id, view_center, view_radius, camera_distance);
                 true
             }
         }
@@ -481,6 +487,8 @@ impl RoomState {
 
         let sender = if let Some(session) = self.sessions.get_mut(session_id) {
             session.player_id = Some(player_id.clone());
+            session.pellet_view_initialized = false;
+            session.pellet_view_ids.clear();
             Some(session.sender.clone())
         } else {
             None
@@ -489,6 +497,7 @@ impl RoomState {
             let payload = self.build_init_payload_for_session(session_id, &player_id);
             let _ = sender.send(payload);
         }
+        self.maybe_send_pellet_reset_for_session(session_id);
         self.broadcast_player_meta(&[player_id]);
         true
     }
@@ -535,6 +544,25 @@ impl RoomState {
         session_id: &str,
         axis: Option<Point>,
         boost: bool,
+    ) {
+        let Some(player_id) = self.session_player_id(session_id) else {
+            return;
+        };
+        let Some(player) = self.players.get_mut(&player_id) else {
+            return;
+        };
+
+        if let Some(axis) = axis.and_then(parse_axis) {
+            player.target_axis = axis;
+        }
+
+        player.boost = boost;
+        player.last_seen = Self::now_millis();
+    }
+
+    fn handle_view(
+        &mut self,
+        session_id: &str,
         view_center: Option<Point>,
         view_radius: Option<f32>,
         camera_distance: Option<f32>,
@@ -550,20 +578,7 @@ impl RoomState {
                 .filter(|value| value.is_finite())
                 .map(|value| clamp(value, VIEW_CAMERA_DISTANCE_MIN, VIEW_CAMERA_DISTANCE_MAX));
         }
-
-        let Some(player_id) = self.session_player_id(session_id) else {
-            return;
-        };
-        let Some(player) = self.players.get_mut(&player_id) else {
-            return;
-        };
-
-        if let Some(axis) = axis.and_then(parse_axis) {
-            player.target_axis = axis;
-        }
-
-        player.boost = boost;
-        player.last_seen = Self::now_millis();
+        self.maybe_send_pellet_reset_for_session(session_id);
     }
 
     fn debug_kill(&mut self, target: DebugKillTarget) -> Option<String> {
@@ -642,8 +657,11 @@ impl RoomState {
         if total_len == 0 {
             return SnakeWindow::stub(0);
         }
-        if is_local_player || view.is_none() {
+        if is_local_player {
             return SnakeWindow::full(total_len);
+        }
+        if view.is_none() {
+            return SnakeWindow::stub(total_len);
         }
         let (view_center, view_cos) = view.expect("checked above");
         let mut best_start = 0usize;
@@ -745,23 +763,29 @@ impl RoomState {
         Some((view_center, visible_cos, visible_count))
     }
 
-    fn visible_pellets_for_session<'a>(&'a self, session_id: &str) -> Vec<&'a Pellet> {
-        let absolute_max = u16::MAX as usize;
-        let Some((view_center, view_cos, max_visible)) = self.pellet_view_params(session_id) else {
-            return self.pellets.iter().take(absolute_max).collect();
-        };
-        let capped_visible = max_visible.min(absolute_max);
-        let mut visible = Vec::with_capacity(capped_visible.min(self.pellets.len()));
-        for pellet in &self.pellets {
+    fn visible_pellet_indices(&self, view_center: Point, view_cos: f64, max_visible: usize) -> Vec<usize> {
+        let capped_visible = max_visible.min(u16::MAX as usize);
+        if capped_visible == 0 || self.pellets.is_empty() {
+            return Vec::new();
+        }
+
+        // Choose a stable subset so delta replication does not churn due to Vec order changes.
+        // We keep the lowest IDs among visible pellets (IDs are monotonic for practical purposes).
+        use std::collections::BinaryHeap;
+        let mut heap: BinaryHeap<(u32, usize)> = BinaryHeap::new();
+        for (index, pellet) in self.pellets.iter().enumerate() {
             if dot(view_center, pellet.normal) < view_cos {
                 continue;
             }
-            visible.push(pellet);
-            if visible.len() >= capped_visible {
-                break;
+            heap.push((pellet.id, index));
+            if heap.len() > capped_visible {
+                heap.pop();
             }
         }
-        visible
+
+        let mut out: Vec<usize> = heap.into_iter().map(|(_, index)| index).collect();
+        out.sort_unstable_by_key(|&index| self.pellets[index].id);
+        out
     }
 
     fn human_count(&self) -> usize {
@@ -911,7 +935,25 @@ impl RoomState {
         }
     }
 
-    fn create_player(&self, id: Uuid, name: String, is_bot: bool) -> Player {
+    fn allocate_player_net_id(&mut self) -> u16 {
+        let mut candidate = self.next_player_net_id.max(1);
+        for _ in 0..=u16::MAX {
+            if candidate == 0 {
+                candidate = 1;
+            }
+            if !self.players.values().any(|player| player.net_id == candidate) {
+                self.next_player_net_id = candidate.wrapping_add(1);
+                if self.next_player_net_id == 0 {
+                    self.next_player_net_id = 1;
+                }
+                return candidate;
+            }
+            candidate = candidate.wrapping_add(1);
+        }
+        0
+    }
+
+    fn create_player(&mut self, id: Uuid, name: String, is_bot: bool) -> Player {
         let base_axis = random_axis();
         let spawned = self.spawn_snake(base_axis, None);
         let (alive, axis, snake, respawn_at) = match spawned {
@@ -925,10 +967,12 @@ impl RoomState {
         };
 
         let id_string = id.to_string();
+        let net_id = self.allocate_player_net_id();
 
         Player {
             id: id_string,
             id_bytes: *id.as_bytes(),
+            net_id,
             name,
             color: COLOR_POOL[self.players.len() % COLOR_POOL.len()].to_string(),
             skin: None,
@@ -2216,7 +2260,13 @@ impl RoomState {
         self.update_small_pellets(dt_seconds);
         self.ensure_pellets();
 
-        self.broadcast_state();
+        let now = Self::now_millis();
+        let state_seq = self.next_state_seq;
+        self.broadcast_state(now, state_seq);
+        if state_seq % 2 == 0 {
+            self.broadcast_pellet_delta(now, state_seq);
+        }
+        self.next_state_seq = self.next_state_seq.wrapping_add(1);
     }
 
     fn handle_death(&mut self, player_id: &str) {
@@ -2310,15 +2360,14 @@ impl RoomState {
             .map(|player| player.id_bytes)
             .unwrap_or([0u8; 16]);
         let visible_players = self.visible_players_for_session(session_id);
-        let visible_pellets = self.visible_pellets_for_session(session_id);
         let total_players = self.players.len().min(u16::MAX as usize);
         let visible_player_count = visible_players.len().min(u16::MAX as usize);
-        let pellet_count = visible_pellets.len().min(u16::MAX as usize);
         let now = Self::now_millis();
         let state_seq = self.next_state_seq.wrapping_sub(1);
         let tick_ms = TICK_MS.min(u16::MAX as u64) as u16;
-        let mut capacity = 4 + 16 + 8 + 4 + 2 + 2 + pellet_count * 12 + 2 + 2;
+        let mut capacity = 4 + 16 + 8 + 4 + 2 + 2 + 2;
         for player in self.players.values().take(total_players) {
+            capacity += 2; // net id
             capacity += 16;
             capacity += 1 + Self::truncated_len(&player.name);
             capacity += 1 + Self::truncated_len(&player.color);
@@ -2333,17 +2382,17 @@ impl RoomState {
         for visible in visible_players.iter().take(visible_player_count) {
             let player = visible.player;
             let window = visible.window;
-            capacity += 16 + 1 + 4 + 4 + 4 + 1 + 4 + 4 + 1 + 2;
+            capacity += 2 + 1 + 4 + 2 + 2 + 1 + 1 + 1 + 2; // net id + flags + score + frac + oxygen + girth + tail_ext + detail + total_len
             match window.detail {
                 SnakeDetail::Full => {
-                    capacity += 2 + window.len * 12;
+                    capacity += 2 + window.len * 4;
                 }
                 SnakeDetail::Window => {
-                    capacity += 2 + 2 + window.len * 12;
+                    capacity += 2 + 2 + window.len * 4;
                 }
                 SnakeDetail::Stub => {}
             }
-            capacity += 1;
+            capacity += 1; // digestion len
             if window.include_digestions() {
                 capacity += player.digestions.len() * 12;
             }
@@ -2356,14 +2405,10 @@ impl RoomState {
         encoder.write_i64(now);
         encoder.write_u32(state_seq);
         encoder.write_u16(tick_ms);
-        encoder.write_u16(pellet_count as u16);
-        for pellet in visible_pellets.into_iter().take(pellet_count) {
-            self.write_pellet(&mut encoder, pellet);
-        }
-
         encoder.write_u16(total_players as u16);
         encoder.write_u16(total_players as u16);
         for player in self.players.values().take(total_players) {
+            encoder.write_u16(player.net_id);
             encoder.write_uuid(&player.id_bytes);
             encoder.write_string(&player.name);
             encoder.write_string(&player.color);
@@ -2392,22 +2437,20 @@ impl RoomState {
 
     fn build_state_payload_for_session(&self, now: i64, state_seq: u32, session_id: &str) -> Vec<u8> {
         let visible_players = self.visible_players_for_session(session_id);
-        let visible_pellets = self.visible_pellets_for_session(session_id);
         let total_players = self.players.len().min(u16::MAX as usize);
         let visible_player_count = visible_players.len().min(u16::MAX as usize);
-        let visible_pellet_count = visible_pellets.len().min(u16::MAX as usize);
 
-        let mut capacity = 4 + 8 + 4 + 2 + visible_pellet_count * 12 + 2 + 2;
+        let mut capacity = 4 + 8 + 4 + 2 + 2;
         for visible in visible_players.iter().take(visible_player_count) {
             let player = visible.player;
             let window = visible.window;
-            capacity += 16 + 1 + 4 + 4 + 4 + 1 + 4 + 4 + 1 + 2;
+            capacity += 2 + 1 + 4 + 2 + 2 + 1 + 1 + 1 + 2;
             match window.detail {
                 SnakeDetail::Full => {
-                    capacity += 2 + window.len * 12;
+                    capacity += 2 + window.len * 4;
                 }
                 SnakeDetail::Window => {
-                    capacity += 2 + 2 + window.len * 12;
+                    capacity += 2 + 2 + window.len * 4;
                 }
                 SnakeDetail::Stub => {}
             }
@@ -2421,11 +2464,6 @@ impl RoomState {
         encoder.write_header(protocol::TYPE_STATE, 0);
         encoder.write_i64(now);
         encoder.write_u32(state_seq);
-        encoder.write_u16(visible_pellet_count as u16);
-        for pellet in visible_pellets.into_iter().take(visible_pellet_count) {
-            self.write_pellet(&mut encoder, pellet);
-        }
-
         encoder.write_u16(total_players as u16);
         encoder.write_u16(visible_player_count as u16);
         for visible in visible_players.into_iter().take(visible_player_count) {
@@ -2448,6 +2486,7 @@ impl RoomState {
 
         let mut capacity = 4 + 2;
         for player in &players {
+            capacity += 2; // net id
             capacity += 16;
             capacity += 1 + Self::truncated_len(&player.name);
             capacity += 1 + Self::truncated_len(&player.color);
@@ -2463,6 +2502,7 @@ impl RoomState {
         encoder.write_header(protocol::TYPE_PLAYER_META, 0);
         encoder.write_u16(players.len() as u16);
         for player in players {
+            encoder.write_u16(player.net_id);
             encoder.write_uuid(&player.id_bytes);
             encoder.write_string(&player.name);
             encoder.write_string(&player.color);
@@ -2524,21 +2564,75 @@ impl RoomState {
         encoder.write_u8(Self::quantize_pellet_size(pellet.current_size));
     }
 
+    fn quantize_unit_u16(value: f64) -> u16 {
+        let t = clamp(value, 0.0, 1.0);
+        (t * u16::MAX as f64).round() as u16
+    }
+
+    fn quantize_unit_u8(value: f64) -> u8 {
+        let t = clamp(value, 0.0, 1.0);
+        (t * u8::MAX as f64).round() as u8
+    }
+
+    fn quantize_girth_scale_u8(scale: f64) -> u8 {
+        // `player_girth_scale_from_len` is clamped to `[1..=SNAKE_GIRTH_MAX_SCALE]`.
+        let denom = (SNAKE_GIRTH_MAX_SCALE - 1.0).max(1e-6);
+        Self::quantize_unit_u8((scale - 1.0) / denom)
+    }
+
+    fn oct_sign(value: f64) -> f64 {
+        if value >= 0.0 { 1.0 } else { -1.0 }
+    }
+
+    fn oct_quantize(value: f64) -> i16 {
+        let t = clamp(value, -1.0, 1.0);
+        let scaled = (t * i16::MAX as f64).round() as i32;
+        let clamped = scaled.clamp(-(i16::MAX as i32), i16::MAX as i32);
+        clamped as i16
+    }
+
+    fn encode_unit_vec_oct_i16(point: Point) -> (i16, i16) {
+        let normalized = normalize(point);
+        if !normalized.x.is_finite() || !normalized.y.is_finite() || !normalized.z.is_finite() {
+            return (0, 0);
+        }
+        let l1 = normalized.x.abs() + normalized.y.abs() + normalized.z.abs();
+        if !(l1 > 1e-9) {
+            return (0, 0);
+        }
+        let mut x = normalized.x / l1;
+        let mut y = normalized.y / l1;
+        let z = normalized.z / l1;
+        if z < 0.0 {
+            let ox = (1.0 - y.abs()) * Self::oct_sign(x);
+            let oy = (1.0 - x.abs()) * Self::oct_sign(y);
+            x = ox;
+            y = oy;
+        }
+        (Self::oct_quantize(x), Self::oct_quantize(y))
+    }
+
     fn write_player_state_with_window(
         &self,
         encoder: &mut protocol::Encoder,
         player: &Player,
         window: SnakeWindow,
     ) {
-        encoder.write_uuid(&player.id_bytes);
-        encoder.write_u8(if player.alive { 1 } else { 0 });
+        encoder.write_u16(player.net_id);
+        let mut flags: u8 = 0;
+        if player.alive {
+            flags |= 1 << 0;
+        }
+        if player.is_boosting {
+            flags |= 1 << 1;
+        }
+        encoder.write_u8(flags);
         encoder.write_i32(player.score as i32);
-        encoder.write_f32(Self::player_score_fraction(player) as f32);
-        encoder.write_f32(player.oxygen as f32);
-        encoder.write_u8(if player.is_boosting { 1 } else { 0 });
+        encoder.write_u16(Self::quantize_unit_u16(Self::player_score_fraction(player)));
+        encoder.write_u16(Self::quantize_unit_u16(clamp(player.oxygen, 0.0, 1.0)));
         let girth_scale = Self::player_girth_scale_from_len(player.snake.len());
-        encoder.write_f32(girth_scale as f32);
-        encoder.write_f32(clamp(player.tail_extension, 0.0, 1.0) as f32);
+        encoder.write_u8(Self::quantize_girth_scale_u8(girth_scale));
+        encoder.write_u8(Self::quantize_unit_u8(clamp(player.tail_extension, 0.0, 1.0)));
         let detail = match window.detail {
             SnakeDetail::Full => protocol::SNAKE_DETAIL_FULL,
             SnakeDetail::Window => protocol::SNAKE_DETAIL_WINDOW,
@@ -2572,9 +2666,13 @@ impl RoomState {
                 .skip(clamped_start)
                 .take(end - clamped_start)
             {
-                encoder.write_f32(node.x as f32);
-                encoder.write_f32(node.y as f32);
-                encoder.write_f32(node.z as f32);
+                let (ox, oy) = Self::encode_unit_vec_oct_i16(Point {
+                    x: node.x,
+                    y: node.y,
+                    z: node.z,
+                });
+                encoder.write_i16(ox);
+                encoder.write_i16(oy);
             }
         }
 
@@ -2607,9 +2705,7 @@ impl RoomState {
         end
     }
 
-    fn broadcast_state(&mut self) {
-        let now = Self::now_millis();
-        let state_seq = self.next_state_seq;
+    fn broadcast_state(&mut self, now: i64, state_seq: u32) {
         let mut stale = Vec::new();
         for (session_id, session) in &self.sessions {
             let payload = self.build_state_payload_for_session(now, state_seq, session_id);
@@ -2617,7 +2713,174 @@ impl RoomState {
                 stale.push(session_id.clone());
             }
         }
-        self.next_state_seq = self.next_state_seq.wrapping_add(1);
+        for session_id in stale {
+            self.disconnect_session(&session_id);
+        }
+    }
+
+    fn pellet_needs_update(pellet: &Pellet) -> bool {
+        match pellet.state {
+            PelletState::Idle => false,
+            _ => true,
+        }
+    }
+
+    fn build_pellet_reset_payload_for_indices(
+        &self,
+        now: i64,
+        state_seq: u32,
+        indices: &[usize],
+    ) -> Vec<u8> {
+        let pellet_count = indices.len().min(u16::MAX as usize);
+        let capacity = 4 + 8 + 4 + 2 + pellet_count * 12;
+        let mut encoder = protocol::Encoder::with_capacity(capacity);
+        encoder.write_header(protocol::TYPE_PELLET_RESET, 0);
+        encoder.write_i64(now);
+        encoder.write_u32(state_seq);
+        encoder.write_u16(pellet_count as u16);
+        for index in indices.iter().take(pellet_count) {
+            if let Some(pellet) = self.pellets.get(*index) {
+                self.write_pellet(&mut encoder, pellet);
+            }
+        }
+        encoder.into_vec()
+    }
+
+    fn build_pellet_delta_payload(
+        &self,
+        now: i64,
+        state_seq: u32,
+        adds: &[usize],
+        updates: &[usize],
+        removes: &[u32],
+    ) -> Vec<u8> {
+        let add_count = adds.len().min(u16::MAX as usize);
+        let update_count = updates.len().min(u16::MAX as usize);
+        let remove_count = removes.len().min(u16::MAX as usize);
+        let capacity = 4 + 8 + 4 + 2 + add_count * 12 + 2 + update_count * 12 + 2 + remove_count * 4;
+        let mut encoder = protocol::Encoder::with_capacity(capacity);
+        encoder.write_header(protocol::TYPE_PELLET_DELTA, 0);
+        encoder.write_i64(now);
+        encoder.write_u32(state_seq);
+        encoder.write_u16(add_count as u16);
+        for index in adds.iter().take(add_count) {
+            if let Some(pellet) = self.pellets.get(*index) {
+                self.write_pellet(&mut encoder, pellet);
+            }
+        }
+        encoder.write_u16(update_count as u16);
+        for index in updates.iter().take(update_count) {
+            if let Some(pellet) = self.pellets.get(*index) {
+                self.write_pellet(&mut encoder, pellet);
+            }
+        }
+        encoder.write_u16(remove_count as u16);
+        for id in removes.iter().take(remove_count) {
+            encoder.write_u32(*id);
+        }
+        encoder.into_vec()
+    }
+
+    fn maybe_send_pellet_reset_for_session(&mut self, session_id: &str) {
+        let initialized = self
+            .sessions
+            .get(session_id)
+            .map(|session| session.pellet_view_initialized)
+            .unwrap_or(false);
+        if initialized {
+            return;
+        }
+
+        let Some((view_center, view_cos, max_visible)) = self.pellet_view_params(session_id) else {
+            return;
+        };
+        let indices = self.visible_pellet_indices(view_center, view_cos, max_visible);
+        let now = Self::now_millis();
+        let state_seq = self.next_state_seq.wrapping_sub(1);
+        let payload = self.build_pellet_reset_payload_for_indices(now, state_seq, &indices);
+
+        let mut stale = false;
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            session.pellet_view_initialized = true;
+            session.pellet_view_ids.clear();
+            for index in &indices {
+                if let Some(pellet) = self.pellets.get(*index) {
+                    session.pellet_view_ids.insert(pellet.id);
+                }
+            }
+            stale = session.sender.send(payload).is_err();
+        }
+        if stale {
+            self.disconnect_session(session_id);
+        }
+    }
+
+    fn broadcast_pellet_delta(&mut self, now: i64, state_seq: u32) {
+        let session_ids: Vec<String> = self.sessions.keys().cloned().collect();
+        let mut stale = Vec::new();
+
+        for session_id in session_ids {
+            if !self
+                .sessions
+                .get(&session_id)
+                .map(|session| session.pellet_view_initialized)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+
+            let Some((view_center, view_cos, max_visible)) = self.pellet_view_params(&session_id) else {
+                continue;
+            };
+            let indices = self.visible_pellet_indices(view_center, view_cos, max_visible);
+
+            let mut next_ids: HashSet<u32> = HashSet::with_capacity(indices.len());
+            let mut adds: Vec<usize> = Vec::new();
+            let mut updates: Vec<usize> = Vec::new();
+            if let Some(session) = self.sessions.get(&session_id) {
+                for index in &indices {
+                    if let Some(pellet) = self.pellets.get(*index) {
+                        next_ids.insert(pellet.id);
+                        if !session.pellet_view_ids.contains(&pellet.id) {
+                            adds.push(*index);
+                        } else if Self::pellet_needs_update(pellet) {
+                            updates.push(*index);
+                        }
+                    }
+                }
+            }
+
+            let removes: Vec<u32> = self
+                .sessions
+                .get(&session_id)
+                .map(|session| {
+                    session
+                        .pellet_view_ids
+                        .iter()
+                        .filter(|id| !next_ids.contains(id))
+                        .copied()
+                        .collect::<Vec<u32>>()
+                })
+                .unwrap_or_default();
+
+            // Skip sending empty delta frames to reduce bandwidth (no visible-set changes and no
+            // active pellet states that require updates).
+            if adds.is_empty() && updates.is_empty() && removes.is_empty() {
+                continue;
+            }
+
+            let payload = self.build_pellet_delta_payload(now, state_seq, &adds, &updates, &removes);
+
+            let mut should_disconnect = false;
+            if let Some(session) = self.sessions.get_mut(&session_id) {
+                session.pellet_view_ids = next_ids;
+                should_disconnect = session.sender.send(payload).is_err();
+            }
+            if should_disconnect {
+                stale.push(session_id);
+            }
+        }
+
         for session_id in stale {
             self.disconnect_session(&session_id);
         }
@@ -2652,6 +2915,7 @@ mod tests {
         Player {
             id: id.to_string(),
             id_bytes: [0u8; 16],
+            net_id: 1,
             name: "Test".to_string(),
             color: "#ffffff".to_string(),
             skin: None,
@@ -2702,6 +2966,7 @@ mod tests {
             pellets: Vec::new(),
             next_pellet_id: 0,
             next_state_seq: 1,
+            next_player_net_id: 1,
             next_evasive_spawn_at: HashMap::new(),
             environment: Environment::generate(),
         }
@@ -2763,14 +3028,13 @@ mod tests {
     }
 
     fn skip_player_state(bytes: &[u8], offset: &mut usize) {
-        *offset += 16; // player id
-        *offset += 1; // alive
+        *offset += 2; // net id
+        *offset += 1; // flags
         *offset += 4; // score
-        *offset += 4; // score fraction
-        *offset += 4; // oxygen
-        *offset += 1; // is_boosting
-        *offset += 4; // girth scale
-        *offset += 4; // tail extension
+        *offset += 2; // score fraction (q16)
+        *offset += 2; // oxygen (q16)
+        *offset += 1; // girth (q8)
+        *offset += 1; // tail extension (q8)
         let detail = read_u8(bytes, offset);
         let total_len = read_u16(bytes, offset);
         let snake_len = match detail {
@@ -2783,7 +3047,7 @@ mod tests {
             _ => panic!("unexpected snake detail"),
         };
         assert!(snake_len <= total_len);
-        *offset += snake_len as usize * 12;
+        *offset += snake_len as usize * 4;
         let digestion_len = read_u8(bytes, offset);
         *offset += digestion_len as usize * 12;
     }
@@ -2797,8 +3061,6 @@ mod tests {
         let _flags = read_u16(payload, &mut offset);
         offset += 8; // now
         let state_seq = read_u32(payload, &mut offset);
-        let pellet_count = read_u16(payload, &mut offset);
-        offset += pellet_count as usize * 12;
         let total_players = read_u16(payload, &mut offset);
         let visible_players = read_u16(payload, &mut offset);
         for _ in 0..visible_players {
@@ -2820,11 +3082,10 @@ mod tests {
         let state_seq = read_u32(payload, &mut offset);
         let tick_ms = read_u16(payload, &mut offset);
         assert_eq!(tick_ms, TICK_MS.min(u16::MAX as u64) as u16);
-        let pellet_count = read_u16(payload, &mut offset);
-        offset += pellet_count as usize * 12;
         let total_players = read_u16(payload, &mut offset);
         let meta_count = read_u16(payload, &mut offset);
         for _ in 0..meta_count {
+            offset += 2; // net id
             offset += 16; // player id
             let name_len = read_u8(payload, &mut offset) as usize;
             offset += name_len;
@@ -2971,6 +3232,8 @@ mod tests {
                 view_center,
                 view_radius,
                 camera_distance: None,
+                pellet_view_ids: HashSet::new(),
+                pellet_view_initialized: false,
             },
         );
     }
@@ -3234,23 +3497,35 @@ mod tests {
         state.write_player_state(&mut encoder, &player);
         let payload = encoder.into_vec();
 
-        let mut offset = 16 + 1 + 4;
-        let encoded_score_fraction =
-            f32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
-        assert!((encoded_score_fraction - 0.375).abs() < 1e-6);
-        offset += 4;
-        offset += 4; // oxygen
-        let encoded_is_boosting = payload[offset];
-        assert_eq!(encoded_is_boosting, 0);
+        let mut offset = 0usize;
+        let encoded_net_id = u16::from_le_bytes(payload[offset..offset + 2].try_into().unwrap());
+        assert_eq!(encoded_net_id, player.net_id);
+        offset += 2;
+
+        let flags = payload[offset];
+        assert_eq!(flags & 0x01, 0x01); // alive
+        assert_eq!(flags & 0x02, 0x00); // not boosting
         offset += 1;
-        let encoded_girth_scale =
-            f32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
-        assert!((encoded_girth_scale - 1.0).abs() < 1e-6);
-        offset += 4;
-        let encoded_tail_extension =
-            f32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
-        assert!((encoded_tail_extension - 0.0).abs() < 1e-6);
-        offset += 4;
+
+        offset += 4; // score
+
+        let encoded_score_fraction =
+            u16::from_le_bytes(payload[offset..offset + 2].try_into().unwrap());
+        let expected_score_fraction = (0.375 * u16::MAX as f64).round() as u16;
+        assert_eq!(encoded_score_fraction, expected_score_fraction);
+        offset += 2;
+
+        let encoded_oxygen = u16::from_le_bytes(payload[offset..offset + 2].try_into().unwrap());
+        assert_eq!(encoded_oxygen, u16::MAX);
+        offset += 2;
+
+        let encoded_girth_q = payload[offset];
+        assert_eq!(encoded_girth_q, 0);
+        offset += 1;
+        let encoded_tail_ext_q = payload[offset];
+        assert_eq!(encoded_tail_ext_q, 0);
+        offset += 1;
+
         let detail = payload[offset];
         assert_eq!(detail, protocol::SNAKE_DETAIL_FULL);
         offset += 1;
@@ -3263,9 +3538,9 @@ mod tests {
             u16::from_le_bytes(payload[offset..offset + 2].try_into().unwrap());
         assert_eq!(encoded_window_len as usize, player.snake.len());
         offset += 2;
-        offset += player.snake.len() * 12;
+        offset += player.snake.len() * 4; // oct-encoded points
 
-        assert_eq!(payload[offset], 1);
+        assert_eq!(payload[offset], 1); // digestion len
         offset += 1;
 
         let encoded_id = u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
@@ -3292,13 +3567,9 @@ mod tests {
         state.write_player_state(&mut encoder, &player);
         let payload = encoder.into_vec();
 
-        let mut offset = 16 + 1 + 4 + 4 + 4; // id, alive, score, score fraction, oxygen
-        let encoded_is_boosting = payload[offset];
-        assert_eq!(encoded_is_boosting, 1);
-        offset += 1;
-        let encoded_girth_scale =
-            f32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
-        assert!((encoded_girth_scale - 1.0).abs() < 1e-6);
+        let flags = payload[2];
+        assert_eq!(flags & 0x01, 0x01); // alive
+        assert_eq!(flags & 0x02, 0x02); // boosting
     }
 
     #[test]
@@ -3321,18 +3592,24 @@ mod tests {
         state.write_player_state(&mut encoder, &player);
         let payload = encoder.into_vec();
 
-        let mut offset = 16 + 1 + 4 + 4 + 4 + 1 + 4 + 4; // id, alive, score, score fraction, oxygen, is_boosting, girth, tail_extension
+        let mut offset = 0usize;
+        offset += 2; // net id
+        offset += 1; // flags
+        offset += 4; // score
+        offset += 2; // score fraction
+        offset += 2; // oxygen
+        offset += 1; // girth
+        offset += 1; // tail extension
+
         let detail = payload[offset];
         assert_eq!(detail, protocol::SNAKE_DETAIL_FULL);
         offset += 1;
 
-        let _encoded_total_len =
-            u16::from_le_bytes(payload[offset..offset + 2].try_into().unwrap());
-        offset += 2;
+        offset += 2; // total len
         let encoded_window_len =
             u16::from_le_bytes(payload[offset..offset + 2].try_into().unwrap());
         offset += 2;
-        offset += encoded_window_len as usize * 12;
+        offset += encoded_window_len as usize * 4;
 
         let digestion_len = payload[offset] as usize;
         assert_eq!(digestion_len, u8::MAX as usize);
@@ -4278,11 +4555,15 @@ mod tests {
                 view_center: None,
                 view_radius: None,
                 camera_distance: None,
+                pellet_view_ids: HashSet::new(),
+                pellet_view_initialized: false,
             },
         );
 
-        state.broadcast_state();
-        state.broadcast_state();
+        state.broadcast_state(1234, state.next_state_seq);
+        state.next_state_seq = state.next_state_seq.wrapping_add(1);
+        state.broadcast_state(1234, state.next_state_seq);
+        state.next_state_seq = state.next_state_seq.wrapping_add(1);
 
         let first_payload = rx.try_recv().expect("first payload");
         let second_payload = rx.try_recv().expect("second payload");

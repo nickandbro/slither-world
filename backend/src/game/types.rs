@@ -54,6 +54,7 @@ pub struct Pellet {
 pub struct Player {
     pub id: String,
     pub id_bytes: [u8; 16],
+    pub net_id: u16,
     pub name: String,
     pub color: String,
     pub skin: Option<Vec<[u8; 3]>>,
