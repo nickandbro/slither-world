@@ -47,11 +47,11 @@ Repo root (recommended for full stack):
 - If you see Chrome console warnings like `[Violation] 'requestAnimationFrame' handler took <N>ms` (visible stutter), enable the optional rAF perf instrumentation (`?rafPerf=1`) and capture `window.__SNAKE_DEBUG__.getRafPerfInfo()` plus `window.__SNAKE_DEBUG__.getRenderPerfInfo()`. Slow frames dominated by `renderMs` point to work inside `webgl.render()` (renderer/GPU stalls, pass-level spikes, or shader/pipeline compilation); with `?rafPerf=1`, the console slow-frame warning also emits a `[render] ...` line with pass timings (`passWorld`, `passOccluders`, `passPellets`, `passDepthRebuild`, `passLakes`).
 
 ## Configuration & Deployment Notes
-- Production deployment specifics (as of February 8, 2026):
+- Production deployment specifics (see `infra/deployment-notes.md` for latest values):
   - Cloudflare production hostnames: `https://slitherworld.com` and `https://www.slitherworld.com`.
   - Workers.dev fallback hostname remains available: `https://snake-game.nickbrooks085.workers.dev`.
   - Worker routes are managed as zone routes: `slitherworld.com/*` and `www.slitherworld.com/*` -> service `snake-game`.
-  - Hetzner control-plane host: `snake-control-prod` (`178.156.136.148`) running backend image `ghcr.io/nickandbro/slither-world-backend:prod-20260208-lag-autotune-73d9c68`.
+  - Hetzner control-plane host: `snake-control-prod` (`178.156.136.148`) running backend image `ghcr.io/nickandbro/slither-world-backend:<tag>` (see `infra/deployment-notes.md`).
   - Hetzner firewalls are in place:
     - Control-plane firewall `snake-control-fw`: allow inbound `80/tcp` from internet and `22/tcp` only from trusted admin IPs.
     - Room firewall `snake-room-fw`: allow inbound `80/tcp` from internet and block SSH ingress.
