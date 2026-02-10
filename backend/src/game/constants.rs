@@ -2,13 +2,16 @@ pub const WORLD_SCALE: f64 = 3.0;
 pub const NODE_ANGLE: f64 = std::f64::consts::PI / 60.0 / WORLD_SCALE;
 pub const NODE_QUEUE_SIZE: usize = 9;
 pub const STARTING_LENGTH: usize = 8;
-pub const BASE_SPEED: f64 = (NODE_ANGLE * 2.0) / ((NODE_QUEUE_SIZE + 1) as f64);
-pub const BOOST_MULTIPLIER: f64 = 2.1;
+// Gameplay feel tuning. Keep these as multipliers so the base math remains stable.
+pub const MOVE_SPEED_MULTIPLIER: f64 = 1.35;
+pub const BASE_SPEED: f64 =
+    ((NODE_ANGLE * 2.0) / ((NODE_QUEUE_SIZE + 1) as f64)) * MOVE_SPEED_MULTIPLIER;
+pub const BOOST_MULTIPLIER: f64 = 3.0;
 pub const OXYGEN_MAX: f64 = 1.0;
 pub const OXYGEN_DRAIN_PER_SEC: f64 = 0.1;
 pub const MIN_SURVIVAL_LENGTH: usize = 3;
 pub const DIGESTION_TRAVEL_SPEED_MULT: f64 = 3.0;
-pub const TURN_RATE: f64 = 0.3 / WORLD_SCALE;
+pub const TURN_RATE: f64 = 0.45 / WORLD_SCALE;
 pub const COLLISION_DISTANCE: f64 = 0.10467191248588766 / WORLD_SCALE;
 #[cfg(not(test))]
 pub const BASE_PELLET_COUNT: usize = 2400;

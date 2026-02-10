@@ -329,9 +329,10 @@ const SCORE_RADIAL_DEPLETION_EPS = 0.05
 
 const JOY_ZONE_MIN_X_RATIO = 0.55
 const JOY_ZONE_MIN_Y_RATIO = 0.55
-const JOY_RADIUS_MIN_PX = 54
-const JOY_RADIUS_MAX_PX = 88
-const JOY_RADIUS_VIEWPORT_RATIO = 0.15
+// ~33% larger than the initial mobile stick so boost requires more thumb travel.
+const JOY_RADIUS_MIN_PX = 72
+const JOY_RADIUS_MAX_PX = 117
+const JOY_RADIUS_VIEWPORT_RATIO = 0.2
 const JOY_DEADZONE_RATIO = 0.12
 const JOY_BOOST_ON_RATIO = 0.86
 const JOY_BOOST_OFF_RATIO = 0.78
@@ -2736,6 +2737,9 @@ export default function App() {
 
   const startInputLoop = () => {
     if (sendIntervalRef.current !== null) return
+    // Send input more frequently than the server tick so pointer steering feels responsive.
+    // The server consumes the latest input each tick; higher cadence reduces worst-case input latency.
+    const intervalMs = Math.max(16, Math.round(tickIntervalRef.current / 2))
     sendIntervalRef.current = window.setInterval(() => {
       const socket = socketRef.current
       if (!socket || socket.readyState !== WebSocket.OPEN) return
@@ -2758,7 +2762,7 @@ export default function App() {
           effectiveCameraDistance,
         ),
       )
-    }, 50)
+    }, intervalMs)
   }
 
   const sendJoin = (socket: WebSocket, deferSpawn = menuPhaseRef.current !== 'playing') => {
@@ -2784,7 +2788,11 @@ export default function App() {
 
   const isPointInJoystickZone = (x: number, y: number, width: number, height: number) => {
     if (!(width > 0) || !(height > 0)) return false
-    return x >= width * JOY_ZONE_MIN_X_RATIO && y >= height * JOY_ZONE_MIN_Y_RATIO
+    // Support both right-handed (bottom-right) and left-handed (bottom-left) activation zones.
+    const bottom = y >= height * JOY_ZONE_MIN_Y_RATIO
+    const right = x >= width * JOY_ZONE_MIN_X_RATIO
+    const left = x <= width * (1 - JOY_ZONE_MIN_X_RATIO)
+    return bottom && (right || left)
   }
 
   const setJoystickUiVisible = (visible: boolean) => {
@@ -2894,8 +2902,8 @@ export default function App() {
     if (t <= JOY_DEADZONE_RATIO) {
       joystickAxisRef.current = null
     } else {
-      // Angle in screen space (dx right, dy down) chosen so stick direction matches steering direction.
-      const angle = Math.atan2(dy, dx)
+      // Angle in screen space (dx right, dy down) with 0 pointing up.
+      const angle = Math.atan2(dx, -dy)
       joystickAxisRef.current = axisFromPointer(angle, cameraRef.current)
     }
 
