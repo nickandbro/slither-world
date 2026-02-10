@@ -1,5 +1,6 @@
 import * as THREE from 'three'
-import { WebGPURenderer } from 'three/webgpu'
+import { PointsNodeMaterial, WebGPURenderer } from 'three/webgpu'
+import { instancedDynamicBufferAttribute } from 'three/tsl'
 import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils'
 import type {
   Camera,
@@ -100,7 +101,8 @@ type BoostDraftMaterialUserData = {
   opacityUniform?: { value: number }
 }
 
-type PelletSpriteBucket = {
+type PelletSpriteBucketPoints = {
+  kind: 'points'
   shadowPoints: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>
   corePoints: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>
   innerGlowPoints: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>
@@ -118,6 +120,28 @@ type PelletSpriteBucket = {
   colorBucketIndex: number
   sizeTierIndex: number
 }
+
+type PelletSpriteBucketSprites = {
+  kind: 'sprites'
+  shadowSprite: THREE.Sprite
+  coreSprite: THREE.Sprite
+  innerGlowSprite: THREE.Sprite
+  glowSprite: THREE.Sprite
+  shadowMaterial: PointsNodeMaterial
+  coreMaterial: PointsNodeMaterial
+  innerGlowMaterial: PointsNodeMaterial
+  glowMaterial: PointsNodeMaterial
+  positionAttribute: THREE.BufferAttribute
+  capacity: number
+  baseShadowSize: number
+  baseCoreSize: number
+  baseInnerGlowSize: number
+  baseGlowSize: number
+  colorBucketIndex: number
+  sizeTierIndex: number
+}
+
+type PelletSpriteBucket = PelletSpriteBucketPoints | PelletSpriteBucketSprites
 
 type PelletMotionState = {
   gfrOffset: number
@@ -2154,17 +2178,23 @@ export const createScene = async (
     starPositions[offset + 2] = Math.sin(theta) * radial * radius
   }
   starsGeometry.setAttribute('position', new THREE.BufferAttribute(starPositions, 3))
-  const starTexture = createPelletRadialTexture(96, [
-    { offset: 0, color: 'rgba(255,255,255,1)' },
-    { offset: 0.75, color: 'rgba(255,255,255,0.4)' },
-    { offset: 1, color: 'rgba(255,255,255,0)' },
-  ])
+  // WebGPU point primitives have a fixed size of 1px, so a particle `map` provides little value.
+  // Worse: `PointsMaterial` texture sampling in the WebGPU pipeline currently expects a `uv`
+  // vertex attribute, which point clouds typically don't provide (we use gl_PointCoord in WebGL).
+  // Avoid the missing-uv node build errors by only using a star texture on the WebGL backend.
+  const starTexture = webglShaderHooksEnabled
+    ? createPelletRadialTexture(96, [
+        { offset: 0, color: 'rgba(255,255,255,1)' },
+        { offset: 0.75, color: 'rgba(255,255,255,0.4)' },
+        { offset: 1, color: 'rgba(255,255,255,0)' },
+      ])
+    : null
   const starsMaterial = new THREE.PointsMaterial({
     color: '#f3f8ff',
     size: DAY_NIGHT_STAR_SIZE,
     transparent: true,
     opacity: 0,
-    map: starTexture ?? null,
+    map: starTexture,
     blending: THREE.AdditiveBlending,
     depthWrite: false,
     depthTest: true,
@@ -2673,6 +2703,9 @@ export const createScene = async (
     menuPreviewPitch = clamp(pitch, -1.25, 1.25)
   }
 
+  // WebGPU does not support variable-size point primitives, so render pellets via instanced sprites.
+  const pelletsUseSprites = activeBackend === 'webgpu'
+
   const PELLET_COLOR_BUCKET_COUNT = PELLET_COLORS.length
   const PELLET_BUCKET_COUNT = PELLET_COLOR_BUCKET_COUNT * PELLET_SIZE_TIER_MULTIPLIERS.length
   const PELLET_SHADOW_POINT_SIZE = PELLET_RADIUS * 9.4
@@ -2683,9 +2716,13 @@ export const createScene = async (
   const pelletCoreTexture = createPelletCoreTexture()
   const pelletInnerGlowTexture = createPelletInnerGlowTexture()
   const pelletGlowTexture = createPelletGlowTexture()
-  const occluderDepthMaterial = new THREE.MeshDepthMaterial({
-    depthPacking: THREE.BasicDepthPacking,
-  })
+  // WebGPU does not support `MeshDepthMaterial` (it can't be converted to a node material),
+  // but for this pass we only need depth writes. Use a depth-only basic material instead.
+  const occluderDepthMaterial = webglShaderHooksEnabled
+    ? new THREE.MeshDepthMaterial({
+        depthPacking: THREE.BasicDepthPacking,
+      })
+    : new THREE.MeshBasicMaterial()
   occluderDepthMaterial.depthTest = true
   occluderDepthMaterial.depthWrite = true
   occluderDepthMaterial.colorWrite = false
@@ -4747,7 +4784,8 @@ export const createScene = async (
       blending: THREE.NormalBlending,
     }
     if (!webglShaderHooksEnabled && boostDraftTexture) {
-      materialParams.alphaMap = boostDraftTexture
+      // CanvasTexture alpha lives in the alpha channel; `alphaMap` samples the green channel.
+      materialParams.map = boostDraftTexture
     }
     const material = new THREE.MeshBasicMaterial(materialParams)
     material.depthWrite = false
@@ -5161,7 +5199,8 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
       side: THREE.DoubleSide,
     }
     if (boostTrailAlphaTexture) {
-      materialParams.alphaMap = boostTrailAlphaTexture
+      // CanvasTexture alpha lives in the alpha channel; `alphaMap` samples the green channel.
+      materialParams.map = boostTrailAlphaTexture
     }
     const material = new THREE.MeshBasicMaterial(materialParams)
     material.depthWrite = false
@@ -7738,7 +7777,10 @@ diffuseColor.a *= retireEdge;`,
     return tierIndex * PELLET_COLOR_BUCKET_COUNT + colorBucketIndex
   }
 
-  const createPelletBucket = (bucketIndex: number, capacity: number): PelletSpriteBucket => {
+  const createPelletBucketPoints = (
+    bucketIndex: number,
+    capacity: number,
+  ): PelletSpriteBucketPoints => {
     const sizeTierIndex = Math.floor(bucketIndex / PELLET_COLOR_BUCKET_COUNT)
     const colorBucketIndex = bucketIndex % PELLET_COLOR_BUCKET_COUNT
     const sizeMultiplier = PELLET_SIZE_TIER_MULTIPLIERS[sizeTierIndex] ?? 1
@@ -7826,6 +7868,7 @@ diffuseColor.a *= retireEdge;`,
     pelletsGroup.add(innerGlowPoints)
     pelletsGroup.add(corePoints)
     return {
+      kind: 'points',
       shadowPoints,
       corePoints,
       innerGlowPoints,
@@ -7843,6 +7886,134 @@ diffuseColor.a *= retireEdge;`,
       colorBucketIndex,
       sizeTierIndex,
     }
+  }
+
+  const createPelletBucketSprites = (
+    bucketIndex: number,
+    capacity: number,
+  ): PelletSpriteBucketSprites => {
+    const sizeTierIndex = Math.floor(bucketIndex / PELLET_COLOR_BUCKET_COUNT)
+    const colorBucketIndex = bucketIndex % PELLET_COLOR_BUCKET_COUNT
+    const sizeMultiplier = PELLET_SIZE_TIER_MULTIPLIERS[sizeTierIndex] ?? 1
+    const baseShadowSize = PELLET_SHADOW_POINT_SIZE * sizeMultiplier
+    const baseCoreSize = PELLET_CORE_POINT_SIZE * sizeMultiplier
+    const baseInnerGlowSize = PELLET_INNER_GLOW_POINT_SIZE * sizeMultiplier
+    const baseGlowSize = PELLET_GLOW_POINT_SIZE * sizeMultiplier
+
+    // WebGPU sprite instancing expects an InstancedBufferAttribute. A plain BufferAttribute will
+    // be treated as per-vertex, which breaks `sprite.count` and can trip TSL/node builds.
+    const positionArray = new Float32Array(capacity * 3)
+    const positionAttribute = new THREE.InstancedBufferAttribute(positionArray, 3)
+    positionAttribute.setUsage(THREE.DynamicDrawUsage)
+    const positionNode = instancedDynamicBufferAttribute(positionAttribute, 'vec3')
+
+    const createMaterial = (params: ConstructorParameters<typeof PointsNodeMaterial>[0]) => {
+      const material = new PointsNodeMaterial(params)
+      material.positionNode = positionNode
+      return material
+    }
+
+    const shadowMaterial = createMaterial({
+      size: baseShadowSize,
+      map: pelletShadowTexture ?? undefined,
+      color: '#000000',
+      transparent: true,
+      opacity: PELLET_SHADOW_OPACITY_BASE,
+      depthWrite: false,
+      depthTest: true,
+      blending: THREE.NormalBlending,
+      sizeAttenuation: true,
+      toneMapped: false,
+    })
+    const coreMaterial = createMaterial({
+      size: baseCoreSize,
+      map: pelletCoreTexture ?? undefined,
+      color: PELLET_COLORS[colorBucketIndex] ?? '#ffd166',
+      transparent: true,
+      opacity: PELLET_CORE_OPACITY_BASE,
+      depthWrite: false,
+      depthTest: true,
+      blending: THREE.AdditiveBlending,
+      sizeAttenuation: true,
+      toneMapped: false,
+    })
+    const innerGlowMaterial = createMaterial({
+      size: baseInnerGlowSize,
+      map: pelletInnerGlowTexture ?? undefined,
+      color: PELLET_COLORS[colorBucketIndex] ?? '#ffd166',
+      transparent: true,
+      opacity: PELLET_INNER_GLOW_OPACITY_BASE,
+      depthWrite: false,
+      depthTest: true,
+      blending: THREE.AdditiveBlending,
+      sizeAttenuation: true,
+      toneMapped: false,
+    })
+    const glowMaterial = createMaterial({
+      size: baseGlowSize,
+      map: pelletGlowTexture ?? undefined,
+      color: PELLET_COLORS[colorBucketIndex] ?? '#ffd166',
+      transparent: true,
+      opacity: PELLET_GLOW_OPACITY_BASE,
+      depthWrite: false,
+      depthTest: true,
+      blending: THREE.AdditiveBlending,
+      sizeAttenuation: true,
+      toneMapped: false,
+    })
+
+    const shadowSprite = new THREE.Sprite(shadowMaterial as unknown as THREE.SpriteMaterial)
+    const glowSprite = new THREE.Sprite(glowMaterial as unknown as THREE.SpriteMaterial)
+    const innerGlowSprite = new THREE.Sprite(innerGlowMaterial as unknown as THREE.SpriteMaterial)
+    const coreSprite = new THREE.Sprite(coreMaterial as unknown as THREE.SpriteMaterial)
+
+    shadowSprite.visible = false
+    glowSprite.visible = false
+    innerGlowSprite.visible = false
+    coreSprite.visible = false
+    shadowSprite.frustumCulled = false
+    glowSprite.frustumCulled = false
+    innerGlowSprite.frustumCulled = false
+    coreSprite.frustumCulled = false
+    shadowSprite.renderOrder = 1.2
+    glowSprite.renderOrder = 1.3
+    innerGlowSprite.renderOrder = 1.4
+    coreSprite.renderOrder = 1.5
+    shadowSprite.count = 0
+    glowSprite.count = 0
+    innerGlowSprite.count = 0
+    coreSprite.count = 0
+
+    pelletsGroup.add(shadowSprite)
+    pelletsGroup.add(glowSprite)
+    pelletsGroup.add(innerGlowSprite)
+    pelletsGroup.add(coreSprite)
+
+    return {
+      kind: 'sprites',
+      shadowSprite,
+      coreSprite,
+      innerGlowSprite,
+      glowSprite,
+      shadowMaterial,
+      coreMaterial,
+      innerGlowMaterial,
+      glowMaterial,
+      positionAttribute,
+      capacity,
+      baseShadowSize,
+      baseCoreSize,
+      baseInnerGlowSize,
+      baseGlowSize,
+      colorBucketIndex,
+      sizeTierIndex,
+    }
+  }
+
+  const createPelletBucket = (bucketIndex: number, capacity: number): PelletSpriteBucket => {
+    return pelletsUseSprites
+      ? createPelletBucketSprites(bucketIndex, capacity)
+      : createPelletBucketPoints(bucketIndex, capacity)
   }
 
   const ensurePelletBucketCapacity = (bucketIndex: number, required: number): PelletSpriteBucket => {
@@ -7865,19 +8036,39 @@ diffuseColor.a *= retireEdge;`,
     while (nextCapacity < targetCapacity) {
       nextCapacity *= 2
     }
-    const geometry = new THREE.BufferGeometry()
     const positionArray = new Float32Array(nextCapacity * 3)
-    const positionAttribute = new THREE.BufferAttribute(positionArray, 3)
+    const positionAttribute =
+      bucket.kind === 'sprites'
+        ? new THREE.InstancedBufferAttribute(positionArray, 3)
+        : new THREE.BufferAttribute(positionArray, 3)
     positionAttribute.setUsage(THREE.DynamicDrawUsage)
-    geometry.setAttribute('position', positionAttribute)
-    geometry.setDrawRange(0, 0)
 
-    const previousGeometry = bucket.corePoints.geometry
-    bucket.shadowPoints.geometry = geometry
-    bucket.corePoints.geometry = geometry
-    bucket.innerGlowPoints.geometry = geometry
-    bucket.glowPoints.geometry = geometry
-    previousGeometry.dispose()
+    if (bucket.kind === 'points') {
+      const geometry = new THREE.BufferGeometry()
+      geometry.setAttribute('position', positionAttribute)
+      geometry.setDrawRange(0, 0)
+
+      const previousGeometry = bucket.corePoints.geometry
+      bucket.shadowPoints.geometry = geometry
+      bucket.corePoints.geometry = geometry
+      bucket.innerGlowPoints.geometry = geometry
+      bucket.glowPoints.geometry = geometry
+      previousGeometry.dispose()
+    } else {
+      const positionNode = instancedDynamicBufferAttribute(positionAttribute, 'vec3')
+      bucket.shadowMaterial.positionNode = positionNode
+      bucket.coreMaterial.positionNode = positionNode
+      bucket.innerGlowMaterial.positionNode = positionNode
+      bucket.glowMaterial.positionNode = positionNode
+      // Changing node graphs requires bumping the material version so Three recreates the
+      // internal render object and bindings. Without this, WebGPU can keep the old GPU buffer
+      // bound and then fail when `sprite.count` grows beyond the previous capacity.
+      bucket.shadowMaterial.needsUpdate = true
+      bucket.coreMaterial.needsUpdate = true
+      bucket.innerGlowMaterial.needsUpdate = true
+      bucket.glowMaterial.needsUpdate = true
+    }
+
     bucket.positionAttribute = positionAttribute
     bucket.capacity = nextCapacity
     return bucket
@@ -7920,20 +8111,42 @@ diffuseColor.a *= retireEdge;`,
       const bucket = pelletBuckets[bucketIndex]
       if (required <= 0) {
         if (bucket) {
-          bucket.shadowPoints.visible = false
-          bucket.corePoints.visible = false
-          bucket.innerGlowPoints.visible = false
-          bucket.glowPoints.visible = false
-          bucket.corePoints.geometry.setDrawRange(0, 0)
+          if (bucket.kind === 'points') {
+            bucket.shadowPoints.visible = false
+            bucket.corePoints.visible = false
+            bucket.innerGlowPoints.visible = false
+            bucket.glowPoints.visible = false
+            bucket.corePoints.geometry.setDrawRange(0, 0)
+          } else {
+            bucket.shadowSprite.visible = false
+            bucket.coreSprite.visible = false
+            bucket.innerGlowSprite.visible = false
+            bucket.glowSprite.visible = false
+            bucket.shadowSprite.count = 0
+            bucket.coreSprite.count = 0
+            bucket.innerGlowSprite.count = 0
+            bucket.glowSprite.count = 0
+          }
         }
         continue
       }
       const nextBucket = ensurePelletBucketCapacity(bucketIndex, required)
-      nextBucket.shadowPoints.visible = true
-      nextBucket.corePoints.visible = true
-      nextBucket.innerGlowPoints.visible = true
-      nextBucket.glowPoints.visible = true
-      nextBucket.corePoints.geometry.setDrawRange(0, required)
+      if (nextBucket.kind === 'points') {
+        nextBucket.shadowPoints.visible = true
+        nextBucket.corePoints.visible = true
+        nextBucket.innerGlowPoints.visible = true
+        nextBucket.glowPoints.visible = true
+        nextBucket.corePoints.geometry.setDrawRange(0, required)
+      } else {
+        nextBucket.shadowSprite.visible = true
+        nextBucket.coreSprite.visible = true
+        nextBucket.innerGlowSprite.visible = true
+        nextBucket.glowSprite.visible = true
+        nextBucket.shadowSprite.count = required
+        nextBucket.coreSprite.count = required
+        nextBucket.innerGlowSprite.count = required
+        nextBucket.glowSprite.count = required
+      }
       pelletBucketPositionArrays[bucketIndex] = nextBucket.positionAttribute.array as Float32Array
     }
 
@@ -8930,15 +9143,27 @@ diffuseColor.a *= retireEdge;`,
     for (let i = 0; i < pelletBuckets.length; i += 1) {
       const bucket = pelletBuckets[i]
       if (!bucket) continue
-      pelletsGroup.remove(bucket.shadowPoints)
-      pelletsGroup.remove(bucket.glowPoints)
-      pelletsGroup.remove(bucket.innerGlowPoints)
-      pelletsGroup.remove(bucket.corePoints)
-      bucket.corePoints.geometry.dispose()
-      bucket.shadowMaterial.dispose()
-      bucket.coreMaterial.dispose()
-      bucket.innerGlowMaterial.dispose()
-      bucket.glowMaterial.dispose()
+      if (bucket.kind === 'points') {
+        pelletsGroup.remove(bucket.shadowPoints)
+        pelletsGroup.remove(bucket.glowPoints)
+        pelletsGroup.remove(bucket.innerGlowPoints)
+        pelletsGroup.remove(bucket.corePoints)
+        bucket.corePoints.geometry.dispose()
+        bucket.shadowMaterial.dispose()
+        bucket.coreMaterial.dispose()
+        bucket.innerGlowMaterial.dispose()
+        bucket.glowMaterial.dispose()
+      } else {
+        pelletsGroup.remove(bucket.shadowSprite)
+        pelletsGroup.remove(bucket.glowSprite)
+        pelletsGroup.remove(bucket.innerGlowSprite)
+        pelletsGroup.remove(bucket.coreSprite)
+        // Sprite geometry is shared; only dispose materials.
+        bucket.shadowMaterial.dispose()
+        bucket.coreMaterial.dispose()
+        bucket.innerGlowMaterial.dispose()
+        bucket.glowMaterial.dispose()
+      }
       pelletBuckets[i] = null
     }
     pelletShadowTexture?.dispose()
