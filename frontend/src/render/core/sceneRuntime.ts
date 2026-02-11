@@ -1129,7 +1129,6 @@ const PELLET_WIND_WISP_FADE_OUT_RATE = 4.3
 const PELLET_WIND_WISP_POINT_SIZE = PELLET_RADIUS * 5.8
 const PELLET_WIND_WISP_MIN_LENGTH = HEAD_RADIUS * 0.44
 const PELLET_WIND_WISP_MAX_LENGTH = PLANET_RADIUS * 0.11 * 0.95
-const PELLET_WIND_WISP_INFER_MAX_DISTANCE = HEAD_RADIUS * 6.2
 const PELLET_WIND_WISP_SURFACE_LIFT = PELLET_RADIUS * 0.36
 const PELLET_WIND_WISP_JITTER = HEAD_RADIUS * 0.066
 const PELLET_WIND_WISP_OPACITY_MAX = 0.88
@@ -7264,25 +7263,6 @@ diffuseColor.a *= retireEdge;`,
     return nearestId
   }
 
-  const findNearestPelletMouthTarget = (
-    position: THREE.Vector3,
-    maxDistance: number,
-  ): { id: string; target: THREE.Vector3; distanceSq: number } | null => {
-    let nearestId: string | null = null
-    let nearestTarget: THREE.Vector3 | null = null
-    let nearestDistSq = Math.max(0, maxDistance) * Math.max(0, maxDistance)
-    for (const [id, target] of pelletMouthTargets) {
-      const distSq = position.distanceToSquared(target)
-      if (distSq < nearestDistSq) {
-        nearestDistSq = distSq
-        nearestId = id
-        nearestTarget = target
-      }
-    }
-    if (!nearestId || !nearestTarget) return null
-    return { id: nearestId, target: nearestTarget, distanceSq: nearestDistSq }
-  }
-
   const spawnPelletConsumeGhost = (
     pelletId: number,
     state: PelletVisualState,
@@ -9769,20 +9749,9 @@ diffuseColor.a *= retireEdge;`,
         renderPelletSize,
         tempVectorC,
       )
-      const lockedTargetPlayerId = pelletSuctionTargetByPelletId.get(pellet.id) ?? null
-      let targetPlayerId = lockedTargetPlayerId
-      let targetMouth = targetPlayerId ? (pelletMouthTargets.get(targetPlayerId) ?? null) : null
-      if (!targetMouth) {
-        const inferred = findNearestPelletMouthTarget(
-          tempVectorC,
-          PELLET_WIND_WISP_INFER_MAX_DISTANCE,
-        )
-        if (inferred) {
-          targetPlayerId = inferred.id
-          targetMouth = inferred.target
-        }
-      }
-      if (targetMouth && targetPlayerId) {
+      const targetPlayerId = pelletSuctionTargetByPelletId.get(pellet.id) ?? null
+      const targetMouth = targetPlayerId ? (pelletMouthTargets.get(targetPlayerId) ?? null) : null
+      if (targetMouth) {
         if (!state.trailStartActive || state.trailTargetPlayerId !== targetPlayerId) {
           state.trailStartPosition.copy(tempVectorC)
           state.trailStartActive = true
