@@ -14,7 +14,6 @@ use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::EnvFilter;
 
@@ -425,8 +424,7 @@ async fn matchmake_standalone(
         origin: state.standalone_matchmake.room_origin.clone(),
         expires_at_ms: expires_at,
     };
-    let room_token = match sign_room_token(&claims, &state.standalone_matchmake.room_token_secret)
-    {
+    let room_token = match sign_room_token(&claims, &state.standalone_matchmake.room_token_secret) {
         Ok(token) => token,
         Err(error) => {
             tracing::error!(?error, "standalone matchmake token signing failed");
@@ -625,13 +623,57 @@ async fn ws_handler(
 
 async fn handle_socket(socket: WebSocket, room: Arc<Room>) {
     let (mut sender, mut receiver) = socket.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let session_id = room.add_session(tx).await;
+    let session = room.add_session().await;
+    let session_id = session.session_id;
+    let inbound = session.inbound;
+    let outbound_state = session.outbound_state;
+    let mut outbound_hi_rx = session.outbound_hi_rx;
+    let mut outbound_lo_rx = session.outbound_lo_rx;
 
     let send_task = tokio::spawn(async move {
-        while let Some(payload) = rx.recv().await {
-            if sender.send(Message::Binary(payload)).await.is_err() {
-                break;
+        use std::collections::VecDeque;
+
+        let mut pending_hi: VecDeque<Vec<u8>> = VecDeque::new();
+        let mut pending_lo: VecDeque<Vec<u8>> = VecDeque::new();
+        let mut pending_state: Option<Vec<u8>> = None;
+
+        loop {
+            tokio::select! {
+                Some(payload) = outbound_hi_rx.recv() => {
+                    pending_hi.push_back(payload);
+                }
+                Some(payload) = outbound_lo_rx.recv() => {
+                    pending_lo.push_back(payload);
+                }
+                _ = outbound_state.wait_for_update() => {}
+            }
+
+            while let Ok(payload) = outbound_hi_rx.try_recv() {
+                pending_hi.push_back(payload);
+            }
+            while let Ok(payload) = outbound_lo_rx.try_recv() {
+                pending_lo.push_back(payload);
+            }
+            if let Some(payload) = outbound_state.take_latest() {
+                pending_state = Some(payload);
+            }
+
+            while let Some(payload) = pending_hi.pop_front() {
+                if sender.send(Message::Binary(payload)).await.is_err() {
+                    return;
+                }
+            }
+
+            if let Some(payload) = pending_state.take() {
+                if sender.send(Message::Binary(payload)).await.is_err() {
+                    return;
+                }
+            }
+
+            if let Some(payload) = pending_lo.pop_front() {
+                if sender.send(Message::Binary(payload)).await.is_err() {
+                    return;
+                }
             }
         }
     });
@@ -640,12 +682,15 @@ async fn handle_socket(socket: WebSocket, room: Arc<Room>) {
         let Ok(message) = result else { break };
         match message {
             Message::Binary(data) => {
-                if !room.handle_binary_message(&session_id, &data).await {
+                if !room
+                    .handle_binary_message(&session_id, &inbound, &data)
+                    .await
+                {
                     break;
                 }
             }
             Message::Text(text) => {
-                if !room.handle_text_message(&session_id, &text).await {
+                if !room.handle_text_message(&session_id, &inbound, &text).await {
                     break;
                 }
             }

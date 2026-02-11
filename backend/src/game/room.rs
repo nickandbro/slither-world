@@ -13,18 +13,17 @@ use super::constants::{
     EVASIVE_PELLET_SIZE_MIN, EVASIVE_PELLET_SPAWN_ATTEMPTS, EVASIVE_PELLET_SUCTION_RADIUS,
     EVASIVE_PELLET_SUCTION_SPEED, EVASIVE_PELLET_SUCTION_STEP_MAX, EVASIVE_PELLET_ZIGZAG_HZ,
     EVASIVE_PELLET_ZIGZAG_STRENGTH, MAX_PELLETS, MAX_SPAWN_ATTEMPTS, MIN_SURVIVAL_LENGTH,
-    OXYGEN_DRAIN_PER_SEC, OXYGEN_MAX, PELLET_SIZE_ENCODE_MAX,
-    PELLET_SIZE_ENCODE_MIN, PLAYER_TIMEOUT_MS, RESPAWN_COOLDOWN_MS, RESPAWN_RETRY_MS,
-    SMALL_PELLET_ATTRACT_RADIUS, SMALL_PELLET_ATTRACT_SPEED, SMALL_PELLET_ATTRACT_STEP_MAX_RATIO,
-    SMALL_PELLET_CONSUME_ANGLE, SMALL_PELLET_DIGESTION_STRENGTH,
-    SMALL_PELLET_DIGESTION_STRENGTH_MAX, SMALL_PELLET_GROWTH_FRACTION,
-    SMALL_PELLET_LOCK_CONE_ANGLE, SMALL_PELLET_MOUTH_FORWARD, SMALL_PELLET_SHRINK_MIN_RATIO,
-    SMALL_PELLET_SIZE_MAX, SMALL_PELLET_SIZE_MIN, SMALL_PELLET_SPAWN_HEAD_EXCLUSION_ANGLE,
-    SMALL_PELLET_VIEW_MARGIN_MAX, SMALL_PELLET_VIEW_MARGIN_MIN, SMALL_PELLET_VISIBLE_MAX,
-    SMALL_PELLET_VISIBLE_MIN, SMALL_PELLET_ZOOM_MAX_CAMERA_DISTANCE,
-    SMALL_PELLET_ZOOM_MIN_CAMERA_DISTANCE, SNAKE_GIRTH_MAX_SCALE, SNAKE_GIRTH_NODES_PER_STEP,
-    SNAKE_GIRTH_STEP_PERCENT, SPAWN_CONE_ANGLE, SPAWN_PLAYER_MIN_DISTANCE, STARTING_LENGTH,
-    TICK_MS, TURN_RATE,
+    OXYGEN_DRAIN_PER_SEC, OXYGEN_MAX, PELLET_SIZE_ENCODE_MAX, PELLET_SIZE_ENCODE_MIN,
+    PLAYER_TIMEOUT_MS, RESPAWN_COOLDOWN_MS, RESPAWN_RETRY_MS, SMALL_PELLET_ATTRACT_RADIUS,
+    SMALL_PELLET_ATTRACT_SPEED, SMALL_PELLET_ATTRACT_STEP_MAX_RATIO, SMALL_PELLET_CONSUME_ANGLE,
+    SMALL_PELLET_DIGESTION_STRENGTH, SMALL_PELLET_DIGESTION_STRENGTH_MAX,
+    SMALL_PELLET_GROWTH_FRACTION, SMALL_PELLET_LOCK_CONE_ANGLE, SMALL_PELLET_MOUTH_FORWARD,
+    SMALL_PELLET_SHRINK_MIN_RATIO, SMALL_PELLET_SIZE_MAX, SMALL_PELLET_SIZE_MIN,
+    SMALL_PELLET_SPAWN_HEAD_EXCLUSION_ANGLE, SMALL_PELLET_VIEW_MARGIN_MAX,
+    SMALL_PELLET_VIEW_MARGIN_MIN, SMALL_PELLET_VISIBLE_MAX, SMALL_PELLET_VISIBLE_MIN,
+    SMALL_PELLET_ZOOM_MAX_CAMERA_DISTANCE, SMALL_PELLET_ZOOM_MIN_CAMERA_DISTANCE,
+    SNAKE_GIRTH_MAX_SCALE, SNAKE_GIRTH_NODES_PER_STEP, SNAKE_GIRTH_STEP_PERCENT, SPAWN_CONE_ANGLE,
+    SPAWN_PLAYER_MIN_DISTANCE, STARTING_LENGTH, TICK_MS, TURN_RATE,
 };
 use super::digestion::{
     add_digestion_with_strength, advance_digestions_with_boost, get_digestion_progress,
@@ -51,9 +50,9 @@ use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex, Notify};
 use uuid::Uuid;
 
 const VIEW_RADIUS_MIN: f64 = 0.2;
@@ -63,6 +62,100 @@ const VIEW_NODE_PADDING: usize = 3;
 const VIEW_MIN_WINDOW_POINTS: usize = 2;
 const VIEW_CAMERA_DISTANCE_MIN: f64 = 4.0;
 const VIEW_CAMERA_DISTANCE_MAX: f64 = 10.0;
+
+const OUTBOUND_HI_CAPACITY: usize = 16;
+const OUTBOUND_LO_CAPACITY: usize = 16;
+const PELLET_RESET_RETRY_MS: i64 = 250;
+
+#[derive(Debug)]
+pub struct LatestFrame {
+    frame: StdMutex<Option<Vec<u8>>>,
+    notify: Notify,
+}
+
+impl LatestFrame {
+    fn new() -> Self {
+        Self {
+            frame: StdMutex::new(None),
+            notify: Notify::new(),
+        }
+    }
+
+    pub fn store(&self, payload: Vec<u8>) {
+        *self.frame.lock().unwrap() = Some(payload);
+        self.notify.notify_one();
+    }
+
+    pub fn take_latest(&self) -> Option<Vec<u8>> {
+        self.frame.lock().unwrap().take()
+    }
+
+    pub async fn wait_for_update(&self) {
+        self.notify.notified().await;
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct SessionInboundState {
+    input_axis: Option<Point>,
+    boost: bool,
+    last_input_at: i64,
+    view_center: Option<Point>,
+    view_radius: Option<f64>,
+    camera_distance: Option<f64>,
+}
+
+#[derive(Debug)]
+pub struct SessionInbound {
+    inner: StdMutex<SessionInboundState>,
+}
+
+impl SessionInbound {
+    fn new() -> Self {
+        Self {
+            inner: StdMutex::new(SessionInboundState::default()),
+        }
+    }
+
+    fn update_input(&self, axis: Option<Point>, boost: bool) {
+        let mut state = self.inner.lock().unwrap();
+        if let Some(axis) = axis.and_then(parse_axis) {
+            state.input_axis = Some(axis);
+        }
+        state.boost = boost;
+        state.last_input_at = RoomState::now_millis();
+    }
+
+    fn update_view(
+        &self,
+        view_center: Option<Point>,
+        view_radius: Option<f32>,
+        camera_distance: Option<f32>,
+    ) {
+        let mut state = self.inner.lock().unwrap();
+        state.view_center = view_center.and_then(parse_axis);
+        state.view_radius = view_radius
+            .map(|value| value as f64)
+            .filter(|value| value.is_finite())
+            .map(|value| clamp(value, VIEW_RADIUS_MIN, VIEW_RADIUS_MAX));
+        state.camera_distance = camera_distance
+            .map(|value| value as f64)
+            .filter(|value| value.is_finite())
+            .map(|value| clamp(value, VIEW_CAMERA_DISTANCE_MIN, VIEW_CAMERA_DISTANCE_MAX));
+    }
+
+    fn snapshot(&self) -> SessionInboundState {
+        *self.inner.lock().unwrap()
+    }
+}
+
+pub struct SessionIo {
+    pub session_id: String,
+    pub inbound: Arc<SessionInbound>,
+    pub outbound_state: Arc<LatestFrame>,
+    pub outbound_hi_rx: mpsc::Receiver<Vec<u8>>,
+    pub outbound_lo_rx: mpsc::Receiver<Vec<u8>>,
+}
 
 #[derive(Debug)]
 pub struct Room {
@@ -86,13 +179,17 @@ pub enum DebugKillTarget {
 
 #[derive(Debug)]
 struct SessionEntry {
-    sender: UnboundedSender<Vec<u8>>,
+    outbound_state: Arc<LatestFrame>,
+    outbound_hi: mpsc::Sender<Vec<u8>>,
+    outbound_lo: mpsc::Sender<Vec<u8>>,
+    inbound: Arc<SessionInbound>,
     player_id: Option<String>,
     view_center: Option<Point>,
     view_radius: Option<f64>,
     camera_distance: Option<f64>,
     pellet_view_ids: HashSet<u32>,
     pellet_view_initialized: bool,
+    pellet_reset_retry_at: i64,
 }
 
 #[derive(Debug)]
@@ -233,22 +330,36 @@ impl Room {
         }
     }
 
-    pub async fn add_session(&self, sender: UnboundedSender<Vec<u8>>) -> String {
+    pub async fn add_session(&self) -> SessionIo {
         let session_id = Uuid::new_v4().to_string();
+        let inbound = Arc::new(SessionInbound::new());
+        let outbound_state = Arc::new(LatestFrame::new());
+        let (outbound_hi, outbound_hi_rx) = mpsc::channel::<Vec<u8>>(OUTBOUND_HI_CAPACITY);
+        let (outbound_lo, outbound_lo_rx) = mpsc::channel::<Vec<u8>>(OUTBOUND_LO_CAPACITY);
         let mut state = self.state.lock().await;
         state.sessions.insert(
             session_id.clone(),
             SessionEntry {
-                sender,
+                outbound_state: Arc::clone(&outbound_state),
+                outbound_hi,
+                outbound_lo,
+                inbound: Arc::clone(&inbound),
                 player_id: None,
                 view_center: None,
                 view_radius: None,
                 camera_distance: None,
                 pellet_view_ids: HashSet::new(),
                 pellet_view_initialized: false,
+                pellet_reset_retry_at: 0,
             },
         );
-        session_id
+        SessionIo {
+            session_id,
+            inbound,
+            outbound_state,
+            outbound_hi_rx,
+            outbound_lo_rx,
+        }
     }
 
     pub async fn remove_session(&self, session_id: &str) {
@@ -256,7 +367,12 @@ impl Room {
         state.disconnect_session(session_id);
     }
 
-    pub async fn handle_text_message(self: &Arc<Self>, session_id: &str, text: &str) -> bool {
+    pub async fn handle_text_message(
+        self: &Arc<Self>,
+        session_id: &str,
+        inbound: &Arc<SessionInbound>,
+        text: &str,
+    ) -> bool {
         let Ok(message) = serde_json::from_str::<JsonClientMessage>(text) else {
             return true;
         };
@@ -289,19 +405,37 @@ impl Room {
                 view_radius,
                 camera_distance,
             } => {
-                let mut state = self.state.lock().await;
-                state.handle_input(session_id, axis, boost.unwrap_or(false));
-                state.handle_view(session_id, view_center, view_radius, camera_distance);
+                inbound.update_input(axis, boost.unwrap_or(false));
+                inbound.update_view(view_center, view_radius, camera_distance);
                 true
             }
         }
     }
 
-    pub async fn handle_binary_message(self: &Arc<Self>, session_id: &str, data: &[u8]) -> bool {
+    pub async fn handle_binary_message(
+        self: &Arc<Self>,
+        session_id: &str,
+        inbound: &Arc<SessionInbound>,
+        data: &[u8],
+    ) -> bool {
         let Some(message) = protocol::decode_client_message(data) else {
             return true;
         };
-        self.handle_client_message(session_id, message).await
+        match message {
+            protocol::ClientMessage::Input { axis, boost } => {
+                inbound.update_input(axis, boost);
+                true
+            }
+            protocol::ClientMessage::View {
+                view_center,
+                view_radius,
+                camera_distance,
+            } => {
+                inbound.update_view(view_center, view_radius, camera_distance);
+                true
+            }
+            _ => self.handle_client_message(session_id, message).await,
+        }
     }
 
     async fn handle_client_message(
@@ -376,6 +510,7 @@ impl Room {
         let room = Arc::clone(self);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(TICK_MS));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
                 let mut state = room.state.lock().await;
@@ -473,7 +608,12 @@ impl RoomState {
         if let Some(pattern) = skin {
             let clamped_len = pattern.len().min(8);
             let stored = if clamped_len > 0 {
-                Some(pattern.into_iter().take(clamped_len).collect::<Vec<[u8; 3]>>())
+                Some(
+                    pattern
+                        .into_iter()
+                        .take(clamped_len)
+                        .collect::<Vec<[u8; 3]>>(),
+                )
             } else {
                 None
             };
@@ -485,17 +625,21 @@ impl RoomState {
             }
         }
 
-        let sender = if let Some(session) = self.sessions.get_mut(session_id) {
+        let outbound_hi = if let Some(session) = self.sessions.get_mut(session_id) {
             session.player_id = Some(player_id.clone());
             session.pellet_view_initialized = false;
             session.pellet_view_ids.clear();
-            Some(session.sender.clone())
+            session.pellet_reset_retry_at = 0;
+            Some(session.outbound_hi.clone())
         } else {
             None
         };
-        if let Some(sender) = sender {
+        if let Some(outbound_hi) = outbound_hi {
             let payload = self.build_init_payload_for_session(session_id, &player_id);
-            let _ = sender.send(payload);
+            if outbound_hi.try_send(payload).is_err() {
+                self.disconnect_session(session_id);
+                return false;
+            }
         }
         self.maybe_send_pellet_reset_for_session(session_id);
         self.broadcast_player_meta(&[player_id]);
@@ -539,12 +683,7 @@ impl RoomState {
         }
     }
 
-    fn handle_input(
-        &mut self,
-        session_id: &str,
-        axis: Option<Point>,
-        boost: bool,
-    ) {
+    fn handle_input(&mut self, session_id: &str, axis: Option<Point>, boost: bool) {
         let Some(player_id) = self.session_player_id(session_id) else {
             return;
         };
@@ -763,7 +902,12 @@ impl RoomState {
         Some((view_center, visible_cos, visible_count))
     }
 
-    fn visible_pellet_indices(&self, view_center: Point, view_cos: f64, max_visible: usize) -> Vec<usize> {
+    fn visible_pellet_indices(
+        &self,
+        view_center: Point,
+        view_cos: f64,
+        max_visible: usize,
+    ) -> Vec<usize> {
         let capped_visible = max_visible.min(u16::MAX as usize);
         if capped_visible == 0 || self.pellets.is_empty() {
             return Vec::new();
@@ -941,7 +1085,11 @@ impl RoomState {
             if candidate == 0 {
                 candidate = 1;
             }
-            if !self.players.values().any(|player| player.net_id == candidate) {
+            if !self
+                .players
+                .values()
+                .any(|player| player.net_id == candidate)
+            {
                 self.next_player_net_id = candidate.wrapping_add(1);
                 if self.next_player_net_id == 0 {
                     self.next_player_net_id = 1;
@@ -2090,8 +2238,49 @@ impl RoomState {
         clamp(player.pellet_growth_fraction, 0.0, 0.999_999)
     }
 
+    fn apply_session_inbound(&mut self) {
+        for session in self.sessions.values_mut() {
+            let inbound = session.inbound.snapshot();
+
+            session.view_center = inbound.view_center;
+            session.view_radius = inbound.view_radius;
+            session.camera_distance = inbound.camera_distance;
+
+            let Some(player_id) = session.player_id.as_deref() else {
+                continue;
+            };
+            let Some(player) = self.players.get_mut(player_id) else {
+                continue;
+            };
+
+            if let Some(axis) = inbound.input_axis {
+                player.target_axis = axis;
+            }
+            player.boost = inbound.boost;
+            if inbound.last_input_at > 0 {
+                player.last_seen = inbound.last_input_at;
+            }
+        }
+    }
+
     fn tick(&mut self) {
         let now = Self::now_millis();
+        self.apply_session_inbound();
+
+        // If we had to drop pellet deltas due to backpressure, resync via reset as soon as the
+        // session can accept reliable frames again.
+        let pellet_reset_sessions: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| {
+                !session.pellet_view_initialized && now >= session.pellet_reset_retry_at
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for session_id in pellet_reset_sessions {
+            self.maybe_send_pellet_reset_for_session(&session_id);
+        }
+
         let dt_seconds = TICK_MS as f64 / 1000.0;
         let mut move_steps: HashMap<String, i32> = HashMap::new();
 
@@ -2435,7 +2624,12 @@ impl RoomState {
         encoder.into_vec()
     }
 
-    fn build_state_payload_for_session(&self, now: i64, state_seq: u32, session_id: &str) -> Vec<u8> {
+    fn build_state_payload_for_session(
+        &self,
+        now: i64,
+        state_seq: u32,
+        session_id: &str,
+    ) -> Vec<u8> {
         let visible_players = self.visible_players_for_session(session_id);
         let total_players = self.players.len().min(u16::MAX as usize);
         let visible_player_count = visible_players.len().min(u16::MAX as usize);
@@ -2527,7 +2721,7 @@ impl RoomState {
         };
         let mut stale = Vec::new();
         for (session_id, session) in &self.sessions {
-            if session.sender.send(payload.clone()).is_err() {
+            if session.outbound_hi.try_send(payload.clone()).is_err() {
                 stale.push(session_id.clone());
             }
         }
@@ -2581,7 +2775,11 @@ impl RoomState {
     }
 
     fn oct_sign(value: f64) -> f64 {
-        if value >= 0.0 { 1.0 } else { -1.0 }
+        if value >= 0.0 {
+            1.0
+        } else {
+            -1.0
+        }
     }
 
     fn oct_quantize(value: f64) -> i16 {
@@ -2632,7 +2830,11 @@ impl RoomState {
         encoder.write_u16(Self::quantize_unit_u16(clamp(player.oxygen, 0.0, 1.0)));
         let girth_scale = Self::player_girth_scale_from_len(player.snake.len());
         encoder.write_u8(Self::quantize_girth_scale_u8(girth_scale));
-        encoder.write_u8(Self::quantize_unit_u8(clamp(player.tail_extension, 0.0, 1.0)));
+        encoder.write_u8(Self::quantize_unit_u8(clamp(
+            player.tail_extension,
+            0.0,
+            1.0,
+        )));
         let detail = match window.detail {
             SnakeDetail::Full => protocol::SNAKE_DETAIL_FULL,
             SnakeDetail::Window => protocol::SNAKE_DETAIL_WINDOW,
@@ -2706,15 +2908,9 @@ impl RoomState {
     }
 
     fn broadcast_state(&mut self, now: i64, state_seq: u32) {
-        let mut stale = Vec::new();
         for (session_id, session) in &self.sessions {
             let payload = self.build_state_payload_for_session(now, state_seq, session_id);
-            if session.sender.send(payload).is_err() {
-                stale.push(session_id.clone());
-            }
-        }
-        for session_id in stale {
-            self.disconnect_session(&session_id);
+            session.outbound_state.store(payload);
         }
     }
 
@@ -2757,7 +2953,8 @@ impl RoomState {
         let add_count = adds.len().min(u16::MAX as usize);
         let update_count = updates.len().min(u16::MAX as usize);
         let remove_count = removes.len().min(u16::MAX as usize);
-        let capacity = 4 + 8 + 4 + 2 + add_count * 12 + 2 + update_count * 12 + 2 + remove_count * 4;
+        let capacity =
+            4 + 8 + 4 + 2 + add_count * 12 + 2 + update_count * 12 + 2 + remove_count * 4;
         let mut encoder = protocol::Encoder::with_capacity(capacity);
         encoder.write_header(protocol::TYPE_PELLET_DELTA, 0);
         encoder.write_i64(now);
@@ -2782,12 +2979,19 @@ impl RoomState {
     }
 
     fn maybe_send_pellet_reset_for_session(&mut self, session_id: &str) {
-        let initialized = self
-            .sessions
-            .get(session_id)
-            .map(|session| session.pellet_view_initialized)
-            .unwrap_or(false);
+        let Some((initialized, retry_at)) = self.sessions.get(session_id).map(|session| {
+            (
+                session.pellet_view_initialized,
+                session.pellet_reset_retry_at,
+            )
+        }) else {
+            return;
+        };
         if initialized {
+            return;
+        }
+        let now = Self::now_millis();
+        if now < retry_at {
             return;
         }
 
@@ -2795,23 +2999,29 @@ impl RoomState {
             return;
         };
         let indices = self.visible_pellet_indices(view_center, view_cos, max_visible);
-        let now = Self::now_millis();
         let state_seq = self.next_state_seq.wrapping_sub(1);
         let payload = self.build_pellet_reset_payload_for_indices(now, state_seq, &indices);
 
-        let mut stale = false;
         if let Some(session) = self.sessions.get_mut(session_id) {
-            session.pellet_view_initialized = true;
-            session.pellet_view_ids.clear();
-            for index in &indices {
-                if let Some(pellet) = self.pellets.get(*index) {
-                    session.pellet_view_ids.insert(pellet.id);
+            match session.outbound_hi.try_send(payload) {
+                Ok(()) => {
+                    session.pellet_view_initialized = true;
+                    session.pellet_reset_retry_at = 0;
+                    session.pellet_view_ids.clear();
+                    for index in &indices {
+                        if let Some(pellet) = self.pellets.get(*index) {
+                            session.pellet_view_ids.insert(pellet.id);
+                        }
+                    }
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    // The client is not keeping up; retry later without building unbounded backlog.
+                    session.pellet_reset_retry_at = now + PELLET_RESET_RETRY_MS;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    self.disconnect_session(session_id);
                 }
             }
-            stale = session.sender.send(payload).is_err();
-        }
-        if stale {
-            self.disconnect_session(session_id);
         }
     }
 
@@ -2829,7 +3039,8 @@ impl RoomState {
                 continue;
             }
 
-            let Some((view_center, view_cos, max_visible)) = self.pellet_view_params(&session_id) else {
+            let Some((view_center, view_cos, max_visible)) = self.pellet_view_params(&session_id)
+            else {
                 continue;
             };
             let indices = self.visible_pellet_indices(view_center, view_cos, max_visible);
@@ -2869,15 +3080,25 @@ impl RoomState {
                 continue;
             }
 
-            let payload = self.build_pellet_delta_payload(now, state_seq, &adds, &updates, &removes);
+            let payload =
+                self.build_pellet_delta_payload(now, state_seq, &adds, &updates, &removes);
 
-            let mut should_disconnect = false;
             if let Some(session) = self.sessions.get_mut(&session_id) {
-                session.pellet_view_ids = next_ids;
-                should_disconnect = session.sender.send(payload).is_err();
-            }
-            if should_disconnect {
-                stale.push(session_id);
+                match session.outbound_lo.try_send(payload) {
+                    Ok(()) => {
+                        session.pellet_view_ids = next_ids;
+                    }
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        // If a client can't keep up with deltas, force a reset once it catches up
+                        // so pellet visuals stay correct without growing unbounded backlog.
+                        session.pellet_view_initialized = false;
+                        session.pellet_view_ids.clear();
+                        session.pellet_reset_retry_at = now;
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        stale.push(session_id);
+                    }
+                }
             }
         }
 
@@ -2898,7 +3119,6 @@ mod tests {
     use super::*;
     use crate::game::types::Digestion;
     use std::collections::{HashMap, HashSet, VecDeque};
-    use tokio::sync::mpsc::unbounded_channel;
 
     fn make_snake(len: usize, start: f64) -> Vec<SnakeNode> {
         (0..len)
@@ -3120,9 +3340,21 @@ mod tests {
             id: "self-overlap".to_string(),
             alive: true,
             snake: vec![
-                Point { x: 0.0, y: 0.0, z: 1.0 },
-                Point { x: 0.0, y: 1.0, z: 0.0 },
-                Point { x: 0.0, y: 0.0, z: 1.0 },
+                Point {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 1.0,
+                },
+                Point {
+                    x: 0.0,
+                    y: 1.0,
+                    z: 0.0,
+                },
+                Point {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 1.0,
+                },
             ],
             contact_angular_radius: radius,
             body_angular_radius: radius,
@@ -3141,9 +3373,21 @@ mod tests {
             id: "a".to_string(),
             alive: true,
             snake: vec![
-                Point { x: 0.0, y: 0.0, z: 1.0 },
-                Point { x: 0.0, y: 1.0, z: 0.0 },
-                Point { x: -1.0, y: 0.0, z: 0.0 },
+                Point {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 1.0,
+                },
+                Point {
+                    x: 0.0,
+                    y: 1.0,
+                    z: 0.0,
+                },
+                Point {
+                    x: -1.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
             ],
             contact_angular_radius: radius,
             body_angular_radius: radius,
@@ -3152,9 +3396,21 @@ mod tests {
             id: "b".to_string(),
             alive: true,
             snake: vec![
-                Point { x: 1.0, y: 0.0, z: 0.0 },
-                Point { x: 0.0, y: 0.0, z: 1.0 },
-                Point { x: 0.0, y: -1.0, z: 0.0 },
+                Point {
+                    x: 1.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                Point {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 1.0,
+                },
+                Point {
+                    x: 0.0,
+                    y: -1.0,
+                    z: 0.0,
+                },
             ],
             contact_angular_radius: radius,
             body_angular_radius: radius,
@@ -3223,17 +3479,24 @@ mod tests {
         view_center: Option<Point>,
         view_radius: Option<f64>,
     ) {
-        let (tx, _rx) = unbounded_channel::<Vec<u8>>();
+        let outbound_state = Arc::new(LatestFrame::new());
+        let (outbound_hi, _outbound_hi_rx) = mpsc::channel::<Vec<u8>>(1);
+        let (outbound_lo, _outbound_lo_rx) = mpsc::channel::<Vec<u8>>(1);
+        let inbound = Arc::new(SessionInbound::new());
         state.sessions.insert(
             session_id.to_string(),
             SessionEntry {
-                sender: tx,
+                outbound_state,
+                outbound_hi,
+                outbound_lo,
+                inbound,
                 player_id: Some(player_id.to_string()),
                 view_center,
                 view_radius,
                 camera_distance: None,
                 pellet_view_ids: HashSet::new(),
                 pellet_view_initialized: false,
+                pellet_reset_retry_at: 0,
             },
         );
     }
@@ -4546,27 +4809,34 @@ mod tests {
     #[test]
     fn broadcast_state_increments_state_sequence_once_per_tick() {
         let mut state = make_state();
-        let (tx, mut rx) = unbounded_channel::<Vec<u8>>();
+        let outbound_state = Arc::new(LatestFrame::new());
+        let (outbound_hi, _outbound_hi_rx) = mpsc::channel::<Vec<u8>>(1);
+        let (outbound_lo, _outbound_lo_rx) = mpsc::channel::<Vec<u8>>(1);
+        let inbound = Arc::new(SessionInbound::new());
         state.sessions.insert(
             "session-seq".to_string(),
             SessionEntry {
-                sender: tx,
+                outbound_state: Arc::clone(&outbound_state),
+                outbound_hi,
+                outbound_lo,
+                inbound,
                 player_id: None,
                 view_center: None,
                 view_radius: None,
                 camera_distance: None,
                 pellet_view_ids: HashSet::new(),
                 pellet_view_initialized: false,
+                pellet_reset_retry_at: 0,
             },
         );
 
         state.broadcast_state(1234, state.next_state_seq);
+        let first_payload = outbound_state.take_latest().expect("first payload");
         state.next_state_seq = state.next_state_seq.wrapping_add(1);
         state.broadcast_state(1234, state.next_state_seq);
+        let second_payload = outbound_state.take_latest().expect("second payload");
         state.next_state_seq = state.next_state_seq.wrapping_add(1);
 
-        let first_payload = rx.try_recv().expect("first payload");
-        let second_payload = rx.try_recv().expect("second payload");
         let (first_seq, _, _) = decode_state_counts(&first_payload);
         let (second_seq, _, _) = decode_state_counts(&second_payload);
         assert_eq!(second_seq, first_seq.wrapping_add(1));

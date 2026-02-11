@@ -743,7 +743,9 @@ mod tests {
     fn sanitize_room_name_strips_invalid_chars_and_bounds_length() {
         let source = "room-abc!@#$%^&*()_+[]{}<>?/|`~xyz123456789012345678901234567890";
         let cleaned = sanitize_room_name(source);
-        assert!(cleaned.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'));
+        assert!(cleaned
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'));
         assert!(cleaned.len() <= 64);
     }
 
@@ -757,9 +759,7 @@ mod tests {
     fn parse_id_list_rejects_empty_segment() {
         let error = parse_id_list("HETZNER_ROOM_FIREWALL_IDS", "123,,456")
             .expect_err("empty segment should fail");
-        assert!(error
-            .to_string()
-            .contains("contains an empty id segment"));
+        assert!(error.to_string().contains("contains an empty id segment"));
     }
 
     #[test]
