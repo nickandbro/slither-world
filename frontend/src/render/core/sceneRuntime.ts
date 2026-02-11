@@ -155,35 +155,6 @@ type PelletMotionState = {
   wsp: number
 }
 
-type PelletWindTrailBucketPoints = {
-  kind: 'points'
-  points: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>
-  material: THREE.PointsMaterial
-  positionAttribute: THREE.BufferAttribute
-  opacityAttribute: THREE.BufferAttribute
-  colorAttribute: THREE.BufferAttribute
-  sizeAttribute: THREE.BufferAttribute
-  capacity: number
-}
-
-type PelletWindTrailBucketSprites = {
-  kind: 'sprites'
-  sprite: THREE.Sprite
-  material: PointsNodeMaterial
-  positionAttribute: THREE.InstancedBufferAttribute
-  opacityAttribute: THREE.InstancedBufferAttribute
-  colorAttribute: THREE.InstancedBufferAttribute
-  sizeAttribute: THREE.InstancedBufferAttribute
-  capacity: number
-}
-
-type PelletWindTrailBucket = PelletWindTrailBucketPoints | PelletWindTrailBucketSprites
-
-type PelletIntakeTrailVisual = {
-  mesh: THREE.Mesh<THREE.CylinderGeometry, THREE.MeshBasicMaterial>
-  material: THREE.MeshBasicMaterial
-}
-
 type PelletVisualState = {
   renderNormal: THREE.Vector3
   targetNormal: THREE.Vector3
@@ -195,14 +166,8 @@ type PelletVisualState = {
   targetIntakeScale: number
   renderAlpha: number
   targetAlpha: number
-  renderTrailIntensity: number
-  targetTrailIntensity: number
-  renderTrailLength: number
-  targetTrailLength: number
-  trailDirection: THREE.Vector3
-  trailStartPosition: THREE.Vector3
-  trailStartActive: boolean
-  trailTargetPlayerId: string | null
+  lastLockTargetPlayerId: string | null
+  lastLockSeenAt: number
   lastServerAt: number
   colorIndex: number
 }
@@ -302,87 +267,6 @@ const createPelletGlowTexture = () => {
     { offset: 0, color: 'rgba(255,255,255,1)' },
     { offset: 1, color: 'rgba(255,255,255,0)' },
   ])
-}
-
-const createPelletWindWhispTexture = () => {
-  const size = 96
-  const canvas = document.createElement('canvas')
-  canvas.width = size
-  canvas.height = size
-  const ctx = canvas.getContext('2d')
-  if (!ctx) return null
-
-  const imageData = ctx.createImageData(size, size)
-  for (let y = 0; y < size; y += 1) {
-    const v = size > 1 ? y / (size - 1) : 0
-    const py = v * 2 - 1
-    for (let x = 0; x < size; x += 1) {
-      const u = size > 1 ? x / (size - 1) : 0
-      const px = u * 2 - 1
-      const radius = Math.sqrt(px * px + py * py)
-      // Filled center (no donut hole), with a soft wisp edge.
-      const coreFill = 1 - smoothstep(0.56, 1, radius)
-      const softCenterBoost = 0.84 + 0.16 * (1 - smoothstep(0, 0.44, radius))
-      const streakA = 0.9 + 0.1 * Math.sin((px * 4.3 + py * 3.4) * Math.PI)
-      const streakB = 0.92 + 0.08 * Math.sin((px * 2.4 - py * 4.1) * Math.PI + 0.8)
-      const alpha = clamp(coreFill * softCenterBoost * streakA * streakB, 0, 1)
-      const offset = (y * size + x) * 4
-      imageData.data[offset] = 255
-      imageData.data[offset + 1] = 255
-      imageData.data[offset + 2] = 255
-      imageData.data[offset + 3] = Math.round(alpha * 255)
-    }
-  }
-  ctx.putImageData(imageData, 0, 0)
-
-  const texture = new THREE.CanvasTexture(canvas)
-  texture.wrapS = THREE.ClampToEdgeWrapping
-  texture.wrapT = THREE.ClampToEdgeWrapping
-  texture.magFilter = THREE.LinearFilter
-  texture.minFilter = THREE.LinearFilter
-  texture.colorSpace = THREE.NoColorSpace
-  texture.needsUpdate = true
-  return texture
-}
-
-const createPelletIntakeTrailTexture = () => {
-  const width = 32
-  const height = 256
-  const canvas = document.createElement('canvas')
-  canvas.width = width
-  canvas.height = height
-  const ctx = canvas.getContext('2d')
-  if (!ctx) return null
-
-  const imageData = ctx.createImageData(width, height)
-  for (let y = 0; y < height; y += 1) {
-    const v = height > 1 ? y / (height - 1) : 0
-    // Tail fades in quickly; near-head end feathers slightly.
-    const tailFade = smoothstep(0.12, 0.5, v)
-    const headFade = 1 - smoothstep(0.92, 1, v)
-    const axial = clamp(tailFade * headFade, 0, 1)
-    for (let x = 0; x < width; x += 1) {
-      const u = width > 1 ? x / (width - 1) : 0
-      const d = Math.abs(u * 2 - 1)
-      const cross = 1 - smoothstep(0.56, 1, d)
-      const alpha = clamp(axial * cross, 0, 1)
-      const offset = (y * width + x) * 4
-      imageData.data[offset] = 255
-      imageData.data[offset + 1] = 255
-      imageData.data[offset + 2] = 255
-      imageData.data[offset + 3] = Math.round(alpha * 255)
-    }
-  }
-  ctx.putImageData(imageData, 0, 0)
-
-  const texture = new THREE.CanvasTexture(canvas)
-  texture.wrapS = THREE.ClampToEdgeWrapping
-  texture.wrapT = THREE.ClampToEdgeWrapping
-  texture.magFilter = THREE.LinearFilter
-  texture.minFilter = THREE.LinearFilter
-  texture.colorSpace = THREE.NoColorSpace
-  texture.needsUpdate = true
-  return texture
 }
 
 const createBoostDraftTexture = () => {
@@ -1127,10 +1011,6 @@ const PELLET_COLORS = [
   '#6f8bff',
   '#f9ff6b',
 ]
-const PELLET_COLOR_LINEAR = PELLET_COLORS.map((hex) => {
-  const color = new THREE.Color(hex)
-  return { r: color.r, g: color.g, b: color.b }
-})
 const PELLET_SIZE_TIER_MULTIPLIERS = [0.9, 1.45, 2.8]
 const PELLET_SIZE_TIER_MEDIUM_MIN = 1.05
 const PELLET_SIZE_TIER_LARGE_MIN = 1.6
@@ -1144,8 +1024,7 @@ const PELLET_CORRECTION_RATE = 9
 const PELLET_SIZE_SMOOTH_RATE = 14
 const PELLET_SNAP_DOT_THRESHOLD = 0.962
 const PELLET_CONSUME_GHOST_DURATION_SECS = 0.12
-const PELLET_CONSUME_GHOST_HOMING_RATE = 24
-const PELLET_CONSUME_GHOST_MAX_TARGET_DISTANCE = HEAD_RADIUS * 5.5
+const PELLET_CONSUME_RECENT_LOCK_TTL_SECS = 0.28
 const PELLET_GLOW_PULSE_SPEED = 9.2
 const PELLET_SHADOW_OPACITY_BASE = 0.9
 const PELLET_SHADOW_OPACITY_RANGE = 0.008
@@ -1168,25 +1047,6 @@ const PELLET_INTAKE_ALPHA_FADE_OUT_RATE = 17
 const PELLET_INTAKE_SCALE_MIN = 1 / 3
 const PELLET_INTAKE_SCALE_FADE_IN_RATE = 11
 const PELLET_INTAKE_SCALE_FADE_OUT_RATE = 16
-const PELLET_WIND_WISP_MIN_VISIBLE_INTENSITY = 0.012
-const PELLET_WIND_WISP_FADE_IN_RATE = 16
-const PELLET_WIND_WISP_FADE_OUT_RATE = 4.3
-const PELLET_WIND_WISP_POINT_SIZE = PELLET_RADIUS * 6.4
-const PELLET_WIND_WISP_MIN_LENGTH = HEAD_RADIUS * 0.44
-const PELLET_WIND_WISP_MAX_LENGTH = PLANET_RADIUS * 0.11 * 0.95
-const PELLET_WIND_WISP_OPACITY_MAX = 0.88
-const PELLET_INTAKE_TRAIL_TOP_RADIUS = 1
-const PELLET_INTAKE_TRAIL_BOTTOM_RADIUS = 0.34
-const PELLET_INTAKE_TRAIL_GEOMETRY_HEIGHT = 1
-const PELLET_INTAKE_TRAIL_RADIAL_SEGMENTS = 14
-const PELLET_INTAKE_TRAIL_HEIGHT_SEGMENTS = 8
-const PELLET_INTAKE_TRAIL_RADIUS_SCALE = 0.62
-const PELLET_INTAKE_TRAIL_RADIUS_MIN = PELLET_RADIUS * 0.22
-const PELLET_INTAKE_TRAIL_RADIUS_MAX = PELLET_RADIUS * 1.7
-const PELLET_INTAKE_TRAIL_LIFT = PELLET_RADIUS * 0.22
-const PELLET_INTAKE_TRAIL_MIN_LENGTH = PELLET_RADIUS * 0.15
-const PELLET_INTAKE_TRAIL_PULSE_SPEED = 4.2
-const PELLET_INTAKE_TRAIL_POOL_MAX = 256
 const TONGUE_MAX_LENGTH = HEAD_RADIUS * 2.8
 const TONGUE_MAX_RANGE = HEAD_RADIUS * 3.1
 const TONGUE_NEAR_RANGE = HEAD_RADIUS * 2.4
@@ -3043,16 +2903,6 @@ export const createScene = async (
   const pelletCoreTexture = createPelletCoreTexture()
   const pelletInnerGlowTexture = createPelletInnerGlowTexture()
   const pelletGlowTexture = createPelletGlowTexture()
-  const pelletWindWhispTexture = createPelletWindWhispTexture()
-  const pelletIntakeTrailTexture = createPelletIntakeTrailTexture()
-  const pelletIntakeTrailGeometry = new THREE.CylinderGeometry(
-    PELLET_INTAKE_TRAIL_TOP_RADIUS,
-    PELLET_INTAKE_TRAIL_BOTTOM_RADIUS,
-    PELLET_INTAKE_TRAIL_GEOMETRY_HEIGHT,
-    PELLET_INTAKE_TRAIL_RADIAL_SEGMENTS,
-    PELLET_INTAKE_TRAIL_HEIGHT_SEGMENTS,
-    true,
-  )
   // WebGPU does not support `MeshDepthMaterial` (it can't be converted to a node material),
   // but for this pass we only need depth writes. Use a depth-only basic material instead.
   const occluderDepthMaterial = webglShaderHooksEnabled
@@ -3122,9 +2972,6 @@ export const createScene = async (
   const pelletBucketOffsets = new Array<number>(PELLET_BUCKET_COUNT).fill(0)
   const pelletBucketPositionArrays: Array<Float32Array | null> = new Array(PELLET_BUCKET_COUNT).fill(null)
   const pelletBucketOpacityArrays: Array<Float32Array | null> = new Array(PELLET_BUCKET_COUNT).fill(null)
-  let pelletWindTrailBucket: PelletWindTrailBucket | null = null
-  const pelletIntakeTrails: PelletIntakeTrailVisual[] = []
-  let pelletIntakeTrailActiveCount = 0
   const pelletGroundCache = new Map<number, { x: number; y: number; z: number; radius: number }>()
   const pelletMotionStates = new Map<number, PelletMotionState>()
   const pelletVisualStates = new Map<number, PelletVisualState>()
@@ -3199,12 +3046,6 @@ export const createScene = async (
   const intakeConeClipTemp = new THREE.Vector3()
   const pelletWobbleTangentTemp = new THREE.Vector3()
   const pelletWobbleBitangentTemp = new THREE.Vector3()
-  const pelletWindDirTemp = new THREE.Vector3()
-  const pelletIntakeTrailStartTemp = new THREE.Vector3()
-  const pelletIntakeTrailEndTemp = new THREE.Vector3()
-  const pelletIntakeTrailCenterTemp = new THREE.Vector3()
-  const pelletIntakeTrailDirTemp = new THREE.Vector3()
-  const pelletIntakeTrailUpAxis = new THREE.Vector3(0, 1, 0)
   const intakeConeOrientationMatrix = new THREE.Matrix4()
   const patchCenterQuat = new THREE.Quaternion()
   const lakeSampleTemp = new THREE.Vector3()
@@ -3504,21 +3345,6 @@ export const createScene = async (
     pelletConsumeGhosts.length = 0
     pelletMouthTargets.clear()
     pelletSuctionTargetByPelletId.clear()
-    pelletIntakeTrailActiveCount = 0
-    for (let i = 0; i < pelletIntakeTrails.length; i += 1) {
-      const trail = pelletIntakeTrails[i]
-      if (!trail) continue
-      trail.mesh.visible = false
-    }
-    if (pelletWindTrailBucket) {
-      if (pelletWindTrailBucket.kind === 'points') {
-        pelletWindTrailBucket.points.visible = false
-        pelletWindTrailBucket.points.geometry.setDrawRange(0, 0)
-      } else {
-        pelletWindTrailBucket.sprite.visible = false
-        pelletWindTrailBucket.sprite.count = 0
-      }
-    }
     if (planetMesh) {
       world.remove(planetMesh)
       planetMesh.geometry.dispose()
@@ -7187,14 +7013,8 @@ diffuseColor.a *= retireEdge;`,
         targetIntakeScale: 1,
         renderAlpha: 1,
         targetAlpha: 1,
-        renderTrailIntensity: 0,
-        targetTrailIntensity: 0,
-        renderTrailLength: PELLET_WIND_WISP_MIN_LENGTH,
-        targetTrailLength: PELLET_WIND_WISP_MIN_LENGTH,
-        trailDirection: new THREE.Vector3(),
-        trailStartPosition: new THREE.Vector3(),
-        trailStartActive: false,
-        trailTargetPlayerId: null,
+        lastLockTargetPlayerId: null,
+        lastLockSeenAt: Number.NEGATIVE_INFINITY,
         lastServerAt: timeSeconds,
         colorIndex: pellet.colorIndex,
       }
@@ -7264,13 +7084,15 @@ diffuseColor.a *= retireEdge;`,
     mouthTarget: THREE.Vector3,
   ) => {
     const distanceToMouth = pelletPosition.distanceTo(mouthTarget)
-    return (
+    return clamp(
       1 -
       smoothstep(
         PELLET_INTAKE_ALPHA_NEAR_DISTANCE,
         PELLET_INTAKE_ALPHA_FAR_DISTANCE,
         distanceToMouth,
-      )
+      ),
+      0,
+      1,
     )
   }
 
@@ -7298,20 +7120,6 @@ diffuseColor.a *= retireEdge;`,
     )
   }
 
-  const findNearestPelletMouthTargetId = (position: THREE.Vector3) => {
-    let nearestId: string | null = null
-    let nearestDistSq =
-      PELLET_CONSUME_GHOST_MAX_TARGET_DISTANCE * PELLET_CONSUME_GHOST_MAX_TARGET_DISTANCE
-    for (const [id, target] of pelletMouthTargets) {
-      const distSq = position.distanceToSquared(target)
-      if (distSq < nearestDistSq) {
-        nearestDistSq = distSq
-        nearestId = id
-      }
-    }
-    return nearestId
-  }
-
   const spawnPelletConsumeGhost = (
     pelletId: number,
     state: PelletVisualState,
@@ -7325,9 +7133,22 @@ diffuseColor.a *= retireEdge;`,
       startSize,
       tempVector,
     )
-    const targetPlayerId = lockedTargetPlayerId ?? findNearestPelletMouthTargetId(tempVector)
-    if (!targetPlayerId) return
+    const targetPlayerId = lockedTargetPlayerId
+    if (!targetPlayerId || targetPlayerId.length <= 0) return
     const normal = tempVector.clone().normalize()
+    const existingGhost = pelletConsumeGhosts.find((ghost) => ghost.pelletId === pelletId) ?? null
+    if (existingGhost) {
+      existingGhost.startPosition.copy(tempVector)
+      existingGhost.position.copy(tempVector)
+      existingGhost.normal.copy(normal)
+      existingGhost.startSize = startSize
+      existingGhost.size = startSize
+      existingGhost.colorIndex = state.colorIndex
+      existingGhost.age = 0
+      existingGhost.duration = PELLET_CONSUME_GHOST_DURATION_SECS
+      existingGhost.targetPlayerId = targetPlayerId
+      return
+    }
     pelletConsumeGhosts.push({
       pelletId,
       startPosition: tempVector.clone(),
@@ -7347,20 +7168,20 @@ diffuseColor.a *= retireEdge;`,
 
   const updatePelletConsumeGhost = (ghost: PelletConsumeGhost, deltaSeconds: number) => {
     ghost.age += Math.max(0, deltaSeconds)
+    const t = clamp(ghost.age / Math.max(1e-4, ghost.duration), 0, 1)
     if (ghost.targetPlayerId) {
       const target = pelletMouthTargets.get(ghost.targetPlayerId)
       if (target) {
-        const alpha =
-          1 - Math.exp(-Math.max(0, PELLET_CONSUME_GHOST_HOMING_RATE) * Math.max(0, deltaSeconds))
-        ghost.position.lerp(target, alpha)
+        ghost.position.copy(ghost.startPosition).lerp(target, t)
         if (ghost.position.lengthSq() > 1e-8) {
           ghost.normal.copy(ghost.position).normalize()
         }
+      } else {
+        return false
       }
     }
-    const t = clamp(ghost.age / Math.max(1e-4, ghost.duration), 0, 1)
-    ghost.size = ghost.startSize * (1 - t * t)
-    return ghost.age < ghost.duration && ghost.size > 0.02
+    ghost.size = ghost.startSize * lerp(1, PELLET_INTAKE_SCALE_MIN, t)
+    return ghost.age < ghost.duration
   }
 
   const pelletSeedUnit = (id: number, salt: number) => {
@@ -9250,295 +9071,6 @@ diffuseColor.a *= retireEdge;`,
     }
   }
 
-  const applyWindTrailAttributesToPointsMaterial = (material: THREE.PointsMaterial) => {
-    material.customProgramCacheKey = () => 'pellet-wind-attrs-v2'
-    material.onBeforeCompile = (shader) => {
-      shader.vertexShader = shader.vertexShader
-        .replace(
-          '#include <common>',
-          '#include <common>\nattribute float windOpacity;\nattribute float windSize;\nattribute vec3 windColor;\nvarying float vWindOpacity;\nvarying vec3 vWindColor;',
-        )
-        .replace(
-          '#include <begin_vertex>',
-          '#include <begin_vertex>\n  vWindOpacity = windOpacity;\n  vWindColor = windColor;',
-        )
-        .replace('gl_PointSize = size;', 'gl_PointSize = size * max(windSize, 0.001);')
-      shader.fragmentShader = shader.fragmentShader
-        .replace('#include <common>', '#include <common>\nvarying float vWindOpacity;\nvarying vec3 vWindColor;')
-        .replace(
-          '#include <color_fragment>',
-          '#include <color_fragment>\n  diffuseColor.rgb *= vWindColor;\n  diffuseColor.a *= clamp(vWindOpacity, 0.0, 1.0);',
-        )
-    }
-  }
-
-  const createPelletWindTrailBucketPoints = (capacity: number): PelletWindTrailBucketPoints => {
-    const geometry = new THREE.BufferGeometry()
-    const positionArray = new Float32Array(capacity * 3)
-    const opacityArray = new Float32Array(capacity)
-    const colorArray = new Float32Array(capacity * 3)
-    const sizeArray = new Float32Array(capacity)
-    const positionAttribute = new THREE.BufferAttribute(positionArray, 3)
-    const opacityAttribute = new THREE.BufferAttribute(opacityArray, 1)
-    const colorAttribute = new THREE.BufferAttribute(colorArray, 3)
-    const sizeAttribute = new THREE.BufferAttribute(sizeArray, 1)
-    positionAttribute.setUsage(THREE.DynamicDrawUsage)
-    opacityAttribute.setUsage(THREE.DynamicDrawUsage)
-    colorAttribute.setUsage(THREE.DynamicDrawUsage)
-    sizeAttribute.setUsage(THREE.DynamicDrawUsage)
-    geometry.setAttribute('position', positionAttribute)
-    geometry.setAttribute('windOpacity', opacityAttribute)
-    geometry.setAttribute('windColor', colorAttribute)
-    geometry.setAttribute('windSize', sizeAttribute)
-    geometry.setDrawRange(0, 0)
-    const material = new THREE.PointsMaterial({
-      size: PELLET_WIND_WISP_POINT_SIZE,
-      map: pelletWindWhispTexture ?? undefined,
-      alphaMap: pelletWindWhispTexture ?? undefined,
-      color: '#ffffff',
-      transparent: true,
-      opacity: PELLET_WIND_WISP_OPACITY_MAX,
-      depthWrite: false,
-      depthTest: true,
-      blending: THREE.NormalBlending,
-      sizeAttenuation: true,
-      toneMapped: false,
-    })
-    applyWindTrailAttributesToPointsMaterial(material)
-    const points = new THREE.Points(geometry, material)
-    points.visible = false
-    points.frustumCulled = false
-    points.renderOrder = 1.12
-    pelletsGroup.add(points)
-    return {
-      kind: 'points',
-      points,
-      material,
-      positionAttribute,
-      opacityAttribute,
-      colorAttribute,
-      sizeAttribute,
-      capacity,
-    }
-  }
-
-  const createPelletWindTrailBucketSprites = (capacity: number): PelletWindTrailBucketSprites => {
-    const positionArray = new Float32Array(capacity * 3)
-    const opacityArray = new Float32Array(capacity)
-    const colorArray = new Float32Array(capacity * 3)
-    const sizeArray = new Float32Array(capacity)
-    const positionAttribute = new THREE.InstancedBufferAttribute(positionArray, 3)
-    const opacityAttribute = new THREE.InstancedBufferAttribute(opacityArray, 1)
-    const colorAttribute = new THREE.InstancedBufferAttribute(colorArray, 3)
-    const sizeAttribute = new THREE.InstancedBufferAttribute(sizeArray, 1)
-    positionAttribute.setUsage(THREE.DynamicDrawUsage)
-    opacityAttribute.setUsage(THREE.DynamicDrawUsage)
-    colorAttribute.setUsage(THREE.DynamicDrawUsage)
-    sizeAttribute.setUsage(THREE.DynamicDrawUsage)
-    const positionNode = instancedDynamicBufferAttribute(positionAttribute, 'vec3')
-    const opacityNode = instancedDynamicBufferAttribute(opacityAttribute, 'float')
-    const colorNode = instancedDynamicBufferAttribute(colorAttribute, 'vec3')
-    const sizeNode = instancedDynamicBufferAttribute(sizeAttribute, 'float')
-    const material = new PointsNodeMaterial({
-      size: PELLET_WIND_WISP_POINT_SIZE,
-      map: pelletWindWhispTexture ?? undefined,
-      alphaMap: pelletWindWhispTexture ?? undefined,
-      color: '#ffffff',
-      transparent: true,
-      opacity: PELLET_WIND_WISP_OPACITY_MAX,
-      depthWrite: false,
-      depthTest: true,
-      blending: THREE.NormalBlending,
-      sizeAttenuation: true,
-      toneMapped: false,
-    })
-    material.positionNode = positionNode
-    material.colorNode = colorNode
-    material.sizeNode = sizeNode.mul(PELLET_WIND_WISP_POINT_SIZE)
-    material.opacityNode = materialOpacity.mul(opacityNode)
-    const sprite = new THREE.Sprite(material as unknown as THREE.SpriteMaterial)
-    sprite.visible = false
-    sprite.frustumCulled = false
-    sprite.renderOrder = 1.12
-    sprite.count = 0
-    pelletsGroup.add(sprite)
-    return {
-      kind: 'sprites',
-      sprite,
-      material,
-      positionAttribute,
-      opacityAttribute,
-      colorAttribute,
-      sizeAttribute,
-      capacity,
-    }
-  }
-
-  const createPelletWindTrailBucket = (capacity: number): PelletWindTrailBucket => {
-    return pelletsUseSprites
-      ? createPelletWindTrailBucketSprites(capacity)
-      : createPelletWindTrailBucketPoints(capacity)
-  }
-
-  const ensurePelletWindTrailCapacity = (required: number): PelletWindTrailBucket => {
-    const targetCapacity = Math.max(1, required)
-    if (!pelletWindTrailBucket) {
-      let capacity = pelletsUseSprites ? PELLET_SPRITE_BUCKET_MIN_CAPACITY : 1
-      while (capacity < targetCapacity) {
-        capacity *= 2
-      }
-      pelletWindTrailBucket = createPelletWindTrailBucket(capacity)
-      return pelletWindTrailBucket
-    }
-    if (pelletWindTrailBucket.capacity >= targetCapacity) {
-      return pelletWindTrailBucket
-    }
-
-    let nextCapacity = Math.max(1, pelletWindTrailBucket.capacity)
-    while (nextCapacity < targetCapacity) {
-      nextCapacity *= 2
-    }
-    const positionArray = new Float32Array(nextCapacity * 3)
-    const opacityArray = new Float32Array(nextCapacity)
-    const colorArray = new Float32Array(nextCapacity * 3)
-    const sizeArray = new Float32Array(nextCapacity)
-    const positionAttribute =
-      pelletWindTrailBucket.kind === 'sprites'
-        ? new THREE.InstancedBufferAttribute(positionArray, 3)
-        : new THREE.BufferAttribute(positionArray, 3)
-    const opacityAttribute =
-      pelletWindTrailBucket.kind === 'sprites'
-        ? new THREE.InstancedBufferAttribute(opacityArray, 1)
-        : new THREE.BufferAttribute(opacityArray, 1)
-    const colorAttribute =
-      pelletWindTrailBucket.kind === 'sprites'
-        ? new THREE.InstancedBufferAttribute(colorArray, 3)
-        : new THREE.BufferAttribute(colorArray, 3)
-    const sizeAttribute =
-      pelletWindTrailBucket.kind === 'sprites'
-        ? new THREE.InstancedBufferAttribute(sizeArray, 1)
-        : new THREE.BufferAttribute(sizeArray, 1)
-    positionAttribute.setUsage(THREE.DynamicDrawUsage)
-    opacityAttribute.setUsage(THREE.DynamicDrawUsage)
-    colorAttribute.setUsage(THREE.DynamicDrawUsage)
-    sizeAttribute.setUsage(THREE.DynamicDrawUsage)
-
-    if (pelletWindTrailBucket.kind === 'points') {
-      const geometry = new THREE.BufferGeometry()
-      geometry.setAttribute('position', positionAttribute)
-      geometry.setAttribute('windOpacity', opacityAttribute)
-      geometry.setAttribute('windColor', colorAttribute)
-      geometry.setAttribute('windSize', sizeAttribute)
-      geometry.setDrawRange(0, 0)
-      const prev = pelletWindTrailBucket.points.geometry
-      pelletWindTrailBucket.points.geometry = geometry
-      prev.dispose()
-    } else {
-      const positionNode = instancedDynamicBufferAttribute(positionAttribute, 'vec3')
-      const opacityNode = instancedDynamicBufferAttribute(opacityAttribute, 'float')
-      const colorNode = instancedDynamicBufferAttribute(colorAttribute, 'vec3')
-      const sizeNode = instancedDynamicBufferAttribute(sizeAttribute, 'float')
-      pelletWindTrailBucket.material.positionNode = positionNode
-      pelletWindTrailBucket.material.colorNode = colorNode
-      pelletWindTrailBucket.material.sizeNode = sizeNode.mul(PELLET_WIND_WISP_POINT_SIZE)
-      pelletWindTrailBucket.material.opacityNode = materialOpacity.mul(opacityNode)
-      pelletWindTrailBucket.material.needsUpdate = true
-    }
-    pelletWindTrailBucket.positionAttribute = positionAttribute
-    pelletWindTrailBucket.opacityAttribute = opacityAttribute
-    pelletWindTrailBucket.colorAttribute = colorAttribute
-    pelletWindTrailBucket.sizeAttribute = sizeAttribute
-    pelletWindTrailBucket.capacity = nextCapacity
-    return pelletWindTrailBucket
-  }
-  void ensurePelletWindTrailCapacity
-
-  const createPelletIntakeTrailVisual = (): PelletIntakeTrailVisual => {
-    const material = new THREE.MeshBasicMaterial({
-      map: pelletIntakeTrailTexture ?? undefined,
-      alphaMap: pelletIntakeTrailTexture ?? undefined,
-      color: '#ffffff',
-      transparent: true,
-      opacity: PELLET_WIND_WISP_OPACITY_MAX,
-      depthWrite: false,
-      depthTest: true,
-      blending: THREE.NormalBlending,
-      side: THREE.DoubleSide,
-      toneMapped: false,
-    })
-    const mesh = new THREE.Mesh(pelletIntakeTrailGeometry, material)
-    mesh.visible = false
-    mesh.frustumCulled = false
-    // Keep trail behind pellets.
-    mesh.renderOrder = 1.08
-    pelletsGroup.add(mesh)
-    return { mesh, material }
-  }
-
-  const ensurePelletIntakeTrailCapacity = (required: number) => {
-    const target = Math.max(0, Math.min(required, PELLET_INTAKE_TRAIL_POOL_MAX))
-    while (pelletIntakeTrails.length < target) {
-      pelletIntakeTrails.push(createPelletIntakeTrailVisual())
-    }
-  }
-
-  const emitPelletIntakeTrail = (
-    start: THREE.Vector3,
-    end: THREE.Vector3,
-    colorIndex: number,
-    pelletSize: number,
-    intensity: number,
-    phase: number,
-    timeSeconds: number,
-  ) => {
-    if (!(intensity > PELLET_WIND_WISP_MIN_VISIBLE_INTENSITY * 0.25)) return
-    if (pelletIntakeTrailActiveCount >= PELLET_INTAKE_TRAIL_POOL_MAX) return
-
-    pelletIntakeTrailStartTemp.copy(start)
-    if (pelletIntakeTrailStartTemp.lengthSq() <= 1e-10) return
-    pelletIntakeTrailStartTemp.normalize()
-    pelletIntakeTrailStartTemp.multiplyScalar(
-      getTerrainRadius(pelletIntakeTrailStartTemp) + PELLET_INTAKE_TRAIL_LIFT,
-    )
-
-    pelletIntakeTrailEndTemp.copy(end)
-    if (pelletIntakeTrailEndTemp.lengthSq() <= 1e-10) return
-    pelletIntakeTrailEndTemp.normalize()
-    pelletIntakeTrailEndTemp.multiplyScalar(
-      getTerrainRadius(pelletIntakeTrailEndTemp) + PELLET_INTAKE_TRAIL_LIFT,
-    )
-
-    pelletIntakeTrailDirTemp.copy(pelletIntakeTrailEndTemp).sub(pelletIntakeTrailStartTemp)
-    const trailLength = pelletIntakeTrailDirTemp.length()
-    if (trailLength <= PELLET_INTAKE_TRAIL_MIN_LENGTH) return
-    pelletIntakeTrailDirTemp.multiplyScalar(1 / trailLength)
-
-    ensurePelletIntakeTrailCapacity(pelletIntakeTrailActiveCount + 1)
-    const visual = pelletIntakeTrails[pelletIntakeTrailActiveCount]
-    if (!visual) return
-    pelletIntakeTrailActiveCount += 1
-
-    const color = PELLET_COLOR_LINEAR[normalizePelletColorIndex(colorIndex)] ?? PELLET_COLOR_LINEAR[0]
-    const pulse = 0.94 + 0.06 * Math.sin(timeSeconds * PELLET_INTAKE_TRAIL_PULSE_SPEED + phase)
-    const radius = clamp(
-      PELLET_INTAKE_TRAIL_RADIUS_SCALE * PELLET_RADIUS * pelletSize,
-      PELLET_INTAKE_TRAIL_RADIUS_MIN,
-      PELLET_INTAKE_TRAIL_RADIUS_MAX,
-    )
-
-    visual.material.color.setRGB(color.r, color.g, color.b)
-    visual.material.opacity = clamp(PELLET_WIND_WISP_OPACITY_MAX * intensity * pulse, 0, 1)
-
-    pelletIntakeTrailCenterTemp
-      .copy(pelletIntakeTrailStartTemp)
-      .add(pelletIntakeTrailEndTemp)
-      .multiplyScalar(0.5)
-    visual.mesh.position.copy(pelletIntakeTrailCenterTemp)
-    visual.mesh.quaternion.setFromUnitVectors(pelletIntakeTrailUpAxis, pelletIntakeTrailDirTemp)
-    visual.mesh.scale.set(radius, trailLength, radius)
-    visual.mesh.visible = true
-  }
-
   const createPelletBucketPoints = (
     bucketIndex: number,
     capacity: number,
@@ -9878,48 +9410,24 @@ diffuseColor.a *= retireEdge;`,
       const pellet = pellets[i]
       pelletIdsSeen.add(pellet.id)
       const state = reconcilePelletVisualState(pellet, timeSeconds, safeDeltaSeconds)
-      const renderPelletSize = resolvePelletRenderSize(state)
       getPelletSurfacePositionFromNormal(
         pellet.id,
         state.renderNormal,
-        renderPelletSize,
+        state.renderSize,
         tempVectorC,
       )
       const targetPlayerId = pelletSuctionTargetByPelletId.get(pellet.id) ?? null
+      if (targetPlayerId && targetPlayerId.length > 0) {
+        state.lastLockTargetPlayerId = targetPlayerId
+        state.lastLockSeenAt = timeSeconds
+      }
       const targetMouth = targetPlayerId ? (pelletMouthTargets.get(targetPlayerId) ?? null) : null
       if (targetMouth) {
-        if (!state.trailStartActive || state.trailTargetPlayerId !== targetPlayerId) {
-          state.trailStartPosition.copy(tempVectorC)
-          state.trailStartActive = true
-          state.trailTargetPlayerId = targetPlayerId
-        }
         state.targetAlpha = resolvePelletIntakeTargetAlpha(tempVectorC, targetMouth)
         state.targetIntakeScale = resolvePelletIntakeTargetScale(tempVectorC, targetMouth)
-        pelletWindDirTemp.copy(tempVectorC).sub(state.trailStartPosition)
-        pelletWindDirTemp.addScaledVector(
-          state.renderNormal,
-          -pelletWindDirTemp.dot(state.renderNormal),
-        )
-        if (pelletWindDirTemp.lengthSq() > 1e-10) {
-          pelletWindDirTemp.normalize()
-          if (state.trailDirection.lengthSq() > 1e-10) {
-            smoothUnitVector(state.trailDirection, pelletWindDirTemp, safeDeltaSeconds, 18)
-          } else {
-            state.trailDirection.copy(pelletWindDirTemp)
-          }
-        }
-        state.targetTrailIntensity = 1
-        state.targetTrailLength = clamp(
-          state.trailStartPosition.distanceTo(tempVectorC),
-          PELLET_WIND_WISP_MIN_LENGTH,
-          PELLET_WIND_WISP_MAX_LENGTH,
-        )
       } else {
         state.targetAlpha = 1
         state.targetIntakeScale = 1
-        state.targetTrailIntensity = 0
-        state.targetTrailLength = state.renderTrailLength
-        state.trailTargetPlayerId = null
       }
       state.renderAlpha = smoothValue(
         state.renderAlpha,
@@ -9928,13 +9436,6 @@ diffuseColor.a *= retireEdge;`,
         PELLET_INTAKE_ALPHA_FADE_IN_RATE,
         PELLET_INTAKE_ALPHA_FADE_OUT_RATE,
       )
-      state.renderTrailIntensity = smoothValue(
-        state.renderTrailIntensity,
-        state.targetTrailIntensity,
-        safeDeltaSeconds,
-        PELLET_WIND_WISP_FADE_IN_RATE,
-        PELLET_WIND_WISP_FADE_OUT_RATE,
-      )
       state.renderIntakeScale = smoothValue(
         state.renderIntakeScale,
         state.targetIntakeScale,
@@ -9942,30 +9443,20 @@ diffuseColor.a *= retireEdge;`,
         PELLET_INTAKE_SCALE_FADE_IN_RATE,
         PELLET_INTAKE_SCALE_FADE_OUT_RATE,
       )
-      state.renderTrailLength = smoothValue(
-        state.renderTrailLength,
-        state.targetTrailLength,
-        safeDeltaSeconds,
-        12,
-        8,
-      )
-      if (
-        !targetMouth &&
-        state.renderTrailIntensity <= PELLET_WIND_WISP_MIN_VISIBLE_INTENSITY * 0.45
-      ) {
-        state.trailStartActive = false
-        state.trailDirection.set(0, 0, 0)
-        state.renderTrailLength = PELLET_WIND_WISP_MIN_LENGTH
-        state.targetTrailLength = PELLET_WIND_WISP_MIN_LENGTH
-      }
     }
 
     for (const [id, state] of pelletVisualStates) {
       if (!pelletIdsSeen.has(id)) {
+        const liveLockTarget = pelletSuctionTargetByPelletId.get(id) ?? null
+        const recentLockTarget =
+          state.lastLockTargetPlayerId &&
+          timeSeconds - state.lastLockSeenAt <= PELLET_CONSUME_RECENT_LOCK_TTL_SECS
+            ? state.lastLockTargetPlayerId
+            : null
         spawnPelletConsumeGhost(
           id,
           state,
-          pelletSuctionTargetByPelletId.get(id) ?? null,
+          liveLockTarget ?? recentLockTarget,
         )
         pelletSuctionTargetByPelletId.delete(id)
         pelletVisualStates.delete(id)
@@ -9973,7 +9464,8 @@ diffuseColor.a *= retireEdge;`,
     }
 
     for (let i = pelletConsumeGhosts.length - 1; i >= 0; i -= 1) {
-      if (!updatePelletConsumeGhost(pelletConsumeGhosts[i]!, safeDeltaSeconds)) {
+      const ghost = pelletConsumeGhosts[i]!
+      if (pelletIdsSeen.has(ghost.pelletId) || !updatePelletConsumeGhost(ghost, safeDeltaSeconds)) {
         pelletConsumeGhosts.splice(i, 1)
       }
     }
@@ -9984,7 +9476,6 @@ diffuseColor.a *= retireEdge;`,
       pelletBucketPositionArrays[i] = null
       pelletBucketOpacityArrays[i] = null
     }
-    pelletIntakeTrailActiveCount = 0
 
     // Keep large glow sprites stable near the horizon while culling the far hemisphere.
     const visibleLimit = Math.min(Math.PI - 1e-4, viewAngle + PELLET_GLOW_HORIZON_MARGIN)
@@ -10076,16 +9567,6 @@ diffuseColor.a *= retireEdge;`,
       pelletBucketPositionArrays[bucketIndex] = nextBucket.positionAttribute.array as Float32Array
       pelletBucketOpacityArrays[bucketIndex] = nextBucket.opacityAttribute.array as Float32Array
     }
-    if (pelletWindTrailBucket) {
-      if (pelletWindTrailBucket.kind === 'points') {
-        pelletWindTrailBucket.points.visible = false
-        pelletWindTrailBucket.points.geometry.setDrawRange(0, 0)
-      } else {
-        pelletWindTrailBucket.sprite.visible = false
-        pelletWindTrailBucket.sprite.count = 0
-      }
-    }
-
     for (let i = 0; i < pellets.length; i += 1) {
       const pellet = pellets[i]
       const state = pelletVisualStates.get(pellet.id)
@@ -10108,6 +9589,8 @@ diffuseColor.a *= retireEdge;`,
       const positions = pelletBucketPositionArrays[bucketIndex]
       const opacities = pelletBucketOpacityArrays[bucketIndex]
       if (!positions || !opacities) continue
+      const targetPlayerId = pelletSuctionTargetByPelletId.get(pellet.id) ?? null
+      const targetMouth = targetPlayerId ? (pelletMouthTargets.get(targetPlayerId) ?? null) : null
 
       if (override && override.id === pellet.id) {
         tempVector.copy(override.position)
@@ -10115,11 +9598,22 @@ diffuseColor.a *= retireEdge;`,
         getPelletSurfacePositionFromNormal(
           pellet.id,
           state.renderNormal,
-          renderPelletSize,
+          state.renderSize,
           tempVector,
         )
         if (visibleCount <= PELLET_WOBBLE_DISABLE_VISIBLE_THRESHOLD) {
           applyPelletWobble(pellet, tempVector, timeSeconds)
+        }
+        if (targetMouth) {
+          const intakeScaleBlend = clamp(
+            (1 - state.renderIntakeScale) / Math.max(1e-4, 1 - PELLET_INTAKE_SCALE_MIN),
+            0,
+            1,
+          )
+          const homingBlend = intakeScaleBlend
+          if (homingBlend > 1e-4) {
+            tempVector.lerp(targetMouth, homingBlend)
+          }
         }
       }
 
@@ -10130,20 +9624,6 @@ diffuseColor.a *= retireEdge;`,
       positions[pOffset + 1] = tempVector.y
       positions[pOffset + 2] = tempVector.z
       opacities[itemIndex] = clamp(state.renderAlpha, PELLET_INTAKE_ALPHA_MIN, 1)
-      if (
-        state.renderTrailIntensity > PELLET_WIND_WISP_MIN_VISIBLE_INTENSITY &&
-        state.trailStartActive
-      ) {
-        emitPelletIntakeTrail(
-          state.trailStartPosition,
-          tempVector,
-          state.colorIndex,
-          renderPelletSize,
-          state.renderTrailIntensity,
-          pelletSeedUnit(pellet.id, 0x94d049bb) * Math.PI * 2,
-          timeSeconds,
-        )
-      }
     }
     for (let i = 0; i < pelletConsumeGhosts.length; i += 1) {
       const ghost = pelletConsumeGhosts[i]!
@@ -10169,21 +9649,13 @@ diffuseColor.a *= retireEdge;`,
       positions[pOffset] = tempVector.x
       positions[pOffset + 1] = tempVector.y
       positions[pOffset + 2] = tempVector.z
-      // Keep consume ghosts non-prominent; the intake trail should carry the visual.
-      opacities[itemIndex] = 0
-      if (ghost.targetPlayerId && pelletMouthTargets.has(ghost.targetPlayerId)) {
-        const ageT = clamp(ghost.age / Math.max(1e-4, ghost.duration), 0, 1)
-        const ghostTrailIntensity = clamp(1 - smoothstep(0.34, 0.84, ageT), 0, 1)
-        emitPelletIntakeTrail(
-          ghost.startPosition,
-          tempVector,
-          ghost.colorIndex,
-          ghost.size,
-          ghostTrailIntensity,
-          pelletSeedUnit(ghost.pelletId, 0x6f65a5ad) * Math.PI * 2,
-          timeSeconds,
-        )
-      }
+      const ageT = clamp(ghost.age / Math.max(1e-4, ghost.duration), 0, 1)
+      const ghostPelletFade = ageT
+      opacities[itemIndex] = clamp(
+        lerp(1, PELLET_INTAKE_ALPHA_MIN, ghostPelletFade),
+        PELLET_INTAKE_ALPHA_MIN,
+        1,
+      )
     }
 
     for (let bucketIndex = 0; bucketIndex < PELLET_BUCKET_COUNT; bucketIndex += 1) {
@@ -10192,11 +9664,6 @@ diffuseColor.a *= retireEdge;`,
       if (!bucket) continue
       bucket.positionAttribute.needsUpdate = true
       bucket.opacityAttribute.needsUpdate = true
-    }
-    for (let i = pelletIntakeTrailActiveCount; i < pelletIntakeTrails.length; i += 1) {
-      const trail = pelletIntakeTrails[i]
-      if (!trail) continue
-      trail.mesh.visible = false
     }
 
     for (const id of pelletGroundCache.keys()) {
@@ -10247,10 +9714,6 @@ diffuseColor.a *= retireEdge;`,
         0.058,
       )
       bucket.glowMaterial.size = bucket.baseGlowSize * (1 + centered * PELLET_GLOW_SIZE_RANGE)
-    }
-    if (pelletWindTrailBucket) {
-      const windPulse = 0.95 + 0.05 * Math.sin(timeSeconds * 4.4)
-      pelletWindTrailBucket.material.opacity = PELLET_WIND_WISP_OPACITY_MAX * windPulse
     }
   }
 
@@ -11301,32 +10764,10 @@ diffuseColor.a *= retireEdge;`,
       }
       pelletBuckets[i] = null
     }
-    if (pelletWindTrailBucket) {
-      if (pelletWindTrailBucket.kind === 'points') {
-        pelletsGroup.remove(pelletWindTrailBucket.points)
-        pelletWindTrailBucket.points.geometry.dispose()
-        pelletWindTrailBucket.material.dispose()
-      } else {
-        pelletsGroup.remove(pelletWindTrailBucket.sprite)
-        pelletWindTrailBucket.material.dispose()
-      }
-      pelletWindTrailBucket = null
-    }
-    for (let i = 0; i < pelletIntakeTrails.length; i += 1) {
-      const trail = pelletIntakeTrails[i]
-      if (!trail) continue
-      pelletsGroup.remove(trail.mesh)
-      trail.material.dispose()
-    }
-    pelletIntakeTrails.length = 0
-    pelletIntakeTrailActiveCount = 0
-    pelletIntakeTrailGeometry.dispose()
-    pelletIntakeTrailTexture?.dispose()
     pelletShadowTexture?.dispose()
     pelletCoreTexture?.dispose()
     pelletInnerGlowTexture?.dispose()
     pelletGlowTexture?.dispose()
-    pelletWindWhispTexture?.dispose()
     occluderDepthMaterial.dispose()
     pelletGroundCache.clear()
     pelletMotionStates.clear()
