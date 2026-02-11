@@ -162,10 +162,6 @@ type PelletVisualState = {
   velocity: THREE.Vector3
   renderSize: number
   targetSize: number
-  renderIntakeScale: number
-  targetIntakeScale: number
-  renderAlpha: number
-  targetAlpha: number
   lastLockTargetPlayerId: string | null
   lastLockSeenAt: number
   lastServerAt: number
@@ -175,14 +171,19 @@ type PelletVisualState = {
 type PelletConsumeGhost = {
   pelletId: number
   startPosition: THREE.Vector3
+  targetPosition: THREE.Vector3
   position: THREE.Vector3
   normal: THREE.Vector3
+  startRadius: number
   startSize: number
   size: number
   colorIndex: number
   age: number
   duration: number
   targetPlayerId: string | null
+  wobblePhase: number
+  wobbleSpeed: number
+  wobbleScale: number
 }
 
 type SkyGradientTexture = {
@@ -1023,8 +1024,13 @@ const PELLET_POS_SMOOTH_RATE = 18
 const PELLET_CORRECTION_RATE = 9
 const PELLET_SIZE_SMOOTH_RATE = 14
 const PELLET_SNAP_DOT_THRESHOLD = 0.962
-const PELLET_CONSUME_GHOST_DURATION_SECS = 0.12
+const PELLET_CONSUME_GHOST_DURATION_SECS = 0.34
 const PELLET_CONSUME_RECENT_LOCK_TTL_SECS = 0.28
+const PELLET_CONSUME_GHOST_FORWARD_LEAD = HEAD_RADIUS * 1.08
+const PELLET_CONSUME_GHOST_WOBBLE_DISTANCE = PELLET_RADIUS * 0.44
+const PELLET_CONSUME_GHOST_WOBBLE_SPEED_MIN = 6.8
+const PELLET_CONSUME_GHOST_WOBBLE_SPEED_MAX = 13.2
+const PELLET_CONSUME_GHOST_OPACITY_FADE_START = 0.84
 const PELLET_GLOW_PULSE_SPEED = 9.2
 const PELLET_SHADOW_OPACITY_BASE = 0.9
 const PELLET_SHADOW_OPACITY_RANGE = 0.008
@@ -1039,14 +1045,6 @@ const PELLET_GLOW_OPACITY_RANGE = 0.034
 const PELLET_GLOW_SIZE_RANGE = 0.065
 const PELLET_GLOW_PHASE_STEP = 0.73
 const PELLET_GLOW_HORIZON_MARGIN = 0.1
-const PELLET_INTAKE_ALPHA_MIN = 0.8
-const PELLET_INTAKE_ALPHA_NEAR_DISTANCE = HEAD_RADIUS * 0.86
-const PELLET_INTAKE_ALPHA_FAR_DISTANCE = PLANET_RADIUS * 0.11 * 1.08
-const PELLET_INTAKE_ALPHA_FADE_IN_RATE = 9.5
-const PELLET_INTAKE_ALPHA_FADE_OUT_RATE = 17
-const PELLET_INTAKE_SCALE_MIN = 1 / 3
-const PELLET_INTAKE_SCALE_FADE_IN_RATE = 11
-const PELLET_INTAKE_SCALE_FADE_OUT_RATE = 16
 const TONGUE_MAX_LENGTH = HEAD_RADIUS * 2.8
 const TONGUE_MAX_RANGE = HEAD_RADIUS * 3.1
 const TONGUE_NEAR_RANGE = HEAD_RADIUS * 2.4
@@ -7009,10 +7007,6 @@ diffuseColor.a *= retireEdge;`,
         velocity: new THREE.Vector3(),
         renderSize: safeSize,
         targetSize: safeSize,
-        renderIntakeScale: 1,
-        targetIntakeScale: 1,
-        renderAlpha: 1,
-        targetAlpha: 1,
         lastLockTargetPlayerId: null,
         lastLockSeenAt: Number.NEGATIVE_INFINITY,
         lastServerAt: timeSeconds,
@@ -7079,45 +7073,24 @@ diffuseColor.a *= retireEdge;`,
     return state
   }
 
-  const resolvePelletIntakeBlend = (
-    pelletPosition: THREE.Vector3,
-    mouthTarget: THREE.Vector3,
-  ) => {
-    const distanceToMouth = pelletPosition.distanceTo(mouthTarget)
-    return clamp(
-      1 -
-      smoothstep(
-        PELLET_INTAKE_ALPHA_NEAR_DISTANCE,
-        PELLET_INTAKE_ALPHA_FAR_DISTANCE,
-        distanceToMouth,
-      ),
-      0,
-      1,
-    )
-  }
-
-  const resolvePelletIntakeTargetAlpha = (
-    pelletPosition: THREE.Vector3,
-    mouthTarget: THREE.Vector3,
-  ) => {
-    const blend = resolvePelletIntakeBlend(pelletPosition, mouthTarget)
-    return clamp(lerp(1, PELLET_INTAKE_ALPHA_MIN, blend), PELLET_INTAKE_ALPHA_MIN, 1)
-  }
-
-  const resolvePelletIntakeTargetScale = (
-    pelletPosition: THREE.Vector3,
-    mouthTarget: THREE.Vector3,
-  ) => {
-    const blend = resolvePelletIntakeBlend(pelletPosition, mouthTarget)
-    return clamp(lerp(1, PELLET_INTAKE_SCALE_MIN, blend), PELLET_INTAKE_SCALE_MIN, 1)
-  }
-
   const resolvePelletRenderSize = (state: PelletVisualState) => {
-    return clamp(
-      state.renderSize * state.renderIntakeScale,
-      PELLET_SIZE_MIN * PELLET_INTAKE_SCALE_MIN,
-      PELLET_SIZE_MAX,
-    )
+    return clamp(state.renderSize, PELLET_SIZE_MIN, PELLET_SIZE_MAX)
+  }
+
+  const resolveConsumeGhostTarget = (
+    targetPlayerId: string | null,
+    consumeBlend: number,
+    out: THREE.Vector3,
+  ) => {
+    if (!targetPlayerId || targetPlayerId.length <= 0) return false
+    const mouthTarget = pelletMouthTargets.get(targetPlayerId)
+    if (!mouthTarget) return false
+    out.copy(mouthTarget)
+    const forward = lastForwardDirections.get(targetPlayerId)
+    if (forward && forward.lengthSq() > 1e-8) {
+      out.addScaledVector(forward, PELLET_CONSUME_GHOST_FORWARD_LEAD * Math.max(0, 1 - consumeBlend))
+    }
+    return true
   }
 
   const spawnPelletConsumeGhost = (
@@ -7133,33 +7106,55 @@ diffuseColor.a *= retireEdge;`,
       startSize,
       tempVector,
     )
+    const startRadius = tempVector.length()
     const targetPlayerId = lockedTargetPlayerId
     if (!targetPlayerId || targetPlayerId.length <= 0) return
+    if (!resolveConsumeGhostTarget(targetPlayerId, 0, tempVectorB)) return
     const normal = tempVector.clone().normalize()
     const existingGhost = pelletConsumeGhosts.find((ghost) => ghost.pelletId === pelletId) ?? null
+    if (existingGhost && existingGhost.age < existingGhost.duration) {
+      return
+    }
+    const wobbleSpeed = lerp(
+      PELLET_CONSUME_GHOST_WOBBLE_SPEED_MIN,
+      PELLET_CONSUME_GHOST_WOBBLE_SPEED_MAX,
+      pelletSeedUnit(pelletId, 0x16f11fe8),
+    )
+    const wobbleScale = lerp(0.72, 1.16, pelletSeedUnit(pelletId, 0x51f15e53))
+    const wobblePhase = pelletSeedUnit(pelletId, 0x9e3779b1) * Math.PI * 2
     if (existingGhost) {
       existingGhost.startPosition.copy(tempVector)
+      existingGhost.targetPosition.copy(tempVectorB)
       existingGhost.position.copy(tempVector)
       existingGhost.normal.copy(normal)
+      existingGhost.startRadius = startRadius
       existingGhost.startSize = startSize
       existingGhost.size = startSize
       existingGhost.colorIndex = state.colorIndex
       existingGhost.age = 0
       existingGhost.duration = PELLET_CONSUME_GHOST_DURATION_SECS
       existingGhost.targetPlayerId = targetPlayerId
+      existingGhost.wobblePhase = wobblePhase
+      existingGhost.wobbleSpeed = wobbleSpeed
+      existingGhost.wobbleScale = wobbleScale
       return
     }
     pelletConsumeGhosts.push({
       pelletId,
       startPosition: tempVector.clone(),
+      targetPosition: tempVectorB.clone(),
       position: tempVector.clone(),
       normal,
+      startRadius,
       startSize,
       size: startSize,
       colorIndex: state.colorIndex,
       age: 0,
       duration: PELLET_CONSUME_GHOST_DURATION_SECS,
       targetPlayerId,
+      wobblePhase,
+      wobbleSpeed,
+      wobbleScale,
     })
     if (pelletConsumeGhosts.length > 1024) {
       pelletConsumeGhosts.splice(0, pelletConsumeGhosts.length - 1024)
@@ -7169,19 +7164,37 @@ diffuseColor.a *= retireEdge;`,
   const updatePelletConsumeGhost = (ghost: PelletConsumeGhost, deltaSeconds: number) => {
     ghost.age += Math.max(0, deltaSeconds)
     const t = clamp(ghost.age / Math.max(1e-4, ghost.duration), 0, 1)
-    if (ghost.targetPlayerId) {
-      const target = pelletMouthTargets.get(ghost.targetPlayerId)
-      if (target) {
-        ghost.position.copy(ghost.startPosition).lerp(target, t)
-        if (ghost.position.lengthSq() > 1e-8) {
-          ghost.normal.copy(ghost.position).normalize()
-        }
-      } else {
-        return false
+    if (t >= 1) {
+      return false
+    }
+    const consumeBlend = t * t
+    if (resolveConsumeGhostTarget(ghost.targetPlayerId, consumeBlend, tempVectorE)) {
+      ghost.targetPosition.copy(tempVectorE)
+    }
+    const targetRadius = Math.max(1e-6, ghost.targetPosition.length())
+    const renderRadius = lerp(ghost.startRadius, targetRadius, consumeBlend)
+    ghost.position.copy(ghost.startPosition).lerp(ghost.targetPosition, consumeBlend)
+    if (ghost.position.lengthSq() <= 1e-8) {
+      ghost.position.copy(ghost.targetPosition)
+    }
+    if (ghost.position.lengthSq() > 1e-8) {
+      ghost.position.normalize().multiplyScalar(renderRadius)
+      ghost.normal.copy(ghost.position).normalize()
+    }
+    const wobbleStrength = PELLET_CONSUME_GHOST_WOBBLE_DISTANCE * ghost.wobbleScale * (1 - t)
+    if (wobbleStrength > 1e-6 && ghost.normal.lengthSq() > 1e-8) {
+      buildTangentBasis(ghost.normal, pelletWobbleTangentTemp, pelletWobbleBitangentTemp)
+      const wobbleAngle = ghost.wobblePhase + ghost.age * ghost.wobbleSpeed
+      ghost.position
+        .addScaledVector(pelletWobbleTangentTemp, Math.cos(wobbleAngle) * wobbleStrength)
+        .addScaledVector(pelletWobbleBitangentTemp, Math.sin(wobbleAngle) * wobbleStrength)
+      if (ghost.position.lengthSq() > 1e-8) {
+        ghost.position.normalize().multiplyScalar(renderRadius)
+        ghost.normal.copy(ghost.position).normalize()
       }
     }
-    ghost.size = ghost.startSize * lerp(1, PELLET_INTAKE_SCALE_MIN, t)
-    return ghost.age < ghost.duration
+    ghost.size = Math.max(0.01, ghost.startSize * Math.max(0, 1 - t * consumeBlend))
+    return true
   }
 
   const pelletSeedUnit = (id: number, salt: number) => {
@@ -8762,8 +8775,12 @@ diffuseColor.a *= retireEdge;`,
     )
     if (player.alive && visual.group.visible) {
       const mouthTarget = pelletMouthTargets.get(player.id) ?? new THREE.Vector3()
-      mouthTarget.copy(headPosition)
+      mouthTarget
+        .copy(headPosition)
+        .addScaledVector(forward, TONGUE_MOUTH_FORWARD * headScale)
+        .addScaledVector(headNormal, TONGUE_MOUTH_OUT * headScale)
       pelletMouthTargets.set(player.id, mouthTarget)
+      visual.intakeConeHoldUntilMs = 0
       updateIntakeCone(
         visual,
         false,
@@ -9410,39 +9427,11 @@ diffuseColor.a *= retireEdge;`,
       const pellet = pellets[i]
       pelletIdsSeen.add(pellet.id)
       const state = reconcilePelletVisualState(pellet, timeSeconds, safeDeltaSeconds)
-      getPelletSurfacePositionFromNormal(
-        pellet.id,
-        state.renderNormal,
-        state.renderSize,
-        tempVectorC,
-      )
       const targetPlayerId = pelletSuctionTargetByPelletId.get(pellet.id) ?? null
       if (targetPlayerId && targetPlayerId.length > 0) {
         state.lastLockTargetPlayerId = targetPlayerId
         state.lastLockSeenAt = timeSeconds
       }
-      const targetMouth = targetPlayerId ? (pelletMouthTargets.get(targetPlayerId) ?? null) : null
-      if (targetMouth) {
-        state.targetAlpha = resolvePelletIntakeTargetAlpha(tempVectorC, targetMouth)
-        state.targetIntakeScale = resolvePelletIntakeTargetScale(tempVectorC, targetMouth)
-      } else {
-        state.targetAlpha = 1
-        state.targetIntakeScale = 1
-      }
-      state.renderAlpha = smoothValue(
-        state.renderAlpha,
-        state.targetAlpha,
-        safeDeltaSeconds,
-        PELLET_INTAKE_ALPHA_FADE_IN_RATE,
-        PELLET_INTAKE_ALPHA_FADE_OUT_RATE,
-      )
-      state.renderIntakeScale = smoothValue(
-        state.renderIntakeScale,
-        state.targetIntakeScale,
-        safeDeltaSeconds,
-        PELLET_INTAKE_SCALE_FADE_IN_RATE,
-        PELLET_INTAKE_SCALE_FADE_OUT_RATE,
-      )
     }
 
     for (const [id, state] of pelletVisualStates) {
@@ -9589,8 +9578,6 @@ diffuseColor.a *= retireEdge;`,
       const positions = pelletBucketPositionArrays[bucketIndex]
       const opacities = pelletBucketOpacityArrays[bucketIndex]
       if (!positions || !opacities) continue
-      const targetPlayerId = pelletSuctionTargetByPelletId.get(pellet.id) ?? null
-      const targetMouth = targetPlayerId ? (pelletMouthTargets.get(targetPlayerId) ?? null) : null
 
       if (override && override.id === pellet.id) {
         tempVector.copy(override.position)
@@ -9604,17 +9591,6 @@ diffuseColor.a *= retireEdge;`,
         if (visibleCount <= PELLET_WOBBLE_DISABLE_VISIBLE_THRESHOLD) {
           applyPelletWobble(pellet, tempVector, timeSeconds)
         }
-        if (targetMouth) {
-          const intakeScaleBlend = clamp(
-            (1 - state.renderIntakeScale) / Math.max(1e-4, 1 - PELLET_INTAKE_SCALE_MIN),
-            0,
-            1,
-          )
-          const homingBlend = intakeScaleBlend
-          if (homingBlend > 1e-4) {
-            tempVector.lerp(targetMouth, homingBlend)
-          }
-        }
       }
 
       const itemIndex = pelletBucketOffsets[bucketIndex]
@@ -9623,7 +9599,7 @@ diffuseColor.a *= retireEdge;`,
       positions[pOffset] = tempVector.x
       positions[pOffset + 1] = tempVector.y
       positions[pOffset + 2] = tempVector.z
-      opacities[itemIndex] = clamp(state.renderAlpha, PELLET_INTAKE_ALPHA_MIN, 1)
+      opacities[itemIndex] = 1
     }
     for (let i = 0; i < pelletConsumeGhosts.length; i += 1) {
       const ghost = pelletConsumeGhosts[i]!
@@ -9650,10 +9626,9 @@ diffuseColor.a *= retireEdge;`,
       positions[pOffset + 1] = tempVector.y
       positions[pOffset + 2] = tempVector.z
       const ageT = clamp(ghost.age / Math.max(1e-4, ghost.duration), 0, 1)
-      const ghostPelletFade = ageT
       opacities[itemIndex] = clamp(
-        lerp(1, PELLET_INTAKE_ALPHA_MIN, ghostPelletFade),
-        PELLET_INTAKE_ALPHA_MIN,
+        1 - smoothstep(PELLET_CONSUME_GHOST_OPACITY_FADE_START, 1, ageT),
+        0,
         1,
       )
     }

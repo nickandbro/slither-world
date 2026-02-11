@@ -1772,7 +1772,7 @@ impl RoomState {
         let lock_cone_cos = SMALL_PELLET_LOCK_CONE_ANGLE.cos();
         let mut best: Option<(String, HeadAttractor, f64)> = None;
         for (id, attractor) in attractors {
-            let head_dot = dot(attractor.head, pellet);
+            let head_dot = clamp(dot(attractor.head, pellet), -1.0, 1.0);
             if head_dot < attract_cos {
                 continue;
             }
@@ -1792,9 +1792,10 @@ impl RoomState {
                     continue;
                 }
             }
+            let mouth_dot = clamp(dot(attractor.mouth, pellet), -1.0, 1.0);
             match best {
-                Some((_, _, best_dot)) if head_dot <= best_dot => {}
-                _ => best = Some((id.clone(), *attractor, head_dot)),
+                Some((_, _, best_dot)) if mouth_dot <= best_dot => {}
+                _ => best = Some((id.clone(), *attractor, mouth_dot)),
             }
         }
         best.map(|(id, attractor, _)| (id, attractor))
@@ -2060,11 +2061,15 @@ impl RoomState {
             let target = match pellet_state {
                 PelletState::Attracting {
                     ref target_player_id,
-                } => attractors
-                    .get(target_player_id)
-                    .copied()
-                    .map(|attractor| (target_player_id.clone(), attractor))
-                    .or_else(|| Self::find_pellet_target(self.pellets[i].normal, &attractors)),
+                } => {
+                    // Preserve the current intake lock while that target remains valid/alive.
+                    // Only reacquire if the current lock target is no longer available.
+                    attractors
+                        .get(target_player_id)
+                        .copied()
+                        .map(|attractor| (target_player_id.clone(), attractor))
+                        .or_else(|| Self::find_pellet_target(self.pellets[i].normal, &attractors))
+                }
                 PelletState::Idle => Self::find_pellet_target(self.pellets[i].normal, &attractors),
                 PelletState::Evasive { .. } => None,
             };
@@ -2080,7 +2085,8 @@ impl RoomState {
                     target_player_id: target_id.clone(),
                 };
                 if should_queue_lock {
-                    self.pending_pellet_locks.push((pellet_id, target_id.clone()));
+                    self.pending_pellet_locks
+                        .push((pellet_id, target_id.clone()));
                 }
 
                 let to_mouth_dot = clamp(dot(pellet.normal, attractor.mouth), -1.0, 1.0);
@@ -4435,6 +4441,240 @@ mod tests {
             PelletState::Evasive { .. } => panic!("pellet should not become evasive"),
         }
         assert!(pellet.current_size < pellet.base_size);
+    }
+
+    #[test]
+    fn small_pellet_targeting_prefers_nearest_mouth() {
+        let mut state = make_state();
+        let player_a_id = "pellet-target-a".to_string();
+        let player_b_id = "pellet-target-b".to_string();
+
+        let head_a = normalize(Point {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        });
+        let trailing_a = normalize(Point {
+            x: 1.0,
+            y: -0.05,
+            z: 0.0,
+        });
+        state.players.insert(
+            player_a_id.clone(),
+            make_player(&player_a_id, make_snake_with_head(head_a, trailing_a, 2)),
+        );
+
+        let head_b = normalize(Point {
+            x: 1.0,
+            y: 0.03,
+            z: 0.0,
+        });
+        let trailing_b = normalize(Point {
+            x: 1.0,
+            y: -0.02,
+            z: 0.0,
+        });
+        state.players.insert(
+            player_b_id.clone(),
+            make_player(&player_b_id, make_snake_with_head(head_b, trailing_b, 2)),
+        );
+
+        let pellet_start = normalize(Point {
+            x: 1.0,
+            y: 0.04,
+            z: 0.0,
+        });
+        state.pellets.push(make_pellet(901, pellet_start));
+
+        state.update_small_pellets(0.0001);
+
+        assert_eq!(state.pellets.len(), 1);
+        match &state.pellets[0].state {
+            PelletState::Attracting { target_player_id } => {
+                assert_eq!(target_player_id, &player_b_id);
+            }
+            PelletState::Idle => panic!("pellet should lock to the nearest mouth"),
+            PelletState::Evasive { .. } => panic!("pellet should not become evasive"),
+        }
+        assert_eq!(state.pending_pellet_locks.len(), 1);
+        assert_eq!(state.pending_pellet_locks[0], (901, player_b_id));
+    }
+
+    #[test]
+    fn small_pellet_targeting_ignores_pellets_outside_head_cone() {
+        let mut state = make_state();
+        let player_id = "pellet-cone-player".to_string();
+        let toward_up = Point {
+            x: 0.0,
+            y: 1.0,
+            z: 0.0,
+        };
+        let head = Point {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        // Trailing toward +Y makes the forward direction point toward -Y (away from pellet).
+        let trailing = rotate_toward(head, toward_up, 0.05);
+        state.players.insert(
+            player_id.clone(),
+            make_player(&player_id, make_snake_with_head(head, trailing, 2)),
+        );
+
+        let pellet_start = rotate_toward(head, toward_up, SMALL_PELLET_ATTRACT_RADIUS * 0.8);
+        state.pellets.push(make_pellet(904, pellet_start));
+
+        state.update_small_pellets(0.0001);
+
+        assert_eq!(state.pellets.len(), 1);
+        match &state.pellets[0].state {
+            PelletState::Idle => {}
+            PelletState::Attracting { .. } => panic!("pellet outside the 90-degree head cone should not lock"),
+            PelletState::Evasive { .. } => panic!("pellet should not become evasive"),
+        }
+        assert!(state.pending_pellet_locks.is_empty());
+    }
+
+    #[test]
+    fn small_pellet_lock_persists_for_boosting_target_while_valid() {
+        let mut state = make_state();
+        let player_a_id = "pellet-lock-boost-a".to_string();
+        let player_b_id = "pellet-lock-boost-b".to_string();
+        let toward_up = Point {
+            x: 0.0,
+            y: 1.0,
+            z: 0.0,
+        };
+        let toward_down = Point {
+            x: 0.0,
+            y: -1.0,
+            z: 0.0,
+        };
+
+        let head_a = Point {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        let trailing_a = rotate_toward(head_a, toward_down, 0.05);
+        state.players.insert(
+            player_a_id.clone(),
+            make_player(&player_a_id, make_snake_with_head(head_a, trailing_a, 2)),
+        );
+        {
+            let player_a = state
+                .players
+                .get_mut(&player_a_id)
+                .expect("boosting target exists");
+            player_a.boost = true;
+            player_a.is_boosting = true;
+        }
+
+        let head_b = rotate_toward(head_a, toward_up, SMALL_PELLET_ATTRACT_RADIUS * 0.7);
+        let trailing_b = rotate_toward(head_b, toward_up, 0.05);
+        state.players.insert(
+            player_b_id.clone(),
+            make_player(&player_b_id, make_snake_with_head(head_b, trailing_b, 2)),
+        );
+
+        let pellet_start = rotate_toward(head_a, toward_up, SMALL_PELLET_ATTRACT_RADIUS * 0.2);
+        state.pellets.push(make_pellet(902, pellet_start));
+
+        state.update_small_pellets(0.0001);
+        assert_eq!(state.pellets.len(), 1);
+        match &state.pellets[0].state {
+            PelletState::Attracting { target_player_id } => {
+                assert_eq!(target_player_id, &player_a_id);
+            }
+            PelletState::Idle => panic!("pellet should lock onto player A first"),
+            PelletState::Evasive { .. } => panic!("pellet should not become evasive"),
+        }
+
+        // Move the pellet very close to player B's mouth; lock should remain on player A because
+        // the existing target is still valid/alive.
+        state.pellets[0].normal =
+            rotate_toward(head_b, toward_up, SMALL_PELLET_ATTRACT_RADIUS * 0.01);
+        state.update_small_pellets(0.0001);
+
+        assert_eq!(state.pellets.len(), 1);
+        match &state.pellets[0].state {
+            PelletState::Attracting { target_player_id } => {
+                assert_eq!(target_player_id, &player_a_id);
+            }
+            PelletState::Idle => panic!("pellet lock should persist on player A"),
+            PelletState::Evasive { .. } => panic!("pellet should not become evasive"),
+        }
+        assert_eq!(state.pending_pellet_locks.len(), 1);
+        assert_eq!(state.pending_pellet_locks[0], (902, player_a_id));
+    }
+
+    #[test]
+    fn small_pellet_lock_retargets_when_target_becomes_invalid() {
+        let mut state = make_state();
+        let player_a_id = "pellet-lock-retarget-a".to_string();
+        let player_b_id = "pellet-lock-retarget-b".to_string();
+        let toward_up = Point {
+            x: 0.0,
+            y: 1.0,
+            z: 0.0,
+        };
+        let toward_down = Point {
+            x: 0.0,
+            y: -1.0,
+            z: 0.0,
+        };
+
+        let head_a = Point {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        let trailing_a = rotate_toward(head_a, toward_down, 0.05);
+        state.players.insert(
+            player_a_id.clone(),
+            make_player(&player_a_id, make_snake_with_head(head_a, trailing_a, 2)),
+        );
+
+        let head_b = rotate_toward(head_a, toward_up, SMALL_PELLET_ATTRACT_RADIUS * 0.7);
+        let trailing_b = rotate_toward(head_b, toward_up, 0.05);
+        state.players.insert(
+            player_b_id.clone(),
+            make_player(&player_b_id, make_snake_with_head(head_b, trailing_b, 2)),
+        );
+
+        let pellet_start = rotate_toward(head_a, toward_up, SMALL_PELLET_ATTRACT_RADIUS * 0.2);
+        state.pellets.push(make_pellet(903, pellet_start));
+
+        state.update_small_pellets(0.0001);
+        assert_eq!(state.pellets.len(), 1);
+        match &state.pellets[0].state {
+            PelletState::Attracting { target_player_id } => {
+                assert_eq!(target_player_id, &player_a_id);
+            }
+            PelletState::Idle => panic!("pellet should lock onto player A first"),
+            PelletState::Evasive { .. } => panic!("pellet should not become evasive"),
+        }
+
+        state
+            .players
+            .get_mut(&player_a_id)
+            .expect("player A exists")
+            .alive = false;
+        state.pellets[0].normal =
+            rotate_toward(head_b, toward_down, SMALL_PELLET_ATTRACT_RADIUS * 0.3);
+        state.update_small_pellets(0.0001);
+
+        assert_eq!(state.pellets.len(), 1);
+        match &state.pellets[0].state {
+            PelletState::Attracting { target_player_id } => {
+                assert_eq!(target_player_id, &player_b_id);
+            }
+            PelletState::Idle => panic!("pellet should retarget to player B"),
+            PelletState::Evasive { .. } => panic!("pellet should not become evasive"),
+        }
+        assert_eq!(state.pending_pellet_locks.len(), 2);
+        assert_eq!(state.pending_pellet_locks[0], (903, player_a_id));
+        assert_eq!(state.pending_pellet_locks[1], (903, player_b_id));
     }
 
     #[test]

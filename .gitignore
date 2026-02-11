@@ -36,3 +36,4 @@ docs/
 designs/
 designs/
 output/
+.playwright-cli/
