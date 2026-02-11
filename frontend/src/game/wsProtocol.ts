@@ -13,7 +13,7 @@ export type PlayerMeta = {
   skinColors?: string[]
 }
 
-const VERSION = 15
+const VERSION = 16
 
 const TYPE_JOIN = 0x01
 const TYPE_INPUT = 0x02
@@ -26,6 +26,7 @@ const TYPE_PLAYER_META = 0x12
 const TYPE_PELLET_DELTA = 0x13
 const TYPE_PELLET_RESET = 0x14
 const TYPE_STATE_DELTA = 0x15
+const TYPE_PELLET_LOCK = 0x16
 
 const FLAG_JOIN_PLAYER_ID = 1 << 0
 const FLAG_JOIN_NAME = 1 << 1
@@ -72,6 +73,12 @@ export type DecodedMessage =
       adds: PelletSnapshot[]
       updates: PelletSnapshot[]
       removes: number[]
+    }
+  | {
+      type: 'pellet_lock'
+      now: number
+      seq: number
+      locks: Array<{ pelletId: number; targetNetId: number }>
     }
   | { type: 'meta' }
 
@@ -262,6 +269,8 @@ export function decodeServerMessage(
       return decodePelletReset(reader)
     case TYPE_PELLET_DELTA:
       return decodePelletDelta(reader)
+    case TYPE_PELLET_LOCK:
+      return decodePelletLock(reader)
     default:
       return null
   }
@@ -643,6 +652,21 @@ function decodePelletDelta(reader: Reader): DecodedMessage | null {
     removes.push(id)
   }
   return { type: 'pellet_delta', now, seq, adds, updates, removes }
+}
+
+function decodePelletLock(reader: Reader): DecodedMessage | null {
+  const now = reader.readI64()
+  const seq = reader.readU32()
+  const lockCount = reader.readU16()
+  if (now === null || seq === null || lockCount === null) return null
+  const locks: Array<{ pelletId: number; targetNetId: number }> = []
+  for (let i = 0; i < lockCount; i += 1) {
+    const pelletId = reader.readU32()
+    const targetNetId = reader.readU16()
+    if (pelletId === null || targetNetId === null) return null
+    locks.push({ pelletId, targetNetId })
+  }
+  return { type: 'pellet_lock', now, seq, locks }
 }
 
 function readPlayerStates(

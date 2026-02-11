@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import { PointsNodeMaterial, WebGPURenderer } from 'three/webgpu'
-import { instancedDynamicBufferAttribute } from 'three/tsl'
+import { instancedDynamicBufferAttribute, materialOpacity } from 'three/tsl'
 import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils'
 import type {
   Camera,
@@ -34,6 +34,10 @@ type SnakeVisual = {
   boostDraftMaterial: THREE.MeshBasicMaterial
   boostDraftPhase: number
   boostDraftIntensity: number
+  intakeCone: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>
+  intakeConeMaterial: THREE.MeshBasicMaterial
+  intakeConeIntensity: number
+  intakeConeHoldUntilMs: number
   nameplate: THREE.Sprite
   nameplateMaterial: THREE.SpriteMaterial
   nameplateTexture: THREE.CanvasTexture | null
@@ -112,6 +116,7 @@ type PelletSpriteBucketPoints = {
   innerGlowMaterial: THREE.PointsMaterial
   glowMaterial: THREE.PointsMaterial
   positionAttribute: THREE.BufferAttribute
+  opacityAttribute: THREE.BufferAttribute
   capacity: number
   baseShadowSize: number
   baseCoreSize: number
@@ -132,6 +137,7 @@ type PelletSpriteBucketSprites = {
   innerGlowMaterial: PointsNodeMaterial
   glowMaterial: PointsNodeMaterial
   positionAttribute: THREE.BufferAttribute
+  opacityAttribute: THREE.InstancedBufferAttribute
   capacity: number
   baseShadowSize: number
   baseCoreSize: number
@@ -147,6 +153,30 @@ type PelletMotionState = {
   gfrOffset: number
   gr: number
   wsp: number
+}
+
+type PelletVisualState = {
+  renderNormal: THREE.Vector3
+  targetNormal: THREE.Vector3
+  lastServerNormal: THREE.Vector3
+  velocity: THREE.Vector3
+  renderSize: number
+  targetSize: number
+  renderAlpha: number
+  targetAlpha: number
+  lastServerAt: number
+  colorIndex: number
+}
+
+type PelletConsumeGhost = {
+  position: THREE.Vector3
+  normal: THREE.Vector3
+  startSize: number
+  size: number
+  colorIndex: number
+  age: number
+  duration: number
+  targetPlayerId: string | null
 }
 
 type SkyGradientTexture = {
@@ -253,6 +283,48 @@ const createBoostDraftTexture = () => {
       const noise = 0.84 + 0.16 * (swirlA * 0.6 + swirlB * 0.4)
       const equatorFade = 1 - smoothstep(0.72, 1, v)
       const alpha = clamp(noise * equatorFade, 0, 1)
+      const alphaByte = Math.round(alpha * 255)
+      const offset = (y * width + x) * 4
+      imageData.data[offset] = 255
+      imageData.data[offset + 1] = 255
+      imageData.data[offset + 2] = 255
+      imageData.data[offset + 3] = alphaByte
+    }
+  }
+
+  ctx.putImageData(imageData, 0, 0)
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.wrapS = THREE.ClampToEdgeWrapping
+  texture.wrapT = THREE.ClampToEdgeWrapping
+  texture.magFilter = THREE.LinearFilter
+  texture.minFilter = THREE.LinearFilter
+  texture.colorSpace = THREE.NoColorSpace
+  texture.needsUpdate = true
+  return texture
+}
+
+const createIntakeConeTexture = () => {
+  const canvas = document.createElement('canvas')
+  canvas.width = INTAKE_CONE_TEXTURE_WIDTH
+  canvas.height = INTAKE_CONE_TEXTURE_HEIGHT
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+
+  const width = canvas.width
+  const height = canvas.height
+  const imageData = ctx.createImageData(width, height)
+  for (let y = 0; y < height; y += 1) {
+    const v = 1 - (height > 1 ? y / (height - 1) : 0)
+    const coneHalfWidth = Math.max(0.04, v * 0.98)
+    const edgeSoftness = Math.max(0.03, coneHalfWidth * 0.18)
+    const startFade = smoothstep(0.01, 0.16, v)
+    const tipFade = 1 - smoothstep(0.7, 1, v)
+    const axialFade = Math.pow(1 - v, 0.34) * startFade * tipFade
+    for (let x = 0; x < width; x += 1) {
+      const u = (width > 1 ? x / (width - 1) : 0) * 2 - 1
+      const absU = Math.abs(u)
+      const edgeFade = 1 - smoothstep(coneHalfWidth - edgeSoftness, coneHalfWidth, absU)
+      const alpha = clamp(edgeFade * axialFade, 0, 1)
       const alphaByte = Math.round(alpha * 255)
       const offset = (y * width + x) * 4
       imageData.data[offset] = 255
@@ -753,6 +825,7 @@ export type RenderScene = {
   setMenuPreviewVisible: (visible: boolean) => void
   setMenuPreviewSkin: (colors: string[] | null, previewLen?: number) => void
   setMenuPreviewOrbit: (yaw: number, pitch: number) => void
+  setPelletSuctionLocks?: (locks: ReadonlyMap<number, string> | null) => void
   // WebGPU-only quality knob (offscreen MSAA samples). No-op on WebGL.
   setWebgpuWorldSamples?: (samples: number) => void
   setEnvironment: (environment: Environment) => void
@@ -939,6 +1012,14 @@ const PELLET_WOBBLE_DISTANCE = PELLET_RADIUS * 0.45
 const PELLET_WOBBLE_GFR_RATE = 1000 / 8
 const PELLET_WOBBLE_WSP_RANGE = 0.0225
 const PELLET_WOBBLE_DISABLE_VISIBLE_THRESHOLD = 1800
+const PELLET_PREDICTION_MAX_HORIZON_SECS = 0.22
+const PELLET_POS_SMOOTH_RATE = 18
+const PELLET_CORRECTION_RATE = 9
+const PELLET_SIZE_SMOOTH_RATE = 14
+const PELLET_SNAP_DOT_THRESHOLD = 0.962
+const PELLET_CONSUME_GHOST_DURATION_SECS = 0.12
+const PELLET_CONSUME_GHOST_HOMING_RATE = 24
+const PELLET_CONSUME_GHOST_MAX_TARGET_DISTANCE = HEAD_RADIUS * 5.5
 const PELLET_GLOW_PULSE_SPEED = 9.2
 const PELLET_SHADOW_OPACITY_BASE = 0.9
 const PELLET_SHADOW_OPACITY_RANGE = 0.008
@@ -953,6 +1034,11 @@ const PELLET_GLOW_OPACITY_RANGE = 0.034
 const PELLET_GLOW_SIZE_RANGE = 0.065
 const PELLET_GLOW_PHASE_STEP = 0.73
 const PELLET_GLOW_HORIZON_MARGIN = 0.1
+const PELLET_INTAKE_ALPHA_MIN = 0.3
+const PELLET_INTAKE_ALPHA_NEAR_DISTANCE = HEAD_RADIUS * 0.86
+const PELLET_INTAKE_ALPHA_FAR_DISTANCE = PLANET_RADIUS * 0.11 * 1.08
+const PELLET_INTAKE_ALPHA_FADE_IN_RATE = 9.5
+const PELLET_INTAKE_ALPHA_FADE_OUT_RATE = 17
 const TONGUE_MAX_LENGTH = HEAD_RADIUS * 2.8
 const TONGUE_MAX_RANGE = HEAD_RADIUS * 3.1
 const TONGUE_NEAR_RANGE = HEAD_RADIUS * 2.4
@@ -1005,6 +1091,16 @@ const BOOST_DRAFT_FADE_IN_RATE = 8
 const BOOST_DRAFT_FADE_OUT_RATE = 5.5
 const BOOST_DRAFT_MIN_ACTIVE_OPACITY = 0.01
 const BOOST_DRAFT_LOCAL_FORWARD_AXIS = new THREE.Vector3(0, 1, 0)
+const INTAKE_CONE_TEXTURE_WIDTH = 256
+const INTAKE_CONE_TEXTURE_HEIGHT = 192
+const INTAKE_CONE_BASE_LENGTH = PLANET_RADIUS * 0.11 * 1.1
+const INTAKE_CONE_BASE_WIDTH = INTAKE_CONE_BASE_LENGTH * 0.72
+const INTAKE_CONE_LIFT = HEAD_RADIUS * 0.09
+const INTAKE_CONE_MAX_OPACITY = 0.22
+const INTAKE_CONE_FADE_IN_RATE = 10.5
+const INTAKE_CONE_FADE_OUT_RATE = 7.2
+const INTAKE_CONE_DISENGAGE_HOLD_MS = 120
+const INTAKE_CONE_VIEW_MARGIN = 0.06
 const DIGESTION_BULGE_MIN = 0.22
 const DIGESTION_BULGE_MAX = 0.54
 const DIGESTION_BULGE_GIRTH_MIN_SCALE = 0.25
@@ -1132,6 +1228,21 @@ const smoothValue = (current: number, target: number, deltaSeconds: number, rate
   const rate = target >= current ? rateUp : rateDown
   const alpha = 1 - Math.exp(-rate * Math.max(0, deltaSeconds))
   return current + (target - current) * alpha
+}
+
+const smoothUnitVector = (
+  current: THREE.Vector3,
+  target: THREE.Vector3,
+  deltaSeconds: number,
+  rate: number,
+) => {
+  const alpha = 1 - Math.exp(-Math.max(0, rate) * Math.max(0, deltaSeconds))
+  current.lerp(target, alpha)
+  if (current.lengthSq() <= 1e-10) {
+    current.copy(target)
+  }
+  current.normalize()
+  return current
 }
 
 const surfaceAngleFromRay = (cameraDistance: number, halfFov: number) => {
@@ -2420,6 +2531,9 @@ export const createScene = async (
   })
   const boostDraftGeometry = new THREE.SphereGeometry(1, 24, 16, 0, Math.PI * 2, 0, Math.PI * 0.5)
   const boostDraftTexture = createBoostDraftTexture()
+  const intakeConeGeometry = new THREE.PlaneGeometry(1, 1, 1, 1)
+  intakeConeGeometry.translate(0, 0.5, 0)
+  const intakeConeTexture = createIntakeConeTexture()
   const snakeSkinTextureCache = new Map<string, THREE.CanvasTexture>()
   const maxAnisotropy =
     renderer instanceof THREE.WebGLRenderer ? renderer.capabilities.getMaxAnisotropy() : 1
@@ -2753,6 +2867,17 @@ export const createScene = async (
     menuPreviewPitch = clamp(pitch, -1.25, 1.25)
   }
 
+  const setPelletSuctionLocks = (locks: ReadonlyMap<number, string> | null) => {
+    pelletSuctionTargetByPelletId.clear()
+    if (!locks) return
+    for (const [pelletId, targetPlayerId] of locks) {
+      if (!Number.isFinite(pelletId) || typeof targetPlayerId !== 'string' || targetPlayerId.length <= 0) {
+        continue
+      }
+      pelletSuctionTargetByPelletId.set(pelletId, targetPlayerId)
+    }
+  }
+
   // WebGPU does not support variable-size point primitives, so render pellets via instanced sprites.
   const pelletsUseSprites = activeBackend === 'webgpu'
   // Avoid mid-game resizes (and the associated pipeline/binding churn) by giving WebGPU buckets a
@@ -2838,8 +2963,13 @@ export const createScene = async (
   const pelletBucketCounts = new Array<number>(PELLET_BUCKET_COUNT).fill(0)
   const pelletBucketOffsets = new Array<number>(PELLET_BUCKET_COUNT).fill(0)
   const pelletBucketPositionArrays: Array<Float32Array | null> = new Array(PELLET_BUCKET_COUNT).fill(null)
+  const pelletBucketOpacityArrays: Array<Float32Array | null> = new Array(PELLET_BUCKET_COUNT).fill(null)
   const pelletGroundCache = new Map<number, { x: number; y: number; z: number; radius: number }>()
   const pelletMotionStates = new Map<number, PelletMotionState>()
+  const pelletVisualStates = new Map<number, PelletVisualState>()
+  const pelletConsumeGhosts: PelletConsumeGhost[] = []
+  const pelletMouthTargets = new Map<string, THREE.Vector3>()
+  const pelletSuctionTargetByPelletId = new Map<number, string>()
   const pelletIdsSeen = new Set<number>()
   let viewportWidth = 1
   let viewportHeight = 1
@@ -2905,8 +3035,10 @@ export const createScene = async (
   const tempVectorF = new THREE.Vector3()
   const tempVectorG = new THREE.Vector3()
   const tempVectorH = new THREE.Vector3()
+  const intakeConeClipTemp = new THREE.Vector3()
   const pelletWobbleTangentTemp = new THREE.Vector3()
   const pelletWobbleBitangentTemp = new THREE.Vector3()
+  const intakeConeOrientationMatrix = new THREE.Matrix4()
   const patchCenterQuat = new THREE.Quaternion()
   const lakeSampleTemp = new THREE.Vector3()
   const tempQuat = new THREE.Quaternion()
@@ -3201,6 +3333,10 @@ export const createScene = async (
     terrainContactSampler = null
     pelletGroundCache.clear()
     pelletMotionStates.clear()
+    pelletVisualStates.clear()
+    pelletConsumeGhosts.length = 0
+    pelletMouthTargets.clear()
+    pelletSuctionTargetByPelletId.clear()
     if (planetMesh) {
       world.remove(planetMesh)
       planetMesh.geometry.dispose()
@@ -3622,18 +3758,20 @@ export const createScene = async (
     return directionDot >= Math.cos(limit)
   }
 
-  const isPelletNearSide = (
-    pellet: PelletSnapshot,
+  const isDirectionNearSide = (
+    x: number,
+    y: number,
+    z: number,
     cameraLocalDir: THREE.Vector3,
     minDirectionDot: number,
   ) => {
-    const lengthSq = pellet.x * pellet.x + pellet.y * pellet.y + pellet.z * pellet.z
+    const lengthSq = x * x + y * y + z * z
     if (!Number.isFinite(lengthSq) || lengthSq <= 1e-8) return true
     const invLength = 1 / Math.sqrt(lengthSq)
     const directionDot =
-      pellet.x * invLength * cameraLocalDir.x +
-      pellet.y * invLength * cameraLocalDir.y +
-      pellet.z * invLength * cameraLocalDir.z
+      x * invLength * cameraLocalDir.x +
+      y * invLength * cameraLocalDir.y +
+      z * invLength * cameraLocalDir.z
     return directionDot >= minDirectionDot
   }
 
@@ -5058,6 +5196,22 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
     boostDraft.renderOrder = 2
     group.add(boostDraft)
 
+    const intakeConeMaterial = new THREE.MeshBasicMaterial({
+      color: '#d6f5ff',
+      map: intakeConeTexture ?? undefined,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      depthTest: true,
+      side: THREE.DoubleSide,
+      blending: THREE.NormalBlending,
+      toneMapped: false,
+    })
+    const intakeCone = new THREE.Mesh(intakeConeGeometry, intakeConeMaterial)
+    intakeCone.visible = false
+    intakeCone.renderOrder = 2.1
+    group.add(intakeCone)
+
     const nameplateTarget = createNameplateTexture('Player')
     const nameplateMaterial = new THREE.SpriteMaterial({
       map: nameplateTarget?.texture ?? null,
@@ -5095,6 +5249,10 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
       boostDraftMaterial,
       boostDraftPhase: 0,
       boostDraftIntensity: 0,
+      intakeCone,
+      intakeConeMaterial,
+      intakeConeIntensity: 0,
+      intakeConeHoldUntilMs: 0,
       nameplate,
       nameplateMaterial,
       nameplateTexture: nameplateTarget?.texture ?? null,
@@ -5142,6 +5300,72 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
     if (userData.opacityUniform) {
       userData.opacityUniform.value = 0
     }
+  }
+
+  const hideIntakeCone = (visual: SnakeVisual) => {
+    visual.intakeCone.visible = false
+    visual.intakeConeMaterial.opacity = 0
+    visual.intakeConeIntensity = 0
+    visual.intakeConeHoldUntilMs = 0
+  }
+
+  const updateIntakeCone = (
+    visual: SnakeVisual,
+    activeByLock: boolean,
+    headPosition: THREE.Vector3,
+    mouthPosition: THREE.Vector3,
+    headNormal: THREE.Vector3,
+    forward: THREE.Vector3,
+    right: THREE.Vector3,
+    headRadius: number,
+    snakeOpacity: number,
+    deltaSeconds: number,
+    nowMs: number,
+  ) => {
+    if (activeByLock) {
+      visual.intakeConeHoldUntilMs = nowMs + INTAKE_CONE_DISENGAGE_HOLD_MS
+    }
+    intakeConeClipTemp.copy(headPosition).applyQuaternion(world.quaternion).project(camera)
+    const headInView =
+      Number.isFinite(intakeConeClipTemp.x) &&
+      Number.isFinite(intakeConeClipTemp.y) &&
+      Number.isFinite(intakeConeClipTemp.z) &&
+      intakeConeClipTemp.z >= -1 &&
+      intakeConeClipTemp.z <= 1 &&
+      Math.abs(intakeConeClipTemp.x) <= 1 + INTAKE_CONE_VIEW_MARGIN &&
+      Math.abs(intakeConeClipTemp.y) <= 1 + INTAKE_CONE_VIEW_MARGIN
+    const holdActive = nowMs < visual.intakeConeHoldUntilMs
+    const targetActive =
+      snakeOpacity > DEATH_VISIBILITY_CUTOFF &&
+      headInView &&
+      (activeByLock || holdActive)
+    const safeDelta = Math.max(0, deltaSeconds)
+    visual.intakeConeIntensity = smoothValue(
+      visual.intakeConeIntensity,
+      targetActive ? 1 : 0,
+      safeDelta,
+      INTAKE_CONE_FADE_IN_RATE,
+      INTAKE_CONE_FADE_OUT_RATE,
+    )
+    const intensity = clamp(visual.intakeConeIntensity, 0, 1)
+    if (intensity <= 0.01) {
+      if (!targetActive) {
+        visual.intakeConeHoldUntilMs = 0
+      }
+      visual.intakeCone.visible = false
+      visual.intakeConeMaterial.opacity = 0
+      return
+    }
+
+    const coneScale = clamp(headRadius / HEAD_RADIUS, 0.9, 1.45)
+    const coneLength = INTAKE_CONE_BASE_LENGTH * coneScale
+    const coneWidth = INTAKE_CONE_BASE_WIDTH * coneScale
+    visual.intakeCone.position.copy(mouthPosition).addScaledVector(headNormal, INTAKE_CONE_LIFT)
+    intakeConeOrientationMatrix.makeBasis(right, forward, headNormal)
+    visual.intakeCone.quaternion.setFromRotationMatrix(intakeConeOrientationMatrix)
+    visual.intakeCone.scale.set(coneWidth, coneLength, 1)
+    visual.intakeConeMaterial.opacity = INTAKE_CONE_MAX_OPACITY * snakeOpacity * intensity
+    visual.intakeCone.visible = true
   }
 
   const hideNameplate = (visual: SnakeVisual) => {
@@ -6720,6 +6944,210 @@ diffuseColor.a *= retireEdge;`,
     return out
   }
 
+  const getPelletSurfacePositionFromNormal = (
+    id: number,
+    normal: THREE.Vector3,
+    size: number,
+    out: THREE.Vector3,
+  ) => {
+    const nx = normal.x
+    const ny = normal.y
+    const nz = normal.z
+    const cached = pelletGroundCache.get(id)
+    let radius: number
+    if (cached) {
+      const dx = cached.x - nx
+      const dy = cached.y - ny
+      const dz = cached.z - nz
+      if (dx * dx + dy * dy + dz * dz <= PELLET_GROUND_CACHE_NORMAL_EPS) {
+        radius = cached.radius
+      } else {
+        radius = getTerrainRadius(normal)
+        pelletGroundCache.set(id, { x: nx, y: ny, z: nz, radius })
+      }
+    } else {
+      radius = getTerrainRadius(normal)
+      pelletGroundCache.set(id, { x: nx, y: ny, z: nz, radius })
+    }
+    const pelletScale = clamp(size, PELLET_SIZE_MIN, PELLET_SIZE_MAX)
+    const surfaceLift = PELLET_RADIUS * pelletScale + PELLET_SURFACE_CLEARANCE
+    out.copy(normal).multiplyScalar(radius + surfaceLift)
+    return out
+  }
+
+  const reconcilePelletVisualState = (
+    pellet: PelletSnapshot,
+    timeSeconds: number,
+    deltaSeconds: number,
+  ) => {
+    const safeSize = clamp(
+      Number.isFinite(pellet.size) ? pellet.size : 1,
+      PELLET_SIZE_MIN,
+      PELLET_SIZE_MAX,
+    )
+    tempVectorE.set(pellet.x, pellet.y, pellet.z)
+    if (tempVectorE.lengthSq() <= 1e-8) {
+      tempVectorE.set(0, 0, 1)
+    } else {
+      tempVectorE.normalize()
+    }
+
+    let state = pelletVisualStates.get(pellet.id)
+    if (!state) {
+      state = {
+        renderNormal: tempVectorE.clone(),
+        targetNormal: tempVectorE.clone(),
+        lastServerNormal: tempVectorE.clone(),
+        velocity: new THREE.Vector3(),
+        renderSize: safeSize,
+        targetSize: safeSize,
+        renderAlpha: 1,
+        targetAlpha: 1,
+        lastServerAt: timeSeconds,
+        colorIndex: pellet.colorIndex,
+      }
+      pelletVisualStates.set(pellet.id, state)
+      return state
+    }
+
+    const serverDot = clamp(state.lastServerNormal.dot(tempVectorE), -1, 1)
+    const positionChanged = serverDot < 0.999_999
+    if (positionChanged) {
+      const dt = clamp(timeSeconds - state.lastServerAt, 1 / 120, 0.35)
+      tempVectorF.copy(tempVectorE).sub(state.lastServerNormal).multiplyScalar(1 / dt)
+      tempVectorF.addScaledVector(tempVectorE, -tempVectorF.dot(tempVectorE))
+      if (!Number.isFinite(tempVectorF.lengthSq())) {
+        tempVectorF.set(0, 0, 0)
+      }
+      if (state.renderNormal.dot(tempVectorE) < PELLET_SNAP_DOT_THRESHOLD) {
+        state.renderNormal.copy(tempVectorE)
+        state.velocity.set(0, 0, 0)
+      } else {
+        state.velocity.lerp(tempVectorF, 0.65)
+      }
+      state.targetNormal.copy(tempVectorE)
+      state.lastServerNormal.copy(tempVectorE)
+      state.lastServerAt = timeSeconds
+    }
+
+    state.targetSize = safeSize
+    state.colorIndex = pellet.colorIndex
+    state.velocity.multiplyScalar(Math.exp(-4 * Math.max(0, deltaSeconds)))
+    const horizon = clamp(
+      timeSeconds - state.lastServerAt,
+      0,
+      PELLET_PREDICTION_MAX_HORIZON_SECS,
+    )
+    tempVectorF.copy(state.targetNormal).addScaledVector(state.velocity, horizon)
+    if (tempVectorF.lengthSq() <= 1e-10) {
+      tempVectorF.copy(state.targetNormal)
+    } else {
+      tempVectorF.normalize()
+    }
+    const correctionAlpha = 1 - Math.exp(-PELLET_CORRECTION_RATE * Math.max(0, deltaSeconds))
+    tempVectorF.lerp(state.targetNormal, correctionAlpha)
+    if (tempVectorF.lengthSq() <= 1e-10) {
+      tempVectorF.copy(state.targetNormal)
+    } else {
+      tempVectorF.normalize()
+    }
+    smoothUnitVector(
+      state.renderNormal,
+      tempVectorF,
+      deltaSeconds,
+      PELLET_POS_SMOOTH_RATE,
+    )
+    state.renderSize = smoothValue(
+      state.renderSize,
+      state.targetSize,
+      deltaSeconds,
+      PELLET_SIZE_SMOOTH_RATE,
+      PELLET_SIZE_SMOOTH_RATE,
+    )
+    return state
+  }
+
+  const resolvePelletIntakeTargetAlpha = (
+    pelletId: number,
+    pelletPosition: THREE.Vector3,
+  ) => {
+    const targetPlayerId = pelletSuctionTargetByPelletId.get(pelletId)
+    if (!targetPlayerId) return 1
+    const mouthTarget = pelletMouthTargets.get(targetPlayerId)
+    if (!mouthTarget) return 1
+    const distanceToMouth = pelletPosition.distanceTo(mouthTarget)
+    const fade =
+      1 -
+      smoothstep(
+        PELLET_INTAKE_ALPHA_NEAR_DISTANCE,
+        PELLET_INTAKE_ALPHA_FAR_DISTANCE,
+        distanceToMouth,
+      )
+    return clamp(lerp(1, PELLET_INTAKE_ALPHA_MIN, fade), PELLET_INTAKE_ALPHA_MIN, 1)
+  }
+
+  const findNearestPelletMouthTargetId = (position: THREE.Vector3) => {
+    let nearestId: string | null = null
+    let nearestDistSq = PELLET_CONSUME_GHOST_MAX_TARGET_DISTANCE * PELLET_CONSUME_GHOST_MAX_TARGET_DISTANCE
+    for (const [id, target] of pelletMouthTargets) {
+      const distSq = position.distanceToSquared(target)
+      if (distSq < nearestDistSq) {
+        nearestDistSq = distSq
+        nearestId = id
+      }
+    }
+    return nearestId
+  }
+
+  const spawnPelletConsumeGhost = (
+    pelletId: number,
+    state: PelletVisualState,
+    lockedTargetPlayerId: string | null,
+  ) => {
+    const startSize = clamp(state.renderSize, PELLET_SIZE_MIN, PELLET_SIZE_MAX)
+    if (startSize <= 0.02) return
+    getPelletSurfacePositionFromNormal(
+      pelletId,
+      state.renderNormal,
+      startSize,
+      tempVector,
+    )
+    const targetPlayerId = lockedTargetPlayerId ?? findNearestPelletMouthTargetId(tempVector)
+    if (!targetPlayerId) return
+    const normal = tempVector.clone().normalize()
+    pelletConsumeGhosts.push({
+      position: tempVector.clone(),
+      normal,
+      startSize,
+      size: startSize,
+      colorIndex: state.colorIndex,
+      age: 0,
+      duration: PELLET_CONSUME_GHOST_DURATION_SECS,
+      targetPlayerId,
+    })
+    if (pelletConsumeGhosts.length > 1024) {
+      pelletConsumeGhosts.splice(0, pelletConsumeGhosts.length - 1024)
+    }
+  }
+
+  const updatePelletConsumeGhost = (ghost: PelletConsumeGhost, deltaSeconds: number) => {
+    ghost.age += Math.max(0, deltaSeconds)
+    if (ghost.targetPlayerId) {
+      const target = pelletMouthTargets.get(ghost.targetPlayerId)
+      if (target) {
+        const alpha =
+          1 - Math.exp(-Math.max(0, PELLET_CONSUME_GHOST_HOMING_RATE) * Math.max(0, deltaSeconds))
+        ghost.position.lerp(target, alpha)
+        if (ghost.position.lengthSq() > 1e-8) {
+          ghost.normal.copy(ghost.position).normalize()
+        }
+      }
+    }
+    const t = clamp(ghost.age / Math.max(1e-4, ghost.duration), 0, 1)
+    ghost.size = ghost.startSize * (1 - t * t)
+    return ghost.age < ghost.duration && ghost.size > 0.02
+  }
+
   const pelletSeedUnit = (id: number, salt: number) => {
     let x = (id ^ salt) >>> 0
     x = Math.imul(x ^ (x >>> 16), 0x7feb352d)
@@ -7819,6 +8247,8 @@ diffuseColor.a *= retireEdge;`,
     isLocal: boolean,
     deltaSeconds: number,
     pellets: PelletSnapshot[] | null,
+    activeIntakeLocks: number,
+    nowMs: number,
   ): PelletOverride | null => {
     const skin = getSnakeSkinTexture(player.color, player.skinColors)
     let visual = snakes.get(player.id)
@@ -7888,6 +8318,7 @@ diffuseColor.a *= retireEdge;`,
         localGroundingInfo = null
       }
       resetSnakeTransientState(player.id)
+      pelletMouthTargets.delete(player.id)
       lastTailContactNormals.delete(player.id)
       visual.tube.visible = false
       visual.selfOverlapGlow.visible = false
@@ -7900,6 +8331,7 @@ diffuseColor.a *= retireEdge;`,
       visual.tongue.visible = false
       visual.bowl.visible = false
       hideBoostDraft(visual)
+      hideIntakeCone(visual)
       hideNameplate(visual)
       return null
     }
@@ -8123,6 +8555,7 @@ diffuseColor.a *= retireEdge;`,
       visual.tongue.visible = false
       visual.bowl.visible = false
       hideBoostDraft(visual)
+      hideIntakeCone(visual)
       hideNameplate(visual)
       lastHeadPositions.delete(player.id)
       lastForwardDirections.delete(player.id)
@@ -8130,6 +8563,7 @@ diffuseColor.a *= retireEdge;`,
       lastTailContactNormals.delete(player.id)
       tailFrameStates.delete(player.id)
       tongueStates.delete(player.id)
+      pelletMouthTargets.delete(player.id)
       lastSnakeStarts.delete(player.id)
       if (isLocal) {
         localGroundingInfo = finalizeGroundingInfo(groundingInfo)
@@ -8149,10 +8583,12 @@ diffuseColor.a *= retireEdge;`,
       visual.tongue.visible = false
       visual.bowl.visible = false
       hideBoostDraft(visual)
+      hideIntakeCone(visual)
       hideNameplate(visual)
       lastHeadPositions.delete(player.id)
       lastForwardDirections.delete(player.id)
       tongueStates.delete(player.id)
+      pelletMouthTargets.delete(player.id)
     } else {
       visual.head.visible = true
       visual.eyeLeft.visible = true
@@ -8289,6 +8725,35 @@ diffuseColor.a *= retireEdge;`,
       opacity,
       deltaSeconds,
     )
+    let mouthTargetForIntake: THREE.Vector3 | null = null
+    if (player.alive && visual.group.visible) {
+      const mouthTarget = pelletMouthTargets.get(player.id) ?? new THREE.Vector3()
+      mouthTarget
+        .copy(headPosition)
+        .addScaledVector(forward, headRadius * 0.82)
+        .addScaledVector(headNormal, headRadius * 0.12)
+      pelletMouthTargets.set(player.id, mouthTarget)
+      mouthTargetForIntake = mouthTarget
+    } else {
+      pelletMouthTargets.delete(player.id)
+    }
+    if (mouthTargetForIntake) {
+      updateIntakeCone(
+        visual,
+        activeIntakeLocks > 0,
+        headPosition,
+        mouthTargetForIntake,
+        headNormal,
+        forward,
+        right,
+        headRadius,
+        opacity,
+        deltaSeconds,
+        nowMs,
+      )
+    } else {
+      hideIntakeCone(visual)
+    }
     if (
       !isLocal &&
       player.alive &&
@@ -8488,10 +8953,12 @@ diffuseColor.a *= retireEdge;`,
     visual.tongueForkLeft.material.dispose()
     visual.tongueForkRight.material.dispose()
     visual.boostDraftMaterial.dispose()
+    visual.intakeConeMaterial.dispose()
     visual.nameplateMaterial.dispose()
     visual.nameplateTexture?.dispose()
     visual.bowlMaterial.dispose()
     resetSnakeTransientState(id)
+    pelletMouthTargets.delete(id)
     deathStates.delete(id)
     lastAliveStates.delete(id)
     lastSnakeStarts.delete(id)
@@ -8505,6 +8972,10 @@ diffuseColor.a *= retireEdge;`,
     pellets: PelletSnapshot[] | null,
     nowMs: number,
   ): PelletOverride | null => {
+    const intakeLockCountByPlayerId = new Map<string, number>()
+    for (const targetId of pelletSuctionTargetByPelletId.values()) {
+      intakeLockCountByPlayerId.set(targetId, (intakeLockCountByPlayerId.get(targetId) ?? 0) + 1)
+    }
     const activeIds = new Set<string>()
     localGroundingInfo = null
     let pelletOverride: PelletOverride | null = null
@@ -8515,6 +8986,8 @@ diffuseColor.a *= retireEdge;`,
         player.id === localPlayerId,
         deltaSeconds,
         pellets,
+        intakeLockCountByPlayerId.get(player.id) ?? 0,
+        nowMs,
       )
       if (override) {
         pelletOverride = override
@@ -8555,6 +9028,27 @@ diffuseColor.a *= retireEdge;`,
     return tierIndex * PELLET_COLOR_BUCKET_COUNT + colorBucketIndex
   }
 
+  const applyPelletOpacityAttributeToPointsMaterial = (material: THREE.PointsMaterial) => {
+    material.customProgramCacheKey = () => 'pellet-opacity-v1'
+    material.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          '#include <common>',
+          '#include <common>\nattribute float pelletOpacity;\nvarying float vPelletOpacity;',
+        )
+        .replace(
+          '#include <begin_vertex>',
+          '#include <begin_vertex>\n  vPelletOpacity = pelletOpacity;',
+        )
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>\nvarying float vPelletOpacity;')
+        .replace(
+          '#include <color_fragment>',
+          '#include <color_fragment>\n  diffuseColor.a *= clamp(vPelletOpacity, 0.0, 1.0);',
+        )
+    }
+  }
+
   const createPelletBucketPoints = (
     bucketIndex: number,
     capacity: number,
@@ -8568,9 +9062,13 @@ diffuseColor.a *= retireEdge;`,
     const baseGlowSize = PELLET_GLOW_POINT_SIZE * sizeMultiplier
     const geometry = new THREE.BufferGeometry()
     const positionArray = new Float32Array(capacity * 3)
+    const opacityArray = new Float32Array(capacity)
     const positionAttribute = new THREE.BufferAttribute(positionArray, 3)
+    const opacityAttribute = new THREE.BufferAttribute(opacityArray, 1)
     positionAttribute.setUsage(THREE.DynamicDrawUsage)
+    opacityAttribute.setUsage(THREE.DynamicDrawUsage)
     geometry.setAttribute('position', positionAttribute)
+    geometry.setAttribute('pelletOpacity', opacityAttribute)
     geometry.setDrawRange(0, 0)
 
     const shadowMaterial = new THREE.PointsMaterial({
@@ -8625,6 +9123,10 @@ diffuseColor.a *= retireEdge;`,
       sizeAttenuation: true,
       toneMapped: false,
     })
+    applyPelletOpacityAttributeToPointsMaterial(shadowMaterial)
+    applyPelletOpacityAttributeToPointsMaterial(coreMaterial)
+    applyPelletOpacityAttributeToPointsMaterial(innerGlowMaterial)
+    applyPelletOpacityAttributeToPointsMaterial(glowMaterial)
     const shadowPoints = new THREE.Points(geometry, shadowMaterial)
     const glowPoints = new THREE.Points(geometry, glowMaterial)
     const innerGlowPoints = new THREE.Points(geometry, innerGlowMaterial)
@@ -8656,6 +9158,7 @@ diffuseColor.a *= retireEdge;`,
       innerGlowMaterial,
       glowMaterial,
       positionAttribute,
+      opacityAttribute,
       capacity,
       baseShadowSize,
       baseCoreSize,
@@ -8681,13 +9184,18 @@ diffuseColor.a *= retireEdge;`,
     // WebGPU sprite instancing expects an InstancedBufferAttribute. A plain BufferAttribute will
     // be treated as per-vertex, which breaks `sprite.count` and can trip TSL/node builds.
     const positionArray = new Float32Array(capacity * 3)
+    const opacityArray = new Float32Array(capacity)
     const positionAttribute = new THREE.InstancedBufferAttribute(positionArray, 3)
+    const opacityAttribute = new THREE.InstancedBufferAttribute(opacityArray, 1)
     positionAttribute.setUsage(THREE.DynamicDrawUsage)
+    opacityAttribute.setUsage(THREE.DynamicDrawUsage)
     const positionNode = instancedDynamicBufferAttribute(positionAttribute, 'vec3')
+    const opacityNode = instancedDynamicBufferAttribute(opacityAttribute, 'float')
 
     const createMaterial = (params: ConstructorParameters<typeof PointsNodeMaterial>[0]) => {
       const material = new PointsNodeMaterial(params)
       material.positionNode = positionNode
+      material.opacityNode = materialOpacity.mul(opacityNode)
       return material
     }
 
@@ -8778,6 +9286,7 @@ diffuseColor.a *= retireEdge;`,
       innerGlowMaterial,
       glowMaterial,
       positionAttribute,
+      opacityAttribute,
       capacity,
       baseShadowSize,
       baseCoreSize,
@@ -8815,15 +9324,22 @@ diffuseColor.a *= retireEdge;`,
       nextCapacity *= 2
     }
     const positionArray = new Float32Array(nextCapacity * 3)
+    const opacityArray = new Float32Array(nextCapacity)
     const positionAttribute =
       bucket.kind === 'sprites'
         ? new THREE.InstancedBufferAttribute(positionArray, 3)
         : new THREE.BufferAttribute(positionArray, 3)
+    const opacityAttribute =
+      bucket.kind === 'sprites'
+        ? new THREE.InstancedBufferAttribute(opacityArray, 1)
+        : new THREE.BufferAttribute(opacityArray, 1)
     positionAttribute.setUsage(THREE.DynamicDrawUsage)
+    opacityAttribute.setUsage(THREE.DynamicDrawUsage)
 
     if (bucket.kind === 'points') {
       const geometry = new THREE.BufferGeometry()
       geometry.setAttribute('position', positionAttribute)
+      geometry.setAttribute('pelletOpacity', opacityAttribute)
       geometry.setDrawRange(0, 0)
 
       const previousGeometry = bucket.corePoints.geometry
@@ -8834,10 +9350,15 @@ diffuseColor.a *= retireEdge;`,
       previousGeometry.dispose()
     } else {
       const positionNode = instancedDynamicBufferAttribute(positionAttribute, 'vec3')
+      const opacityNode = instancedDynamicBufferAttribute(opacityAttribute, 'float')
       bucket.shadowMaterial.positionNode = positionNode
+      bucket.shadowMaterial.opacityNode = materialOpacity.mul(opacityNode)
       bucket.coreMaterial.positionNode = positionNode
+      bucket.coreMaterial.opacityNode = materialOpacity.mul(opacityNode)
       bucket.innerGlowMaterial.positionNode = positionNode
+      bucket.innerGlowMaterial.opacityNode = materialOpacity.mul(opacityNode)
       bucket.glowMaterial.positionNode = positionNode
+      bucket.glowMaterial.opacityNode = materialOpacity.mul(opacityNode)
       // Changing node graphs requires bumping the material version so Three recreates the
       // internal render object and bindings. Without this, WebGPU can keep the old GPU buffer
       // bound and then fail when `sprite.count` grows beyond the previous capacity.
@@ -8848,6 +9369,7 @@ diffuseColor.a *= retireEdge;`,
     }
 
     bucket.positionAttribute = positionAttribute
+    bucket.opacityAttribute = opacityAttribute
     bucket.capacity = nextCapacity
     return bucket
   }
@@ -8856,14 +9378,59 @@ diffuseColor.a *= retireEdge;`,
     pellets: PelletSnapshot[],
     override: PelletOverride | null,
     timeSeconds: number,
+    deltaSeconds: number,
     cameraLocalDir: THREE.Vector3,
     viewAngle: number,
   ) => {
+    const safeDeltaSeconds = Math.max(0, deltaSeconds)
     pelletIdsSeen.clear()
+    for (let i = 0; i < pellets.length; i += 1) {
+      const pellet = pellets[i]
+      pelletIdsSeen.add(pellet.id)
+      const state = reconcilePelletVisualState(pellet, timeSeconds, safeDeltaSeconds)
+      if (pelletSuctionTargetByPelletId.has(pellet.id)) {
+        getPelletSurfacePositionFromNormal(
+          pellet.id,
+          state.renderNormal,
+          state.renderSize,
+          tempVectorC,
+        )
+        state.targetAlpha = resolvePelletIntakeTargetAlpha(pellet.id, tempVectorC)
+      } else {
+        state.targetAlpha = 1
+      }
+      state.renderAlpha = smoothValue(
+        state.renderAlpha,
+        state.targetAlpha,
+        safeDeltaSeconds,
+        PELLET_INTAKE_ALPHA_FADE_IN_RATE,
+        PELLET_INTAKE_ALPHA_FADE_OUT_RATE,
+      )
+    }
+
+    for (const [id, state] of pelletVisualStates) {
+      if (!pelletIdsSeen.has(id)) {
+        spawnPelletConsumeGhost(
+          id,
+          state,
+          pelletSuctionTargetByPelletId.get(id) ?? null,
+        )
+        pelletSuctionTargetByPelletId.delete(id)
+        pelletVisualStates.delete(id)
+      }
+    }
+
+    for (let i = pelletConsumeGhosts.length - 1; i >= 0; i -= 1) {
+      if (!updatePelletConsumeGhost(pelletConsumeGhosts[i]!, safeDeltaSeconds)) {
+        pelletConsumeGhosts.splice(i, 1)
+      }
+    }
+
     for (let i = 0; i < PELLET_BUCKET_COUNT; i += 1) {
       pelletBucketCounts[i] = 0
       pelletBucketOffsets[i] = 0
       pelletBucketPositionArrays[i] = null
+      pelletBucketOpacityArrays[i] = null
     }
 
     // Keep large glow sprites stable near the horizon while culling the far hemisphere.
@@ -8874,12 +9441,39 @@ diffuseColor.a *= retireEdge;`,
 
     for (let i = 0; i < pellets.length; i += 1) {
       const pellet = pellets[i]
-      pelletIdsSeen.add(pellet.id)
+      const state = pelletVisualStates.get(pellet.id)
+      if (!state) continue
       const forceVisible = forcedVisiblePelletId !== null && pellet.id === forcedVisiblePelletId
-      if (!forceVisible && !isPelletNearSide(pellet, cameraLocalDir, minDirectionDot)) {
+      if (
+        !forceVisible &&
+        !isDirectionNearSide(
+          state.renderNormal.x,
+          state.renderNormal.y,
+          state.renderNormal.z,
+          cameraLocalDir,
+          minDirectionDot,
+        )
+      ) {
         continue
       }
-      const bucketIndex = pelletBucketIndex(pellet.colorIndex, pellet.size)
+      const bucketIndex = pelletBucketIndex(state.colorIndex, state.renderSize)
+      pelletBucketCounts[bucketIndex] += 1
+      visibleCount += 1
+    }
+    for (let i = 0; i < pelletConsumeGhosts.length; i += 1) {
+      const ghost = pelletConsumeGhosts[i]!
+      if (
+        !isDirectionNearSide(
+          ghost.normal.x,
+          ghost.normal.y,
+          ghost.normal.z,
+          cameraLocalDir,
+          minDirectionDot,
+        )
+      ) {
+        continue
+      }
+      const bucketIndex = pelletBucketIndex(ghost.colorIndex, ghost.size)
       pelletBucketCounts[bucketIndex] += 1
       visibleCount += 1
     }
@@ -8926,22 +9520,40 @@ diffuseColor.a *= retireEdge;`,
         nextBucket.glowSprite.count = required
       }
       pelletBucketPositionArrays[bucketIndex] = nextBucket.positionAttribute.array as Float32Array
+      pelletBucketOpacityArrays[bucketIndex] = nextBucket.opacityAttribute.array as Float32Array
     }
 
     for (let i = 0; i < pellets.length; i += 1) {
       const pellet = pellets[i]
+      const state = pelletVisualStates.get(pellet.id)
+      if (!state) continue
       const forceVisible = forcedVisiblePelletId !== null && pellet.id === forcedVisiblePelletId
-      if (!forceVisible && !isPelletNearSide(pellet, cameraLocalDir, minDirectionDot)) {
+      if (
+        !forceVisible &&
+        !isDirectionNearSide(
+          state.renderNormal.x,
+          state.renderNormal.y,
+          state.renderNormal.z,
+          cameraLocalDir,
+          minDirectionDot,
+        )
+      ) {
         continue
       }
-      const bucketIndex = pelletBucketIndex(pellet.colorIndex, pellet.size)
+      const bucketIndex = pelletBucketIndex(state.colorIndex, state.renderSize)
       const positions = pelletBucketPositionArrays[bucketIndex]
-      if (!positions) continue
+      const opacities = pelletBucketOpacityArrays[bucketIndex]
+      if (!positions || !opacities) continue
 
       if (override && override.id === pellet.id) {
         tempVector.copy(override.position)
       } else {
-        getPelletSurfacePosition(pellet, tempVector)
+        getPelletSurfacePositionFromNormal(
+          pellet.id,
+          state.renderNormal,
+          state.renderSize,
+          tempVector,
+        )
         if (visibleCount <= PELLET_WOBBLE_DISABLE_VISIBLE_THRESHOLD) {
           applyPelletWobble(pellet, tempVector, timeSeconds)
         }
@@ -8953,6 +9565,33 @@ diffuseColor.a *= retireEdge;`,
       positions[pOffset] = tempVector.x
       positions[pOffset + 1] = tempVector.y
       positions[pOffset + 2] = tempVector.z
+      opacities[itemIndex] = clamp(state.renderAlpha, PELLET_INTAKE_ALPHA_MIN, 1)
+    }
+    for (let i = 0; i < pelletConsumeGhosts.length; i += 1) {
+      const ghost = pelletConsumeGhosts[i]!
+      if (
+        !isDirectionNearSide(
+          ghost.normal.x,
+          ghost.normal.y,
+          ghost.normal.z,
+          cameraLocalDir,
+          minDirectionDot,
+        )
+      ) {
+        continue
+      }
+      const bucketIndex = pelletBucketIndex(ghost.colorIndex, ghost.size)
+      const positions = pelletBucketPositionArrays[bucketIndex]
+      const opacities = pelletBucketOpacityArrays[bucketIndex]
+      if (!positions || !opacities) continue
+      tempVector.copy(ghost.position)
+      const itemIndex = pelletBucketOffsets[bucketIndex]
+      pelletBucketOffsets[bucketIndex] += 1
+      const pOffset = itemIndex * 3
+      positions[pOffset] = tempVector.x
+      positions[pOffset + 1] = tempVector.y
+      positions[pOffset + 2] = tempVector.z
+      opacities[itemIndex] = 1
     }
 
     for (let bucketIndex = 0; bucketIndex < PELLET_BUCKET_COUNT; bucketIndex += 1) {
@@ -8960,6 +9599,7 @@ diffuseColor.a *= retireEdge;`,
       const bucket = pelletBuckets[bucketIndex]
       if (!bucket) continue
       bucket.positionAttribute.needsUpdate = true
+      bucket.opacityAttribute.needsUpdate = true
     }
 
     for (const id of pelletGroundCache.keys()) {
@@ -9310,6 +9950,7 @@ diffuseColor.a *= retireEdge;`,
       hideForDepth(visual.bowl)
       hideForDepth(visual.selfOverlapGlow)
       hideForDepth(visual.boostDraft)
+      hideForDepth(visual.intakeCone)
       hideForDepth(visual.nameplate)
     }
   }
@@ -9660,7 +10301,14 @@ diffuseColor.a *= retireEdge;`,
 	      if (perfEnabled) {
 	        afterSnakesMs = performance.now()
 	      }
-	      updatePellets(snapshot.pellets, pelletOverride, now * 0.001, cameraLocalDirTemp, viewAngle)
+	      updatePellets(
+	        snapshot.pellets,
+	        pelletOverride,
+	        now * 0.001,
+	        deltaSeconds,
+	        cameraLocalDirTemp,
+	        viewAngle,
+	      )
 	      if (perfEnabled) {
 	        afterPelletsMs = performance.now()
 	      }
@@ -9669,7 +10317,14 @@ diffuseColor.a *= retireEdge;`,
 	      if (perfEnabled) {
 	        afterSnakesMs = performance.now()
 	      }
-	      updatePellets([], null, now * 0.001, cameraLocalDirTemp, viewAngle)
+	      updatePellets(
+	        [],
+	        null,
+	        now * 0.001,
+	        deltaSeconds,
+	        cameraLocalDirTemp,
+	        viewAngle,
+	      )
 	      if (perfEnabled) {
 	        afterPelletsMs = performance.now()
 	      }
@@ -10007,6 +10662,8 @@ diffuseColor.a *= retireEdge;`,
     tongueMaterial.dispose()
 	    boostDraftGeometry.dispose()
 	    boostDraftTexture?.dispose()
+    intakeConeGeometry.dispose()
+    intakeConeTexture?.dispose()
 		    menuPreviewMaterial.dispose()
 		    menuPreviewHeadMaterial.dispose()
 		    menuPreviewTube.geometry.dispose()
@@ -10050,6 +10707,10 @@ diffuseColor.a *= retireEdge;`,
     occluderDepthMaterial.dispose()
     pelletGroundCache.clear()
     pelletMotionStates.clear()
+    pelletVisualStates.clear()
+    pelletConsumeGhosts.length = 0
+    pelletMouthTargets.clear()
+    pelletSuctionTargetByPelletId.clear()
     pelletIdsSeen.clear()
     for (const [id, visual] of snakes) {
       removeSnake(visual, id)
@@ -10083,6 +10744,7 @@ diffuseColor.a *= retireEdge;`,
 	    setMenuPreviewVisible,
 	    setMenuPreviewSkin,
 	    setMenuPreviewOrbit,
+      setPelletSuctionLocks,
       setWebgpuWorldSamples: webgpuOffscreenEnabled ? setWebgpuWorldSamples : undefined,
 	    setEnvironment,
     setDebugFlags,

@@ -218,6 +218,7 @@ struct RoomState {
     next_state_seq: u32,
     next_player_net_id: u16,
     next_evasive_spawn_at: HashMap<String, i64>,
+    pending_pellet_locks: Vec<(u32, String)>,
     environment: Environment,
 }
 
@@ -368,6 +369,7 @@ impl Room {
                 next_state_seq: 1,
                 next_player_net_id: 1,
                 next_evasive_spawn_at: HashMap::new(),
+                pending_pellet_locks: Vec::new(),
                 environment: Environment::generate(),
             }),
             running: AtomicBool::new(false),
@@ -2056,20 +2058,30 @@ impl RoomState {
             }
 
             let target = match pellet_state {
-                PelletState::Attracting { target_player_id } => attractors
-                    .get(&target_player_id)
+                PelletState::Attracting {
+                    ref target_player_id,
+                } => attractors
+                    .get(target_player_id)
                     .copied()
-                    .map(|attractor| (target_player_id, attractor))
+                    .map(|attractor| (target_player_id.clone(), attractor))
                     .or_else(|| Self::find_pellet_target(self.pellets[i].normal, &attractors)),
                 PelletState::Idle => Self::find_pellet_target(self.pellets[i].normal, &attractors),
                 PelletState::Evasive { .. } => None,
             };
 
             if let Some((target_id, attractor)) = target {
+                let pellet_id = self.pellets[i].id;
+                let should_queue_lock = match &pellet_state {
+                    PelletState::Attracting { target_player_id } => target_player_id != &target_id,
+                    _ => true,
+                };
                 let pellet = &mut self.pellets[i];
                 pellet.state = PelletState::Attracting {
                     target_player_id: target_id.clone(),
                 };
+                if should_queue_lock {
+                    self.pending_pellet_locks.push((pellet_id, target_id.clone()));
+                }
 
                 let to_mouth_dot = clamp(dot(pellet.normal, attractor.mouth), -1.0, 1.0);
                 if to_mouth_dot >= consume_cos {
@@ -2501,9 +2513,8 @@ impl RoomState {
         let now = Self::now_millis();
         let state_seq = self.next_state_seq;
         self.broadcast_state_delta(now, state_seq);
-        if state_seq % 2 == 0 {
-            self.broadcast_pellet_delta(now, state_seq);
-        }
+        self.broadcast_pellet_locks(now, state_seq);
+        self.broadcast_pellet_delta(now, state_seq);
         self.next_state_seq = self.next_state_seq.wrapping_add(1);
     }
 
@@ -3216,8 +3227,10 @@ impl RoomState {
 
     fn pellet_needs_update(pellet: &Pellet) -> bool {
         match pellet.state {
-            PelletState::Idle => false,
-            _ => true,
+            // Keep evasive pellet movement authoritative. Intake-locked pellets can be
+            // animated client-side at consume time to save bandwidth.
+            PelletState::Evasive { .. } => true,
+            _ => false,
         }
     }
 
@@ -3276,6 +3289,80 @@ impl RoomState {
             encoder.write_u32(*id);
         }
         encoder.into_vec()
+    }
+
+    fn build_pellet_lock_payload(
+        &self,
+        now: i64,
+        state_seq: u32,
+        locks: &[(u32, u16)],
+    ) -> Vec<u8> {
+        let lock_count = locks.len().min(u16::MAX as usize);
+        let capacity = 4 + 8 + 4 + 2 + lock_count * 6;
+        let mut encoder = protocol::Encoder::with_capacity(capacity);
+        encoder.write_header(protocol::TYPE_PELLET_LOCK, 0);
+        encoder.write_i64(now);
+        encoder.write_u32(state_seq);
+        encoder.write_u16(lock_count as u16);
+        for (pellet_id, target_net_id) in locks.iter().take(lock_count) {
+            encoder.write_u32(*pellet_id);
+            encoder.write_u16(*target_net_id);
+        }
+        encoder.into_vec()
+    }
+
+    fn broadcast_pellet_locks(&mut self, now: i64, state_seq: u32) {
+        if self.pending_pellet_locks.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_pellet_locks);
+        let resolved_locks: Vec<(u32, u16)> = pending
+            .into_iter()
+            .filter_map(|(pellet_id, target_player_id)| {
+                self.players
+                    .get(&target_player_id)
+                    .map(|player| (pellet_id, player.net_id))
+            })
+            .collect();
+        if resolved_locks.is_empty() {
+            return;
+        }
+
+        let session_ids: Vec<String> = self.sessions.keys().cloned().collect();
+        let mut stale = Vec::new();
+        for session_id in session_ids {
+            let Some(session) = self.sessions.get(&session_id) else {
+                continue;
+            };
+            if !session.pellet_view_initialized {
+                continue;
+            }
+            let session_locks: Vec<(u32, u16)> = resolved_locks
+                .iter()
+                .filter(|(pellet_id, _)| session.pellet_view_ids.contains(pellet_id))
+                .copied()
+                .collect();
+            if session_locks.is_empty() {
+                continue;
+            }
+            let payload = self.build_pellet_lock_payload(now, state_seq, &session_locks);
+            if let Some(session) = self.sessions.get_mut(&session_id) {
+                match session.outbound_lo.try_send(payload) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        // Lock events are visual hints only; if a client is stalled, fall back to
+                        // client-side nearest-mouth inference for this pellet intake.
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        stale.push(session_id);
+                    }
+                }
+            }
+        }
+
+        for session_id in stale {
+            self.disconnect_session(&session_id);
+        }
     }
 
     fn maybe_send_pellet_reset_for_session(&mut self, session_id: &str) {
@@ -3488,6 +3575,7 @@ mod tests {
             next_state_seq: 1,
             next_player_net_id: 1,
             next_evasive_spawn_at: HashMap::new(),
+            pending_pellet_locks: Vec::new(),
             environment: Environment::generate(),
         }
     }

@@ -1,7 +1,7 @@
 use crate::game::types::Point;
 use uuid::Uuid;
 
-pub const VERSION: u8 = 15;
+pub const VERSION: u8 = 16;
 
 pub const TYPE_JOIN: u8 = 0x01;
 pub const TYPE_INPUT: u8 = 0x02;
@@ -13,6 +13,7 @@ pub const TYPE_PLAYER_META: u8 = 0x12;
 pub const TYPE_PELLET_DELTA: u8 = 0x13;
 pub const TYPE_PELLET_RESET: u8 = 0x14;
 pub const TYPE_STATE_DELTA: u8 = 0x15;
+pub const TYPE_PELLET_LOCK: u8 = 0x16;
 
 pub const FLAG_JOIN_PLAYER_ID: u16 = 1 << 0;
 pub const FLAG_JOIN_NAME: u16 = 1 << 1;
