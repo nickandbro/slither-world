@@ -66,6 +66,21 @@ const VIEW_CAMERA_DISTANCE_MAX: f64 = 10.0;
 const OUTBOUND_HI_CAPACITY: usize = 16;
 const OUTBOUND_LO_CAPACITY: usize = 16;
 const PELLET_RESET_RETRY_MS: i64 = 250;
+const STATE_DELTA_KEYFRAME_INTERVAL: u32 = 4;
+
+const DELTA_FRAME_KEYFRAME: u8 = 1 << 0;
+
+const DELTA_FIELD_FLAGS: u16 = 1 << 0;
+const DELTA_FIELD_SCORE: u16 = 1 << 1;
+const DELTA_FIELD_SCORE_FRACTION: u16 = 1 << 2;
+const DELTA_FIELD_OXYGEN: u16 = 1 << 3;
+const DELTA_FIELD_GIRTH: u16 = 1 << 4;
+const DELTA_FIELD_TAIL_EXT: u16 = 1 << 5;
+const DELTA_FIELD_SNAKE: u16 = 1 << 6;
+const DELTA_FIELD_DIGESTIONS: u16 = 1 << 7;
+
+const DELTA_SNAKE_REBASE: u8 = 0;
+const DELTA_SNAKE_SHIFT_HEAD: u8 = 1;
 
 #[derive(Debug)]
 pub struct LatestFrame {
@@ -190,6 +205,8 @@ struct SessionEntry {
     pellet_view_ids: HashSet<u32>,
     pellet_view_initialized: bool,
     pellet_reset_retry_at: i64,
+    delta_player_cache: HashMap<u16, DeltaPlayerCache>,
+    force_next_keyframe: bool,
 }
 
 #[derive(Debug)]
@@ -259,6 +276,34 @@ impl SnakeWindow {
 struct VisiblePlayer<'a> {
     player: &'a Player,
     window: SnakeWindow,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct DeltaDigestionCache {
+    id: u32,
+    progress_q: u16,
+    strength_q: u8,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct DeltaSnakeCache {
+    detail: u8,
+    total_len: u16,
+    start: u16,
+    len: u16,
+    points: Vec<(i16, i16)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct DeltaPlayerCache {
+    flags: u8,
+    score: i32,
+    score_fraction_q: u8,
+    oxygen_q: u8,
+    girth_q: u8,
+    tail_ext_q: u8,
+    snake: DeltaSnakeCache,
+    digestions: Vec<DeltaDigestionCache>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -351,6 +396,8 @@ impl Room {
                 pellet_view_ids: HashSet::new(),
                 pellet_view_initialized: false,
                 pellet_reset_retry_at: 0,
+                delta_player_cache: HashMap::new(),
+                force_next_keyframe: true,
             },
         );
         SessionIo {
@@ -630,6 +677,8 @@ impl RoomState {
             session.pellet_view_initialized = false;
             session.pellet_view_ids.clear();
             session.pellet_reset_retry_at = 0;
+            session.delta_player_cache.clear();
+            session.force_next_keyframe = true;
             Some(session.outbound_hi.clone())
         } else {
             None
@@ -2451,7 +2500,7 @@ impl RoomState {
 
         let now = Self::now_millis();
         let state_seq = self.next_state_seq;
-        self.broadcast_state(now, state_seq);
+        self.broadcast_state_delta(now, state_seq);
         if state_seq % 2 == 0 {
             self.broadcast_pellet_delta(now, state_seq);
         }
@@ -2624,47 +2673,189 @@ impl RoomState {
         encoder.into_vec()
     }
 
-    fn build_state_payload_for_session(
-        &self,
+    fn build_state_delta_payload_for_session(
+        &mut self,
         now: i64,
         state_seq: u32,
         session_id: &str,
-    ) -> Vec<u8> {
+    ) -> Option<Vec<u8>> {
         let visible_players = self.visible_players_for_session(session_id);
         let total_players = self.players.len().min(u16::MAX as usize);
         let visible_player_count = visible_players.len().min(u16::MAX as usize);
 
-        let mut capacity = 4 + 8 + 4 + 2 + 2;
-        for visible in visible_players.iter().take(visible_player_count) {
-            let player = visible.player;
-            let window = visible.window;
-            capacity += 2 + 1 + 4 + 2 + 2 + 1 + 1 + 1 + 2;
-            match window.detail {
-                SnakeDetail::Full => {
-                    capacity += 2 + window.len * 4;
-                }
-                SnakeDetail::Window => {
-                    capacity += 2 + 2 + window.len * 4;
-                }
-                SnakeDetail::Stub => {}
-            }
-            capacity += 1;
-            if window.include_digestions() {
-                capacity += player.digestions.len() * 12;
-            }
+        let mut current_players: Vec<(u16, DeltaPlayerCache)> =
+            Vec::with_capacity(visible_player_count);
+        for visible in visible_players.into_iter().take(visible_player_count) {
+            let encoded = self.encode_delta_player_cache(visible.player, visible.window);
+            current_players.push((visible.player.net_id, encoded));
         }
 
-        let mut encoder = protocol::Encoder::with_capacity(capacity);
-        encoder.write_header(protocol::TYPE_STATE, 0);
+        let session = self.sessions.get_mut(session_id)?;
+        let keyframe = session.force_next_keyframe
+            || state_seq % STATE_DELTA_KEYFRAME_INTERVAL == 0
+            || session.delta_player_cache.is_empty();
+        session.force_next_keyframe = false;
+
+        let mut encoder =
+            protocol::Encoder::with_capacity(128 + visible_player_count.saturating_mul(64));
+        encoder.write_header(protocol::TYPE_STATE_DELTA, 0);
         encoder.write_i64(now);
         encoder.write_u32(state_seq);
         encoder.write_u16(total_players as u16);
+        encoder.write_u8(if keyframe { DELTA_FRAME_KEYFRAME } else { 0 });
         encoder.write_u16(visible_player_count as u16);
-        for visible in visible_players.into_iter().take(visible_player_count) {
-            self.write_player_state_with_window(&mut encoder, visible.player, visible.window);
+
+        let mut next_cache: HashMap<u16, DeltaPlayerCache> =
+            HashMap::with_capacity(visible_player_count);
+        for (net_id, current) in current_players {
+            let previous = if keyframe {
+                None
+            } else {
+                session.delta_player_cache.get(&net_id)
+            };
+
+            let mut field_mask: u16 = 0;
+            if previous.map(|prev| prev.flags != current.flags).unwrap_or(true) {
+                field_mask |= DELTA_FIELD_FLAGS;
+            }
+            if previous.map(|prev| prev.score != current.score).unwrap_or(true) {
+                field_mask |= DELTA_FIELD_SCORE;
+            }
+            if previous
+                .map(|prev| prev.score_fraction_q != current.score_fraction_q)
+                .unwrap_or(true)
+            {
+                field_mask |= DELTA_FIELD_SCORE_FRACTION;
+            }
+            if previous
+                .map(|prev| prev.oxygen_q != current.oxygen_q)
+                .unwrap_or(true)
+            {
+                field_mask |= DELTA_FIELD_OXYGEN;
+            }
+            if previous
+                .map(|prev| prev.girth_q != current.girth_q)
+                .unwrap_or(true)
+            {
+                field_mask |= DELTA_FIELD_GIRTH;
+            }
+            if previous
+                .map(|prev| prev.tail_ext_q != current.tail_ext_q)
+                .unwrap_or(true)
+            {
+                field_mask |= DELTA_FIELD_TAIL_EXT;
+            }
+
+            let mut snake_mode: Option<u8> = None;
+            let mut shifted_head: Option<(i16, i16)> = None;
+            if let Some(prev) = previous {
+                if prev.snake != current.snake {
+                    field_mask |= DELTA_FIELD_SNAKE;
+                    if let Some(head) = Self::delta_shift_head_candidate(&prev.snake, &current.snake) {
+                        snake_mode = Some(DELTA_SNAKE_SHIFT_HEAD);
+                        shifted_head = Some(head);
+                    } else {
+                        snake_mode = Some(DELTA_SNAKE_REBASE);
+                    }
+                }
+            } else {
+                field_mask |= DELTA_FIELD_SNAKE;
+                snake_mode = Some(DELTA_SNAKE_REBASE);
+            }
+
+            if previous
+                .map(|prev| prev.digestions != current.digestions)
+                .unwrap_or(true)
+            {
+                field_mask |= DELTA_FIELD_DIGESTIONS;
+            }
+
+            encoder.write_u16(net_id);
+            encoder.write_u16(field_mask);
+
+            if field_mask & DELTA_FIELD_FLAGS != 0 {
+                encoder.write_u8(current.flags);
+            }
+            if field_mask & DELTA_FIELD_SCORE != 0 {
+                encoder.write_var_i32(current.score);
+            }
+            if field_mask & DELTA_FIELD_SCORE_FRACTION != 0 {
+                encoder.write_u8(current.score_fraction_q);
+            }
+            if field_mask & DELTA_FIELD_OXYGEN != 0 {
+                encoder.write_u8(current.oxygen_q);
+            }
+            if field_mask & DELTA_FIELD_GIRTH != 0 {
+                encoder.write_u8(current.girth_q);
+            }
+            if field_mask & DELTA_FIELD_TAIL_EXT != 0 {
+                encoder.write_u8(current.tail_ext_q);
+            }
+            if field_mask & DELTA_FIELD_SNAKE != 0 {
+                let mode = snake_mode.unwrap_or(DELTA_SNAKE_REBASE);
+                encoder.write_u8(mode);
+                if mode == DELTA_SNAKE_SHIFT_HEAD {
+                    if let Some((ox, oy)) = shifted_head {
+                        encoder.write_i16(ox);
+                        encoder.write_i16(oy);
+                    } else {
+                        encoder.write_i16(0);
+                        encoder.write_i16(0);
+                    }
+                } else {
+                    encoder.write_u8(current.snake.detail);
+                    encoder.write_u16(current.snake.total_len);
+                    match current.snake.detail {
+                        protocol::SNAKE_DETAIL_FULL => {
+                            encoder.write_u16(current.snake.len);
+                        }
+                        protocol::SNAKE_DETAIL_WINDOW => {
+                            encoder.write_u16(current.snake.start);
+                            encoder.write_u16(current.snake.len);
+                        }
+                        protocol::SNAKE_DETAIL_STUB => {}
+                        _ => {}
+                    }
+                    for (ox, oy) in &current.snake.points {
+                        encoder.write_i16(*ox);
+                        encoder.write_i16(*oy);
+                    }
+                }
+            }
+            if field_mask & DELTA_FIELD_DIGESTIONS != 0 {
+                let digestion_len = current.digestions.len().min(u8::MAX as usize) as u8;
+                encoder.write_u8(digestion_len);
+                for digestion in current.digestions.iter().take(digestion_len as usize) {
+                    encoder.write_u32(digestion.id);
+                    encoder.write_u16(digestion.progress_q);
+                    encoder.write_u8(digestion.strength_q);
+                }
+            }
+
+            next_cache.insert(net_id, current);
         }
 
-        encoder.into_vec()
+        session.delta_player_cache = next_cache;
+        Some(encoder.into_vec())
+    }
+
+    fn build_state_payload_for_session(
+        &mut self,
+        now: i64,
+        state_seq: u32,
+        session_id: &str,
+    ) -> Vec<u8> {
+        self.build_state_delta_payload_for_session(now, state_seq, session_id)
+            .unwrap_or_else(|| {
+                let mut encoder = protocol::Encoder::with_capacity(4 + 8 + 4 + 2 + 1 + 2);
+                encoder.write_header(protocol::TYPE_STATE_DELTA, 0);
+                encoder.write_i64(now);
+                encoder.write_u32(state_seq);
+                encoder.write_u16(self.players.len().min(u16::MAX as usize) as u16);
+                encoder.write_u8(DELTA_FRAME_KEYFRAME);
+                encoder.write_u16(0);
+                encoder.into_vec()
+            })
     }
 
     fn build_player_meta_payload(&self, player_ids: &[String]) -> Option<Vec<u8>> {
@@ -2734,9 +2925,107 @@ impl RoomState {
         self.write_player_state_with_window(encoder, player, SnakeWindow::full(player.snake.len()));
     }
 
-    fn quantize_pellet_normal(value: f64) -> i16 {
-        let clamped = clamp(value, -1.0, 1.0);
-        (clamped * i16::MAX as f64).round() as i16
+    fn encode_delta_player_cache(&self, player: &Player, window: SnakeWindow) -> DeltaPlayerCache {
+        let mut flags: u8 = 0;
+        if player.alive {
+            flags |= 1 << 0;
+        }
+        if player.is_boosting {
+            flags |= 1 << 1;
+        }
+
+        let available = player.snake.len();
+        let clamped_start = window.start.min(available).min(u16::MAX as usize);
+        let remaining = available.saturating_sub(clamped_start);
+        let clamped_len = window.len.min(remaining).min(u16::MAX as usize);
+        let detail = match window.detail {
+            SnakeDetail::Full => protocol::SNAKE_DETAIL_FULL,
+            SnakeDetail::Window => protocol::SNAKE_DETAIL_WINDOW,
+            SnakeDetail::Stub => protocol::SNAKE_DETAIL_STUB,
+        };
+
+        let mut points: Vec<(i16, i16)> = Vec::new();
+        if window.detail != SnakeDetail::Stub {
+            let end = clamped_start + clamped_len;
+            points.reserve(end.saturating_sub(clamped_start));
+            for node in player
+                .snake
+                .iter()
+                .skip(clamped_start)
+                .take(end - clamped_start)
+            {
+                points.push(Self::encode_unit_vec_oct_i16(Point {
+                    x: node.x,
+                    y: node.y,
+                    z: node.z,
+                }));
+            }
+        }
+
+        let digestion_total = if window.include_digestions() {
+            player.digestions.len()
+        } else {
+            0
+        };
+        let digestion_len = digestion_total.min(u8::MAX as usize);
+        let digestion_start = digestion_total.saturating_sub(digestion_len);
+        let mut digestions = Vec::with_capacity(digestion_len);
+        for digestion in player
+            .digestions
+            .iter()
+            .skip(digestion_start)
+            .take(digestion_len)
+        {
+            digestions.push(DeltaDigestionCache {
+                id: digestion.id,
+                progress_q: Self::quantize_unit_u16(get_digestion_progress(digestion)),
+                strength_q: Self::quantize_unit_u8(clamp(digestion.strength as f64, 0.0, 1.0)),
+            });
+        }
+
+        DeltaPlayerCache {
+            flags,
+            score: player.score.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+            score_fraction_q: Self::quantize_unit_u8(Self::player_score_fraction(player)),
+            oxygen_q: Self::quantize_unit_u8(clamp(player.oxygen, 0.0, 1.0)),
+            girth_q: Self::quantize_girth_scale_u8(Self::player_girth_scale_from_len(player.snake.len())),
+            tail_ext_q: Self::quantize_unit_u8(clamp(player.tail_extension, 0.0, 1.0)),
+            snake: DeltaSnakeCache {
+                detail,
+                total_len: window.total_len.min(u16::MAX as usize) as u16,
+                start: clamped_start as u16,
+                len: clamped_len as u16,
+                points,
+            },
+            digestions,
+        }
+    }
+
+    fn delta_shift_head_candidate(
+        previous: &DeltaSnakeCache,
+        current: &DeltaSnakeCache,
+    ) -> Option<(i16, i16)> {
+        if previous.detail != current.detail
+            || previous.total_len != current.total_len
+            || previous.start != current.start
+            || previous.len != current.len
+        {
+            return None;
+        }
+        let len = current.len as usize;
+        if len == 0
+            || previous.points.len() != len
+            || current.points.len() != len
+            || current.detail == protocol::SNAKE_DETAIL_STUB
+        {
+            return None;
+        }
+        for idx in 1..len {
+            if current.points[idx] != previous.points[idx - 1] {
+                return None;
+            }
+        }
+        current.points.first().copied()
     }
 
     fn quantize_pellet_size(size: f32) -> u8 {
@@ -2747,9 +3036,9 @@ impl RoomState {
 
     fn write_pellet(&self, encoder: &mut protocol::Encoder, pellet: &Pellet) {
         encoder.write_u32(pellet.id);
-        encoder.write_i16(Self::quantize_pellet_normal(pellet.normal.x));
-        encoder.write_i16(Self::quantize_pellet_normal(pellet.normal.y));
-        encoder.write_i16(Self::quantize_pellet_normal(pellet.normal.z));
+        let (ox, oy) = Self::encode_unit_vec_oct_i16(pellet.normal);
+        encoder.write_i16(ox);
+        encoder.write_i16(oy);
         encoder.write_u8(
             pellet
                 .color_index
@@ -2907,11 +3196,22 @@ impl RoomState {
         end
     }
 
-    fn broadcast_state(&mut self, now: i64, state_seq: u32) {
-        for (session_id, session) in &self.sessions {
-            let payload = self.build_state_payload_for_session(now, state_seq, session_id);
-            session.outbound_state.store(payload);
+    fn broadcast_state_delta(&mut self, now: i64, state_seq: u32) {
+        let session_ids: Vec<String> = self.sessions.keys().cloned().collect();
+        for session_id in session_ids {
+            let Some(payload) =
+                self.build_state_delta_payload_for_session(now, state_seq, &session_id)
+            else {
+                continue;
+            };
+            if let Some(session) = self.sessions.get(&session_id) {
+                session.outbound_state.store(payload);
+            }
         }
+    }
+
+    fn broadcast_state(&mut self, now: i64, state_seq: u32) {
+        self.broadcast_state_delta(now, state_seq);
     }
 
     fn pellet_needs_update(pellet: &Pellet) -> bool {
@@ -2928,7 +3228,7 @@ impl RoomState {
         indices: &[usize],
     ) -> Vec<u8> {
         let pellet_count = indices.len().min(u16::MAX as usize);
-        let capacity = 4 + 8 + 4 + 2 + pellet_count * 12;
+        let capacity = 4 + 8 + 4 + 2 + pellet_count * 10;
         let mut encoder = protocol::Encoder::with_capacity(capacity);
         encoder.write_header(protocol::TYPE_PELLET_RESET, 0);
         encoder.write_i64(now);
@@ -2954,7 +3254,7 @@ impl RoomState {
         let update_count = updates.len().min(u16::MAX as usize);
         let remove_count = removes.len().min(u16::MAX as usize);
         let capacity =
-            4 + 8 + 4 + 2 + add_count * 12 + 2 + update_count * 12 + 2 + remove_count * 4;
+            4 + 8 + 4 + 2 + add_count * 10 + 2 + update_count * 10 + 2 + remove_count * 4;
         let mut encoder = protocol::Encoder::with_capacity(capacity);
         encoder.write_header(protocol::TYPE_PELLET_DELTA, 0);
         encoder.write_i64(now);
@@ -3247,7 +3547,73 @@ mod tests {
         value
     }
 
+    fn read_var_u32(bytes: &[u8], offset: &mut usize) -> u32 {
+        let mut result = 0u32;
+        let mut shift = 0u32;
+        for _ in 0..5 {
+            let byte = read_u8(bytes, offset);
+            result |= ((byte & 0x7f) as u32) << shift;
+            if byte & 0x80 == 0 {
+                return result;
+            }
+            shift += 7;
+        }
+        panic!("invalid varint");
+    }
+
+    fn read_var_i32(bytes: &[u8], offset: &mut usize) -> i32 {
+        let value = read_var_u32(bytes, offset);
+        ((value >> 1) as i32) ^ (-((value & 1) as i32))
+    }
+
     fn skip_player_state(bytes: &[u8], offset: &mut usize) {
+        let _net_id = read_u16(bytes, offset);
+        let field_mask = read_u16(bytes, offset);
+        if field_mask & DELTA_FIELD_FLAGS != 0 {
+            *offset += 1;
+        }
+        if field_mask & DELTA_FIELD_SCORE != 0 {
+            let _score = read_var_i32(bytes, offset);
+        }
+        if field_mask & DELTA_FIELD_SCORE_FRACTION != 0 {
+            *offset += 1;
+        }
+        if field_mask & DELTA_FIELD_OXYGEN != 0 {
+            *offset += 1;
+        }
+        if field_mask & DELTA_FIELD_GIRTH != 0 {
+            *offset += 1;
+        }
+        if field_mask & DELTA_FIELD_TAIL_EXT != 0 {
+            *offset += 1;
+        }
+        if field_mask & DELTA_FIELD_SNAKE != 0 {
+            let mode = read_u8(bytes, offset);
+            if mode == DELTA_SNAKE_SHIFT_HEAD {
+                *offset += 4;
+            } else {
+                let detail = read_u8(bytes, offset);
+                let total_len = read_u16(bytes, offset);
+                let snake_len = match detail {
+                    protocol::SNAKE_DETAIL_FULL => read_u16(bytes, offset),
+                    protocol::SNAKE_DETAIL_WINDOW => {
+                        let _start = read_u16(bytes, offset);
+                        read_u16(bytes, offset)
+                    }
+                    protocol::SNAKE_DETAIL_STUB => 0,
+                    _ => panic!("unexpected snake detail"),
+                };
+                assert!(snake_len <= total_len);
+                *offset += snake_len as usize * 4;
+            }
+        }
+        if field_mask & DELTA_FIELD_DIGESTIONS != 0 {
+            let digestion_len = read_u8(bytes, offset);
+            *offset += digestion_len as usize * 7;
+        }
+    }
+
+    fn skip_init_player_state(bytes: &[u8], offset: &mut usize) {
         *offset += 2; // net id
         *offset += 1; // flags
         *offset += 4; // score
@@ -3277,11 +3643,12 @@ mod tests {
         let version = read_u8(payload, &mut offset);
         assert_eq!(version, protocol::VERSION);
         let message_type = read_u8(payload, &mut offset);
-        assert_eq!(message_type, protocol::TYPE_STATE);
+        assert_eq!(message_type, protocol::TYPE_STATE_DELTA);
         let _flags = read_u16(payload, &mut offset);
         offset += 8; // now
         let state_seq = read_u32(payload, &mut offset);
         let total_players = read_u16(payload, &mut offset);
+        let _frame_flags = read_u8(payload, &mut offset);
         let visible_players = read_u16(payload, &mut offset);
         for _ in 0..visible_players {
             skip_player_state(payload, &mut offset);
@@ -3316,7 +3683,7 @@ mod tests {
         }
         let visible_players = read_u16(payload, &mut offset);
         for _ in 0..visible_players {
-            skip_player_state(payload, &mut offset);
+            skip_init_player_state(payload, &mut offset);
         }
         assert!(offset <= payload.len());
         (state_seq, total_players, visible_players)
@@ -3497,6 +3864,8 @@ mod tests {
                 pellet_view_ids: HashSet::new(),
                 pellet_view_initialized: false,
                 pellet_reset_retry_at: 0,
+                delta_player_cache: HashMap::new(),
+                force_next_keyframe: true,
             },
         );
     }
@@ -4827,6 +5196,8 @@ mod tests {
                 pellet_view_ids: HashSet::new(),
                 pellet_view_initialized: false,
                 pellet_reset_retry_at: 0,
+                delta_player_cache: HashMap::new(),
+                force_next_keyframe: true,
             },
         );
 

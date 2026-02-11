@@ -30,6 +30,7 @@ import {
   encodeJoin,
   encodeRespawn,
   encodeView,
+  resetDeltaDecoderState,
   type PlayerMeta,
 } from './game/wsProtocol'
 import {
@@ -395,6 +396,10 @@ export default function App() {
     pointerButton: false,
   })
   const sendIntervalRef = useRef<number | null>(null)
+  const lastInputSignatureRef = useRef<string>('')
+  const lastInputSentAtMsRef = useRef(0)
+  const lastViewSignatureRef = useRef<string>('')
+  const lastViewSentAtMsRef = useRef(0)
   const snapshotBufferRef = useRef<TimedSnapshot[]>([])
   const serverOffsetRef = useRef<number | null>(null)
   const serverTickMsRef = useRef(50)
@@ -654,8 +659,53 @@ export default function App() {
     return `Renderer: ${activeRenderer.toUpperCase()}`
   }, [activeRenderer, rendererFallbackReason])
 
+  function sendInputSnapshot(force = false) {
+    const socket = socketRef.current
+    if (!socket || socket.readyState !== WebSocket.OPEN) return
+
+    const axis = inputEnabledRef.current
+      ? joystickAxisRef.current ??
+        (pointerRef.current.active ? webglRef.current?.getPointerAxis?.() ?? null : null)
+      : null
+    const boost = inputEnabledRef.current && pointerRef.current.boost
+    const nowMs = performance.now()
+    const axisSignature = axis
+      ? `${axis.x.toFixed(4)},${axis.y.toFixed(4)},${axis.z.toFixed(4)}`
+      : 'null'
+    const inputSignature = `${axisSignature}|${boost ? 1 : 0}`
+    const inputChanged = force || inputSignature !== lastInputSignatureRef.current
+    const inputHeartbeat = nowMs - lastInputSentAtMsRef.current >= 100
+    if (inputChanged || inputHeartbeat || lastInputSentAtMsRef.current === 0) {
+      socket.send(encodeInputFast(axis, boost))
+      lastInputSignatureRef.current = inputSignature
+      lastInputSentAtMsRef.current = nowMs
+    }
+
+    const config = renderConfigRef.current
+    const aspect = config && config.height > 0 ? config.width / config.height : 1
+    const cameraDistance = renderCameraDistanceRef.current
+    const cameraVerticalOffset = renderCameraVerticalOffsetRef.current
+    const effectiveCameraDistance = Math.hypot(cameraDistance, cameraVerticalOffset)
+    const viewRadius = computeViewRadius(effectiveCameraDistance, aspect)
+    const center = localHeadRef.current
+    const centerSignature = center
+      ? `${center.x.toFixed(4)},${center.y.toFixed(4)},${center.z.toFixed(4)}`
+      : 'null'
+    const viewSignature = `${centerSignature}|${viewRadius.toFixed(4)}|${effectiveCameraDistance.toFixed(
+      4,
+    )}`
+    const viewChanged = force || viewSignature !== lastViewSignatureRef.current
+    const viewHeartbeat = nowMs - lastViewSentAtMsRef.current >= 250
+    if (viewChanged || viewHeartbeat || lastViewSentAtMsRef.current === 0) {
+      socket.send(encodeView(center, viewRadius, effectiveCameraDistance))
+      lastViewSignatureRef.current = viewSignature
+      lastViewSentAtMsRef.current = nowMs
+    }
+  }
+
   const syncBoostInput = () => {
     pointerRef.current.boost = boostInputRef.current.keyboard || boostInputRef.current.pointerButton
+    sendInputSnapshot(true)
   }
 
   const setPointerButtonBoostInput = (active: boolean) => {
@@ -2518,6 +2568,10 @@ export default function App() {
       netRxWindowBytesRef.current = 0
       netRxBpsRef.current = 0
       netRxTotalBytesRef.current = 0
+      lastInputSignatureRef.current = ''
+      lastInputSentAtMsRef.current = 0
+      lastViewSignatureRef.current = ''
+      lastViewSentAtMsRef.current = 0
       playoutDelayMsRef.current = 100
       delayBoostMsRef.current = 0
       lastDelayUpdateMsRef.current = null
@@ -2534,6 +2588,7 @@ export default function App() {
       tickIntervalRef.current = 50
       playerMetaRef.current = new Map()
       playerIdByNetIdRef.current = new Map()
+      resetDeltaDecoderState()
       pelletMapRef.current = new Map()
       pelletsArrayRef.current = []
       resetScoreRadialState(scoreRadialStateRef.current)
@@ -2733,6 +2788,7 @@ export default function App() {
     return () => {
       cancelled = true
       if (reconnectTimer) window.clearTimeout(reconnectTimer)
+      resetDeltaDecoderState()
       socketRef.current?.close()
       socketRef.current = null
     }
@@ -2823,36 +2879,16 @@ export default function App() {
     const localY = event.clientY - rect.top
     const active = inputEnabledRef.current
     setPointerScreen(localX, localY, active)
+    sendInputSnapshot(true)
   }
 
   const startInputLoop = () => {
     if (sendIntervalRef.current !== null) return
-    // Send input more frequently than the server tick so pointer steering feels responsive.
-    // The server consumes the latest input each tick; higher cadence reduces worst-case input latency.
-    const intervalMs = Math.max(16, Math.round(tickIntervalRef.current / 2))
-    let lastViewSentAtMs = 0
+    const intervalMs = 50
     sendIntervalRef.current = window.setInterval(() => {
-      const socket = socketRef.current
-      if (!socket || socket.readyState !== WebSocket.OPEN) return
-      const axis = inputEnabledRef.current
-        ? joystickAxisRef.current ??
-          (pointerRef.current.active ? webglRef.current?.getPointerAxis?.() ?? null : null)
-        : null
-      const config = renderConfigRef.current
-      const aspect = config && config.height > 0 ? config.width / config.height : 1
-      const cameraDistance = renderCameraDistanceRef.current
-      const cameraVerticalOffset = renderCameraVerticalOffsetRef.current
-      const effectiveCameraDistance = Math.hypot(cameraDistance, cameraVerticalOffset)
-      const viewRadius = computeViewRadius(effectiveCameraDistance, aspect)
-      const boost = inputEnabledRef.current && pointerRef.current.boost
-      socket.send(encodeInputFast(axis, boost))
-
-      const nowMs = performance.now()
-      if (nowMs - lastViewSentAtMs >= 100) {
-        socket.send(encodeView(localHeadRef.current, viewRadius, effectiveCameraDistance))
-        lastViewSentAtMs = nowMs
-      }
+      sendInputSnapshot(false)
     }, intervalMs)
+    sendInputSnapshot(true)
   }
 
   const sendJoin = (socket: WebSocket, deferSpawn = menuPhaseRef.current !== 'playing') => {
@@ -2945,6 +2981,7 @@ export default function App() {
     setJoystickUiBoost(false)
     setJoystickUiVars(centerX, centerY, radius, 0, 0)
     setJoystickUiVisible(true)
+    sendInputSnapshot(true)
   }
 
   const stopJoystick = () => {
@@ -2954,6 +2991,7 @@ export default function App() {
       setPointerButtonBoostInput(false)
       setJoystickUiBoost(false)
       setJoystickUiVisible(false)
+      sendInputSnapshot(true)
       return
     }
 
@@ -2965,6 +3003,7 @@ export default function App() {
     setJoystickUiBoost(false)
     setJoystickUiVars(joy.centerX, joy.centerY, joy.radius, 0, 0)
     setJoystickUiVisible(false)
+    sendInputSnapshot(true)
   }
 
   const updateJoystick = (pointerId: number, localX: number, localY: number) => {
@@ -3003,6 +3042,7 @@ export default function App() {
       setPointerButtonBoostInput(wanted)
       setJoystickUiBoost(wanted)
     }
+    sendInputSnapshot(true)
   }
 
   const updatePinchZoom = () => {
@@ -3173,6 +3213,7 @@ export default function App() {
     }
     setPointerScreen(Number.NaN, Number.NaN, false)
     setPointerButtonBoostInput(false)
+    sendInputSnapshot(true)
   }
 
   const handlePointerCancel = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -3224,6 +3265,7 @@ export default function App() {
 
     setPointerScreen(Number.NaN, Number.NaN, false)
     setPointerButtonBoostInput(false)
+    sendInputSnapshot(true)
   }
 
   const handleWheel = (event: WheelEvent) => {
@@ -3238,6 +3280,7 @@ export default function App() {
       CAMERA_DISTANCE_MAX,
     )
     cameraDistanceRef.current = nextDistance
+    sendInputSnapshot(true)
   }
 
   const handleJoinRoom = () => {

@@ -29,6 +29,8 @@ Environment variables:
   CONTROL_HOST      Hetzner control-plane host (default: 178.156.136.148)
   CONTROL_USER      SSH user (default: root)
   CONTROL_SSH_KEY   SSH key for control-plane (default: ~/.ssh/hetzner_server)
+  CONTROL_HEALTH_TIMEOUT_SECS  Max seconds to wait for control-plane health (default: 600)
+  ROOM_DELETE_TIMEOUT_SECS     Max seconds to wait for room VM deletion before restart (default: 300)
 
   PROD_ORIGIN       Public prod origin for verification (default: https://slitherworld.com)
 EOF
@@ -111,6 +113,8 @@ CONTROL_HOST="${CONTROL_HOST:-178.156.136.148}"
 CONTROL_USER="${CONTROL_USER:-root}"
 CONTROL_SSH_KEY="${CONTROL_SSH_KEY:-$HOME/.ssh/hetzner_server}"
 SSH_TARGET="${CONTROL_USER}@${CONTROL_HOST}"
+CONTROL_HEALTH_TIMEOUT_SECS="${CONTROL_HEALTH_TIMEOUT_SECS:-600}"
+ROOM_DELETE_TIMEOUT_SECS="${ROOM_DELETE_TIMEOUT_SECS:-300}"
 
 IMAGE_FILE="${IMAGE_FILE:-infra/prod-backend-image.txt}"
 PROD_ORIGIN="${PROD_ORIGIN:-https://slitherworld.com}"
@@ -151,11 +155,36 @@ if [[ "$SKIP_BACKEND" -eq 0 ]]; then
     backend
 
   echo "Rolling control-plane to ${IMAGE}..."
-  ssh_control bash -s -- "$IMAGE" <<'EOF'
+  ssh_control bash -s -- "$IMAGE" "$CONTROL_HEALTH_TIMEOUT_SECS" <<'EOF'
 set -euo pipefail
 
 NEW_IMAGE="$1"
+HEALTH_TIMEOUT_SECS="$2"
 ENV_FILE="/root/snake-control.env"
+
+wait_control_health() {
+  local timeout_secs="$1"
+  local start_secs
+  start_secs="$(date +%s)"
+  while true; do
+    if curl -fsS http://127.0.0.1/api/health >/dev/null 2>&1; then
+      echo "health-ok"
+      return 0
+    fi
+    if ! docker ps --format '{{.Names}}' | grep -qx 'snake-control'; then
+      echo "snake-control container is not running" >&2
+      docker ps -a --filter name=snake-control --format '{{.Status}}' >&2 || true
+      docker logs --tail 160 snake-control >&2 || true
+      return 1
+    fi
+    if (( $(date +%s) - start_secs >= timeout_secs )); then
+      docker logs --tail 160 snake-control || true
+      echo "health-timeout (${timeout_secs}s)" >&2
+      return 1
+    fi
+    sleep 2
+  done
+}
 
 cp -a "$ENV_FILE" "${ENV_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
 sed -i "s|^ROOM_IMAGE=.*$|ROOM_IMAGE=${NEW_IMAGE}|" "$ENV_FILE"
@@ -169,26 +198,45 @@ docker run -d \
   -p 80:80 \
   "$NEW_IMAGE" >/dev/null
 
-for i in $(seq 1 30); do
-  if curl -fsS http://127.0.0.1/api/health >/dev/null 2>&1; then
-    echo "health-ok"
-    exit 0
-  fi
-  sleep 1
-done
-
-docker logs --tail 120 snake-control || true
-echo "health-timeout" >&2
-exit 1
+wait_control_health "$HEALTH_TIMEOUT_SECS"
 EOF
 
   if [[ "$SKIP_ROOM_ROLLOUT" -eq 0 ]]; then
     echo "Deleting room servers to force ROOM_IMAGE rollout..."
-    ssh_control bash -s <<'EOF'
+    ssh_control bash -s -- "$ROOM_DELETE_TIMEOUT_SECS" "$CONTROL_HEALTH_TIMEOUT_SECS" <<'EOF'
 set -euo pipefail
 
-python3 - <<'PY'
+ROOM_DELETE_TIMEOUT_SECS="$1"
+HEALTH_TIMEOUT_SECS="$2"
+
+wait_control_health() {
+  local timeout_secs="$1"
+  local start_secs
+  start_secs="$(date +%s)"
+  while true; do
+    if curl -fsS http://127.0.0.1/api/health >/dev/null 2>&1; then
+      echo "health-ok"
+      return 0
+    fi
+    if ! docker ps --format '{{.Names}}' | grep -qx 'snake-control'; then
+      echo "snake-control container is not running" >&2
+      docker ps -a --filter name=snake-control --format '{{.Status}}' >&2 || true
+      docker logs --tail 200 snake-control >&2 || true
+      return 1
+    fi
+    if (( $(date +%s) - start_secs >= timeout_secs )); then
+      docker logs --tail 200 snake-control || true
+      echo "health-timeout (${timeout_secs}s)" >&2
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+python3 - "$ROOM_DELETE_TIMEOUT_SECS" <<'PY'
 import json
+import sys
+import time
 import urllib.parse
 import urllib.request
 
@@ -203,12 +251,17 @@ token = read_env_value("/root/snake-control.env", "HETZNER_API_TOKEN")
 if not token:
     raise SystemExit("missing HETZNER_API_TOKEN")
 
+delete_timeout_secs = int(sys.argv[1])
 selector = "app=spherical-snake-room,managed_by=snake-control"
-url = "https://api.hetzner.cloud/v1/servers?label_selector=" + urllib.parse.quote(selector)
-req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
-with urllib.request.urlopen(req, timeout=20) as resp:
-    data = json.load(resp)
-servers = data.get("servers", [])
+
+def list_room_servers():
+    url = "https://api.hetzner.cloud/v1/servers?label_selector=" + urllib.parse.quote(selector)
+    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        data = json.load(resp)
+    return data.get("servers", [])
+
+servers = list_room_servers()
 print(f"room_servers={len(servers)}")
 for s in servers:
     sid = s.get("id")
@@ -221,20 +274,27 @@ for s in servers:
     with urllib.request.urlopen(del_req, timeout=30) as del_resp:
         del_resp.read()
 print("delete_requests_submitted")
+
+deadline = time.monotonic() + delete_timeout_secs
+last_count = None
+while True:
+    remaining = list_room_servers()
+    count = len(remaining)
+    if count == 0:
+        print("delete_complete")
+        break
+    if last_count != count:
+        print(f"waiting_for_room_deletion remaining={count}")
+        last_count = count
+    if time.monotonic() >= deadline:
+        remaining_ids = ",".join(str((srv.get("id"))) for srv in remaining)
+        raise SystemExit(f"timed out waiting for room deletion remaining={count} ids={remaining_ids}")
+    time.sleep(2)
 PY
 
 docker restart snake-control >/dev/null
-for i in $(seq 1 30); do
-  if curl -fsS http://127.0.0.1/api/health >/dev/null 2>&1; then
-    echo "health-ok"
-    exit 0
-  fi
-  sleep 1
-done
 
-docker logs --tail 160 snake-control || true
-echo "health-timeout" >&2
-exit 1
+wait_control_health "$HEALTH_TIMEOUT_SECS"
 EOF
   fi
 fi

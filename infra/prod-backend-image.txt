@@ -1,1 +1,1 @@
-ghcr.io/nickandbro/slither-world-backend:prod-20260210-fa15a16
+ghcr.io/nickandbro/slither-world-backend:prod-20260211-2c8d5b5

@@ -1,7 +1,7 @@
 use crate::game::types::Point;
 use uuid::Uuid;
 
-pub const VERSION: u8 = 14;
+pub const VERSION: u8 = 15;
 
 pub const TYPE_JOIN: u8 = 0x01;
 pub const TYPE_INPUT: u8 = 0x02;
@@ -9,10 +9,10 @@ pub const TYPE_RESPAWN: u8 = 0x03;
 pub const TYPE_VIEW: u8 = 0x04;
 
 pub const TYPE_INIT: u8 = 0x10;
-pub const TYPE_STATE: u8 = 0x11;
 pub const TYPE_PLAYER_META: u8 = 0x12;
 pub const TYPE_PELLET_DELTA: u8 = 0x13;
 pub const TYPE_PELLET_RESET: u8 = 0x14;
+pub const TYPE_STATE_DELTA: u8 = 0x15;
 
 pub const FLAG_JOIN_PLAYER_ID: u16 = 1 << 0;
 pub const FLAG_JOIN_NAME: u16 = 1 << 1;
@@ -29,6 +29,40 @@ pub const FLAG_VIEW_CAMERA_DISTANCE: u16 = 1 << 2;
 pub const SNAKE_DETAIL_FULL: u8 = 0;
 pub const SNAKE_DETAIL_WINDOW: u8 = 1;
 pub const SNAKE_DETAIL_STUB: u8 = 2;
+
+pub const VIEW_RADIUS_MIN: f32 = 0.2;
+pub const VIEW_RADIUS_MAX: f32 = 1.4;
+pub const VIEW_CAMERA_DISTANCE_MIN: f32 = 4.0;
+pub const VIEW_CAMERA_DISTANCE_MAX: f32 = 10.0;
+
+fn dequantize_u16_to_range(value: u16, min: f32, max: f32) -> f32 {
+    let t = value as f32 / u16::MAX as f32;
+    min + (max - min) * t
+}
+
+fn decode_oct_i16_to_point(xq: i16, yq: i16) -> Point {
+    let inv = 1.0 / i16::MAX as f64;
+    let mut x = xq as f64 * inv;
+    let mut y = yq as f64 * inv;
+    let z = 1.0 - x.abs() - y.abs();
+    let t = (-z).max(0.0);
+    x += if x >= 0.0 { -t } else { t };
+    y += if y >= 0.0 { -t } else { t };
+    let len = (x * x + y * y + z * z).sqrt();
+    if !len.is_finite() || len <= 1e-9 {
+        return Point {
+            x: 0.0,
+            y: 0.0,
+            z: 1.0,
+        };
+    }
+    let inv_len = 1.0 / len;
+    Point {
+        x: x * inv_len,
+        y: y * inv_len,
+        z: z * inv_len,
+    }
+}
 
 #[derive(Debug)]
 pub enum ClientMessage {
@@ -97,11 +131,9 @@ pub fn decode_client_message(data: &[u8]) -> Option<ClientMessage> {
         TYPE_RESPAWN => Some(ClientMessage::Respawn),
         TYPE_INPUT => {
             let axis = if flags & FLAG_INPUT_AXIS != 0 {
-                Some(Point {
-                    x: reader.read_f32()? as f64,
-                    y: reader.read_f32()? as f64,
-                    z: reader.read_f32()? as f64,
-                })
+                let ox = reader.read_i16()?;
+                let oy = reader.read_i16()?;
+                Some(decode_oct_i16_to_point(ox, oy))
             } else {
                 None
             };
@@ -110,21 +142,29 @@ pub fn decode_client_message(data: &[u8]) -> Option<ClientMessage> {
         }
         TYPE_VIEW => {
             let view_center = if flags & FLAG_VIEW_CENTER != 0 {
-                Some(Point {
-                    x: reader.read_f32()? as f64,
-                    y: reader.read_f32()? as f64,
-                    z: reader.read_f32()? as f64,
-                })
+                let ox = reader.read_i16()?;
+                let oy = reader.read_i16()?;
+                Some(decode_oct_i16_to_point(ox, oy))
             } else {
                 None
             };
             let view_radius = if flags & FLAG_VIEW_RADIUS != 0 {
-                Some(reader.read_f32()?)
+                let q = reader.read_u16()?;
+                Some(dequantize_u16_to_range(
+                    q,
+                    VIEW_RADIUS_MIN,
+                    VIEW_RADIUS_MAX,
+                ))
             } else {
                 None
             };
             let camera_distance = if flags & FLAG_VIEW_CAMERA_DISTANCE != 0 {
-                Some(reader.read_f32()?)
+                let q = reader.read_u16()?;
+                Some(dequantize_u16_to_range(
+                    q,
+                    VIEW_CAMERA_DISTANCE_MIN,
+                    VIEW_CAMERA_DISTANCE_MAX,
+                ))
             } else {
                 None
             };
@@ -179,6 +219,19 @@ impl Encoder {
         self.buffer.extend_from_slice(&value.to_le_bytes());
     }
 
+    pub fn write_var_u32(&mut self, mut value: u32) {
+        while value >= 0x80 {
+            self.write_u8(((value & 0x7f) as u8) | 0x80);
+            value >>= 7;
+        }
+        self.write_u8(value as u8);
+    }
+
+    pub fn write_var_i32(&mut self, value: i32) {
+        let zigzag = ((value << 1) ^ (value >> 31)) as u32;
+        self.write_var_u32(zigzag);
+    }
+
     pub fn write_i64(&mut self, value: i64) {
         self.buffer.extend_from_slice(&value.to_le_bytes());
     }
@@ -223,9 +276,9 @@ impl<'a> Reader<'a> {
         Some(u16::from_le_bytes(bytes))
     }
 
-    fn read_f32(&mut self) -> Option<f32> {
-        let bytes = self.read_bytes::<4>()?;
-        Some(f32::from_le_bytes(bytes))
+    fn read_i16(&mut self) -> Option<i16> {
+        let bytes = self.read_bytes::<2>()?;
+        Some(i16::from_le_bytes(bytes))
     }
 
     fn read_uuid(&mut self) -> Option<Uuid> {
@@ -349,9 +402,8 @@ mod tests {
     fn decode_input_axis_and_boost() {
         let mut encoder = Encoder::with_capacity(32);
         encoder.write_header(TYPE_INPUT, FLAG_INPUT_AXIS | FLAG_INPUT_BOOST);
-        encoder.write_f32(1.5);
-        encoder.write_f32(-2.0);
-        encoder.write_f32(0.25);
+        encoder.write_i16(0);
+        encoder.write_i16(i16::MAX);
         let data = encoder.into_vec();
 
         let message = decode_client_message(&data).expect("message");
@@ -359,9 +411,9 @@ mod tests {
             ClientMessage::Input { axis, boost } => {
                 let axis = axis.expect("axis");
                 assert!(boost);
-                assert!((axis.x - 1.5).abs() < 1e-6);
-                assert!((axis.y + 2.0).abs() < 1e-6);
-                assert!((axis.z - 0.25).abs() < 1e-6);
+                assert!(axis.x.abs() < 1e-3);
+                assert!((axis.y - 1.0).abs() < 1e-3);
+                assert!(axis.z.abs() < 1e-3);
             }
             _ => panic!("unexpected message"),
         }
@@ -374,11 +426,10 @@ mod tests {
             TYPE_VIEW,
             FLAG_VIEW_CENTER | FLAG_VIEW_RADIUS | FLAG_VIEW_CAMERA_DISTANCE,
         );
-        encoder.write_f32(0.4);
-        encoder.write_f32(0.5);
-        encoder.write_f32(0.6);
-        encoder.write_f32(0.9);
-        encoder.write_f32(5.7);
+        encoder.write_i16(0);
+        encoder.write_i16(0);
+        encoder.write_u16(u16::MAX / 2);
+        encoder.write_u16(u16::MAX / 2);
         let data = encoder.into_vec();
 
         let message = decode_client_message(&data).expect("message");
@@ -389,12 +440,16 @@ mod tests {
                 camera_distance,
             } => {
                 let view_center = view_center.expect("view_center");
-                assert!((view_center.x - 0.4).abs() < 1e-6);
-                assert!((view_center.y - 0.5).abs() < 1e-6);
-                assert!((view_center.z - 0.6).abs() < 1e-6);
+                assert!(view_center.x.abs() < 1e-3);
+                assert!(view_center.y.abs() < 1e-3);
+                assert!((view_center.z - 1.0).abs() < 1e-3);
 
-                assert!((view_radius.expect("view_radius") - 0.9).abs() < 1e-6);
-                assert!((camera_distance.expect("camera_distance") - 5.7).abs() < 1e-6);
+                let expected_radius = VIEW_RADIUS_MIN + (VIEW_RADIUS_MAX - VIEW_RADIUS_MIN) * 0.5;
+                let expected_camera =
+                    VIEW_CAMERA_DISTANCE_MIN
+                        + (VIEW_CAMERA_DISTANCE_MAX - VIEW_CAMERA_DISTANCE_MIN) * 0.5;
+                assert!((view_radius.expect("view_radius") - expected_radius).abs() < 0.01);
+                assert!((camera_distance.expect("camera_distance") - expected_camera).abs() < 0.01);
             }
             _ => panic!("unexpected message"),
         }
