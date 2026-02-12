@@ -1,6 +1,5 @@
 import * as THREE from 'three'
-import type { PelletSnapshot, PlayerSnapshot } from '../../../../game/types'
-import type { PelletOverride } from '../pellets/runtime'
+import type { PlayerSnapshot } from '../../../../game/types'
 import type { DeathState, SnakeVisual } from '../runtimeTypes'
 import type { SnakeTubeCache } from './geometry'
 import type { SnakeGroundingInfo } from './grounding'
@@ -23,9 +22,8 @@ type CreateSnakeCollectionRuntimeOptions = {
     player: PlayerSnapshot,
     isLocal: boolean,
     deltaSeconds: number,
-    pellets: PelletSnapshot[] | null,
     nowMs: number,
-  ) => PelletOverride | null
+  ) => void
   updateBoostTrailForPlayer: (
     player: PlayerSnapshot,
     tailContactNormal: THREE.Vector3 | null,
@@ -40,9 +38,8 @@ type SnakeCollectionRuntime = {
     players: PlayerSnapshot[],
     localPlayerId: string | null,
     deltaSeconds: number,
-    pellets: PelletSnapshot[] | null,
     nowMs: number,
-  ) => PelletOverride | null
+  ) => void
 }
 
 export const createSnakeCollectionRuntime = (
@@ -85,9 +82,6 @@ export const createSnakeCollectionRuntime = (
     visual.eyeRight.material.dispose()
     visual.pupilLeft.material.dispose()
     visual.pupilRight.material.dispose()
-    visual.tongueBase.material.dispose()
-    visual.tongueForkLeft.material.dispose()
-    visual.tongueForkRight.material.dispose()
     visual.boostDraftMaterial.dispose()
     visual.intakeConeMaterial.dispose()
     visual.nameplateMaterial.dispose()
@@ -105,24 +99,18 @@ export const createSnakeCollectionRuntime = (
     players: PlayerSnapshot[],
     localPlayerId: string | null,
     deltaSeconds: number,
-    pellets: PelletSnapshot[] | null,
     nowMs: number,
-  ): PelletOverride | null => {
+  ) => {
     const activeIds = new Set<string>()
     setLocalGroundingInfo(null)
-    let pelletOverride: PelletOverride | null = null
     for (const player of players) {
       activeIds.add(player.id)
-      const override = updateSnake(
+      updateSnake(
         player,
         player.id === localPlayerId,
         deltaSeconds,
-        pellets,
         nowMs,
       )
-      if (override) {
-        pelletOverride = override
-      }
       const tailContactNormal = lastTailContactNormals.get(player.id) ?? null
       updateBoostTrailForPlayer(player, tailContactNormal, nowMs)
     }
@@ -136,8 +124,6 @@ export const createSnakeCollectionRuntime = (
       }
     }
     updateInactiveBoostTrails(activeIds, nowMs)
-
-    return pelletOverride
   }
 
   return {

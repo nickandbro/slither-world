@@ -16,9 +16,6 @@ type SnakePlayerVisualRuntimeDeps = {
   pupilGeometry: THREE.SphereGeometry
   eyeMaterial: THREE.MeshStandardMaterial
   pupilMaterial: THREE.MeshStandardMaterial
-  tongueBaseGeometry: THREE.CylinderGeometry
-  tongueForkGeometry: THREE.CylinderGeometry
-  tongueMaterial: THREE.MeshStandardMaterial
   boostDraftGeometry: THREE.SphereGeometry
   boostDraftTexture: THREE.Texture | null
   intakeConeGeometry: THREE.PlaneGeometry
@@ -93,9 +90,6 @@ export const createSnakePlayerVisualRuntime = (deps: SnakePlayerVisualRuntimeDep
     pupilGeometry,
     eyeMaterial,
     pupilMaterial,
-    tongueBaseGeometry,
-    tongueForkGeometry,
-    tongueMaterial,
     boostDraftGeometry,
     boostDraftTexture,
     intakeConeGeometry,
@@ -256,26 +250,14 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
 
     const eyeMaterialLocal = eyeMaterial.clone()
     const pupilMaterialLocal = pupilMaterial.clone()
-    const tongueMaterialLocal = tongueMaterial.clone()
     const eyeLeft = new THREE.Mesh(eyeGeometry, eyeMaterialLocal)
     const eyeRight = new THREE.Mesh(eyeGeometry, eyeMaterialLocal)
     const pupilLeft = new THREE.Mesh(pupilGeometry, pupilMaterialLocal)
     const pupilRight = new THREE.Mesh(pupilGeometry, pupilMaterialLocal)
-    const tongue = new THREE.Group()
-    const tongueBase = new THREE.Mesh(tongueBaseGeometry, tongueMaterialLocal)
-    const tongueForkLeft = new THREE.Mesh(tongueForkGeometry, tongueMaterialLocal)
-    const tongueForkRight = new THREE.Mesh(tongueForkGeometry, tongueMaterialLocal)
-    tongueForkLeft.rotation.z = 0.55
-    tongueForkRight.rotation.z = -0.55
-    tongue.add(tongueBase)
-    tongue.add(tongueForkLeft)
-    tongue.add(tongueForkRight)
-    tongue.visible = false
     group.add(eyeLeft)
     group.add(eyeRight)
     group.add(pupilLeft)
     group.add(pupilRight)
-    group.add(tongue)
 
     const boostDraftMaterial = createBoostDraftMaterial()
     const boostDraft = new THREE.Mesh(boostDraftGeometry, boostDraftMaterial)
@@ -325,10 +307,6 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
       eyeRight,
       pupilLeft,
       pupilRight,
-      tongue,
-      tongueBase,
-      tongueForkLeft,
-      tongueForkRight,
       bowl,
       bowlMaterial,
       bowlCrackUniform,

@@ -1,11 +1,10 @@
 import * as THREE from 'three'
-import type { PelletSnapshot, PlayerSnapshot } from '../../../../game/types'
+import type { PlayerSnapshot } from '../../../../game/types'
 import { sampleLakes, type Lake } from '../environment/lakes'
 import { buildDigestionVisuals } from './digestion'
 import type { SnakeTubeCache } from './geometry'
 import { createGroundingInfo, finalizeGroundingInfo, type SnakeGroundingInfo } from './grounding'
 import { clamp, smoothstep } from '../utils/math'
-import type { PelletOverride } from '../pellets/runtime'
 import type { DeathState, SnakeVisual } from '../runtimeTypes'
 import type { TailFrameState } from './tailShape'
 import { hideBoostDraft, hideIntakeCone, hideNameplate, updateNameplateText, updateSnakeMaterial } from './visual'
@@ -59,7 +58,6 @@ type SnakePlayerRuntimeDeps = {
   lastTailContactNormals: Map<string, THREE.Vector3>
   lastHeadPositions: Map<string, THREE.Vector3>
   lastForwardDirections: Map<string, THREE.Vector3>
-  tongueStates: Map<string, unknown>
   pelletMouthTargets: Map<string, THREE.Vector3>
   resetSnakeTransientState: (id: string) => void
   setLocalGroundingInfo: (value: SnakeGroundingInfo | null) => void
@@ -160,16 +158,6 @@ type SnakePlayerRuntimeDeps = {
     deltaSeconds: number
     nowMs: number
   }) => void
-  updateTongue: (
-    playerId: string,
-    visual: SnakeVisual,
-    headPosition: THREE.Vector3,
-    headNormal: THREE.Vector3,
-    forward: THREE.Vector3,
-    headScale: number,
-    pellets: PelletSnapshot[] | null,
-    deltaSeconds: number,
-  ) => PelletOverride | null
 }
 
 export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
@@ -190,7 +178,6 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
     lastTailContactNormals,
     lastHeadPositions,
     lastForwardDirections,
-    tongueStates,
     pelletMouthTargets,
     resetSnakeTransientState,
     setLocalGroundingInfo,
@@ -213,7 +200,6 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
     updateSnakeTailCap,
     updateBoostDraft,
     updateIntakeCone,
-    updateTongue,
   } = deps
 
   const tempVector = new THREE.Vector3()
@@ -231,9 +217,8 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
     player: PlayerSnapshot,
     isLocal: boolean,
     deltaSeconds: number,
-    pellets: PelletSnapshot[] | null,
     nowMs: number,
-  ): PelletOverride | null => {
+  ) => {
     const skin = getSnakeSkinTexture(player.color, player.skinColors)
     let visual = snakes.get(player.id)
     if (!visual) {
@@ -282,9 +267,6 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
     updateSnakeMaterial(visual.eyeRight.material, '#ffffff', false, opacity, 0)
     updateSnakeMaterial(visual.pupilLeft.material, '#1b1b1b', false, opacity, 0)
     updateSnakeMaterial(visual.pupilRight.material, '#1b1b1b', false, opacity, 0)
-    updateSnakeMaterial(visual.tongueBase.material, '#ff6f9f', false, opacity, 0.3)
-    updateSnakeMaterial(visual.tongueForkLeft.material, '#ff6f9f', false, opacity, 0.3)
-    updateSnakeMaterial(visual.tongueForkRight.material, '#ff6f9f', false, opacity, 0.3)
     if (isLocal) {
       hideNameplate(visual)
     }
@@ -310,12 +292,11 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
       visual.eyeRight.visible = false
       visual.pupilLeft.visible = false
       visual.pupilRight.visible = false
-      visual.tongue.visible = false
       visual.bowl.visible = false
       hideBoostDraft(visual)
       hideIntakeCone(visual)
       hideNameplate(visual)
-      return null
+      return
     }
 
     const nodes = player.snake
@@ -526,7 +507,6 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
       visual.eyeRight.visible = false
       visual.pupilLeft.visible = false
       visual.pupilRight.visible = false
-      visual.tongue.visible = false
       visual.bowl.visible = false
       hideBoostDraft(visual)
       hideIntakeCone(visual)
@@ -536,17 +516,15 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
       lastTailDirections.delete(player.id)
       lastTailContactNormals.delete(player.id)
       tailFrameStates.delete(player.id)
-      tongueStates.delete(player.id)
       pelletMouthTargets.delete(player.id)
       lastSnakeStarts.delete(player.id)
       if (isLocal) {
         setLocalGroundingInfo(finalizeGroundingInfo(groundingInfo))
       }
-      return null
+      return
     }
 
     const hasHead = player.snakeStart === 0
-    let tongueOverride: PelletOverride | null = null
 
     if (!hasHead) {
       visual.head.visible = false
@@ -554,14 +532,12 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
       visual.eyeRight.visible = false
       visual.pupilLeft.visible = false
       visual.pupilRight.visible = false
-      visual.tongue.visible = false
       visual.bowl.visible = false
       hideBoostDraft(visual)
       hideIntakeCone(visual)
       hideNameplate(visual)
       lastHeadPositions.delete(player.id)
       lastForwardDirections.delete(player.id)
-      tongueStates.delete(player.id)
       pelletMouthTargets.delete(player.id)
     } else {
       visual.head.visible = true
@@ -807,22 +783,6 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
       updatePupil(leftEyePosition, tempVectorF, visual.pupilLeft.position)
       tempVectorG.copy(rightEyePosition).sub(headPosition).normalize()
       updatePupil(rightEyePosition, tempVectorG, visual.pupilRight.position)
-
-      if (isLocal) {
-        tongueOverride = updateTongue(
-          player.id,
-          visual,
-          headPosition,
-          headNormal,
-          forward,
-          headScale,
-          pellets,
-          deltaSeconds,
-        )
-      } else {
-        visual.tongue.visible = false
-        tongueStates.delete(player.id)
-      }
     }
 
     if (nodes.length > 1) {
@@ -897,8 +857,6 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
     if (isLocal) {
       setLocalGroundingInfo(finalizeGroundingInfo(groundingInfo))
     }
-
-    return tongueOverride
   }
 
   return { updateSnake }

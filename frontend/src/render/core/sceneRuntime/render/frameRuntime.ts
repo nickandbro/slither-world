@@ -5,7 +5,6 @@ import { updatePointerArrowOverlay, type PointerArrowOverlay } from '../overlays
 import type { MenuPreviewOverlay } from '../overlays/menuPreview'
 import type { LakeMaterialUserData } from '../environment/lakes'
 import type { RenderPerfFrame, RenderPerfInfo } from '../debug/perf'
-import type { PelletOverride } from '../pellets/runtime'
 import type { SnakeVisual } from '../runtimeTypes'
 import { clamp, computeVisibleSurfaceAngle } from '../utils/math'
 
@@ -44,12 +43,10 @@ type SceneFrameRuntimeDeps = {
     players: GameStateSnapshot['players'],
     localPlayerId: string | null,
     deltaSeconds: number,
-    pellets: GameStateSnapshot['pellets'] | null,
     nowMs: number,
-  ) => PelletOverride | null
+  ) => void
   updatePellets: (
     pellets: GameStateSnapshot['pellets'],
-    pelletOverride: PelletOverride | null,
     timeSeconds: number,
     deltaSeconds: number,
     cameraLocalDir: THREE.Vector3,
@@ -389,11 +386,10 @@ export const createSceneFrameRuntime = (deps: SceneFrameRuntimeDeps) => {
     }
 
     if (snapshot) {
-      const pelletOverride = updateSnakes(
+      updateSnakes(
         snapshot.players,
         localPlayerId,
         deltaSeconds,
-        snapshot.pellets,
         now,
       )
       if (perfEnabled) {
@@ -401,7 +397,6 @@ export const createSceneFrameRuntime = (deps: SceneFrameRuntimeDeps) => {
       }
       updatePellets(
         snapshot.pellets,
-        pelletOverride,
         now * 0.001,
         deltaSeconds,
         cameraLocalDirTemp,
@@ -411,11 +406,11 @@ export const createSceneFrameRuntime = (deps: SceneFrameRuntimeDeps) => {
         afterPelletsMs = performance.now()
       }
     } else {
-      updateSnakes([], localPlayerId, deltaSeconds, null, now)
+      updateSnakes([], localPlayerId, deltaSeconds, now)
       if (perfEnabled) {
         afterSnakesMs = performance.now()
       }
-      updatePellets([], null, now * 0.001, deltaSeconds, cameraLocalDirTemp, viewAngle)
+      updatePellets([], now * 0.001, deltaSeconds, cameraLocalDirTemp, viewAngle)
       if (perfEnabled) {
         afterPelletsMs = performance.now()
       }

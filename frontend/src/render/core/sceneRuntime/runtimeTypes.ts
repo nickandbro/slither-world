@@ -12,10 +12,6 @@ export type SnakeVisual = {
   eyeRight: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
   pupilLeft: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
   pupilRight: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
-  tongue: THREE.Group
-  tongueBase: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
-  tongueForkLeft: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
-  tongueForkRight: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
   bowl: THREE.Mesh<THREE.BufferGeometry, THREE.MeshPhysicalMaterial>
   bowlMaterial: THREE.MeshPhysicalMaterial
   bowlCrackUniform: { value: number }

@@ -25,11 +25,6 @@ import {
 } from '../constants'
 import { clamp, smoothstep } from '../utils/math'
 
-export type PelletOverride = {
-  id: number
-  position: THREE.Vector3
-}
-
 type CreatePelletRuntimeUpdaterOptions = {
   reconcilePelletVisualState: (
     pellet: PelletSnapshot,
@@ -73,7 +68,6 @@ type CreatePelletRuntimeUpdaterOptions = {
 type PelletRuntimeUpdater = {
   updatePellets: (
     pellets: PelletSnapshot[],
-    override: PelletOverride | null,
     timeSeconds: number,
     deltaSeconds: number,
     cameraLocalDir: THREE.Vector3,
@@ -110,7 +104,6 @@ export const createPelletRuntimeUpdater = (
 
   const updatePellets = (
     pellets: PelletSnapshot[],
-    override: PelletOverride | null,
     timeSeconds: number,
     deltaSeconds: number,
     cameraLocalDir: THREE.Vector3,
@@ -151,16 +144,13 @@ export const createPelletRuntimeUpdater = (
     // Keep large glow sprites stable near the horizon while culling the far hemisphere.
     const visibleLimit = Math.min(Math.PI - 1e-4, viewAngle + PELLET_GLOW_HORIZON_MARGIN)
     const minDirectionDot = Math.cos(visibleLimit)
-    const forcedVisiblePelletId = override?.id ?? null
     let visibleCount = 0
 
     for (let i = 0; i < pellets.length; i += 1) {
       const pellet = pellets[i]
       const state = pelletVisualStates.get(pellet.id)
       if (!state) continue
-      const forceVisible = forcedVisiblePelletId !== null && pellet.id === forcedVisiblePelletId
       if (
-        !forceVisible &&
         !isDirectionNearSide(
           state.renderNormal.x,
           state.renderNormal.y,
@@ -242,9 +232,7 @@ export const createPelletRuntimeUpdater = (
       const pellet = pellets[i]
       const state = pelletVisualStates.get(pellet.id)
       if (!state) continue
-      const forceVisible = forcedVisiblePelletId !== null && pellet.id === forcedVisiblePelletId
       if (
-        !forceVisible &&
         !isDirectionNearSide(
           state.renderNormal.x,
           state.renderNormal.y,
@@ -261,18 +249,14 @@ export const createPelletRuntimeUpdater = (
       const opacities = pelletBucketOpacityArrays[bucketIndex]
       if (!positions || !opacities) continue
 
-      if (override && override.id === pellet.id) {
-        tempVector.copy(override.position)
-      } else {
-        getPelletSurfacePositionFromNormal(
-          pellet.id,
-          state.renderNormal,
-          state.renderSize,
-          tempVector,
-        )
-        if (visibleCount <= PELLET_WOBBLE_DISABLE_VISIBLE_THRESHOLD) {
-          applyPelletWobble(pellet, tempVector, timeSeconds)
-        }
+      getPelletSurfacePositionFromNormal(
+        pellet.id,
+        state.renderNormal,
+        state.renderSize,
+        tempVector,
+      )
+      if (visibleCount <= PELLET_WOBBLE_DISABLE_VISIBLE_THRESHOLD) {
+        applyPelletWobble(pellet, tempVector, timeSeconds)
       }
 
       const itemIndex = pelletBucketOffsets[bucketIndex]

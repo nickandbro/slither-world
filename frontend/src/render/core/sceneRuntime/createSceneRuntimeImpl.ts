@@ -45,7 +45,6 @@ import {
   createBoostTrailWarmupManager,
   type BoostTrailState,
 } from './snake/boostTrail'
-import { createTongueController, type TongueState } from './snake/tongue'
 import { createSnakeCollectionRuntime } from './snake/collectionRuntime'
 import { createSnakePlayerVisualRuntime } from './snake/playerVisualRuntime'
 import { createSnakePlayerRuntime } from './snake/playerUpdateRuntime'
@@ -178,31 +177,6 @@ export const createScene = async (
   const pupilGeometry = new THREE.SphereGeometry(SCENE_CONSTANTS.PUPIL_RADIUS, 10, 10)
   const eyeMaterial = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.2 })
   const pupilMaterial = new THREE.MeshStandardMaterial({ color: '#1b1b1b', roughness: 0.4 })
-  const tongueBaseGeometry = new THREE.CylinderGeometry(
-    SCENE_CONSTANTS.TONGUE_RADIUS,
-    SCENE_CONSTANTS.TONGUE_RADIUS * 0.9,
-    1,
-    10,
-    1,
-    true,
-  )
-  tongueBaseGeometry.translate(0, 0.5, 0)
-  const tongueForkGeometry = new THREE.CylinderGeometry(
-    SCENE_CONSTANTS.TONGUE_RADIUS * 0.7,
-    SCENE_CONSTANTS.TONGUE_RADIUS * 0.25,
-    1,
-    8,
-    1,
-    true,
-  )
-  tongueForkGeometry.translate(0, 0.5, 0)
-  const tongueMaterial = new THREE.MeshStandardMaterial({
-    color: '#ff6f9f',
-    roughness: 0.25,
-    metalness: 0.05,
-    emissive: '#ff4f8a',
-    emissiveIntensity: 0.3,
-  })
   const boostDraftGeometry = new THREE.SphereGeometry(1, 24, 16, 0, Math.PI * 2, 0, Math.PI * 0.5)
   const boostDraftTexture = createBoostDraftTexture()
   const intakeConeGeometry = new THREE.PlaneGeometry(1, 1, 1, 1)
@@ -292,7 +266,6 @@ export const createScene = async (
   const lastTailContactNormals = new Map<string, THREE.Vector3>()
   const tailFrameStates = new Map<string, TailFrameState>()
   const lastSnakeStarts = new Map<string, number>()
-  const tongueStates = new Map<string, TongueState>()
   const tempVector = new THREE.Vector3()
   const tempVectorB = new THREE.Vector3()
   const tempVectorC = new THREE.Vector3()
@@ -378,7 +351,6 @@ export const createScene = async (
     lastTailDirections.delete(id)
     lastTailContactNormals.delete(id)
     tailFrameStates.delete(id)
-    tongueStates.delete(id)
   }
   const {
     buildEnvironment,
@@ -424,9 +396,6 @@ export const createScene = async (
     pupilGeometry,
     eyeMaterial,
     pupilMaterial,
-    tongueBaseGeometry,
-    tongueForkGeometry,
-    tongueMaterial,
     boostDraftGeometry,
     boostDraftTexture,
     intakeConeGeometry,
@@ -548,7 +517,6 @@ export const createScene = async (
     snakeSlopeInsertRadiusDelta: SCENE_CONSTANTS.SNAKE_SLOPE_INSERT_RADIUS_DELTA,
   })
   const {
-    getPelletSurfacePosition,
     getPelletSurfacePositionFromNormal,
   } = createPelletSurfaceSampler({
     pelletGroundCache,
@@ -600,12 +568,6 @@ export const createScene = async (
     pelletConsumeGhostWobbleSpeedMin: SCENE_CONSTANTS.PELLET_CONSUME_GHOST_WOBBLE_SPEED_MIN,
     pelletConsumeGhostWobbleSpeedMax: SCENE_CONSTANTS.PELLET_CONSUME_GHOST_WOBBLE_SPEED_MAX,
     pelletConsumeGhostWobbleDistance: SCENE_CONSTANTS.PELLET_CONSUME_GHOST_WOBBLE_DISTANCE,
-  })
-  const { updateTongue } = createTongueController({
-    enabled: SCENE_CONSTANTS.TONGUE_ENABLED,
-    tongueStates,
-    getPelletSurfacePosition,
-    constants: { mouthForward: SCENE_CONSTANTS.TONGUE_MOUTH_FORWARD, mouthOut: SCENE_CONSTANTS.TONGUE_MOUTH_OUT, pelletMatch: SCENE_CONSTANTS.TONGUE_PELLET_MATCH, nearRange: SCENE_CONSTANTS.TONGUE_NEAR_RANGE, maxRange: SCENE_CONSTANTS.TONGUE_MAX_RANGE, maxLength: SCENE_CONSTANTS.TONGUE_MAX_LENGTH, grabEps: SCENE_CONSTANTS.TONGUE_GRAB_EPS, hideThreshold: SCENE_CONSTANTS.TONGUE_HIDE_THRESHOLD, forkLength: SCENE_CONSTANTS.TONGUE_FORK_LENGTH, angleLimit: SCENE_CONSTANTS.TONGUE_ANGLE_LIMIT, extendRate: SCENE_CONSTANTS.TONGUE_EXTEND_RATE, retractRate: SCENE_CONSTANTS.TONGUE_RETRACT_RATE },
   })
   const {
     computeSnakeSelfOverlapPointIntensities,
@@ -674,7 +636,6 @@ export const createScene = async (
     lastTailContactNormals,
     lastHeadPositions,
     lastForwardDirections,
-    tongueStates,
     pelletMouthTargets,
     resetSnakeTransientState,
     setLocalGroundingInfo: (value) => {
@@ -699,7 +660,6 @@ export const createScene = async (
     updateSnakeTailCap,
     updateBoostDraft,
     updateIntakeCone,
-    updateTongue,
   })
   const { removeSnake, updateSnakes } = createSnakeCollectionRuntime({
     snakesGroup,
@@ -915,9 +875,6 @@ export const createScene = async (
     pupilGeometry.dispose()
     eyeMaterial.dispose()
     pupilMaterial.dispose()
-    tongueBaseGeometry.dispose()
-    tongueForkGeometry.dispose()
-    tongueMaterial.dispose()
 	    boostDraftGeometry.dispose()
 	    boostDraftTexture?.dispose()
     intakeConeGeometry.dispose()
