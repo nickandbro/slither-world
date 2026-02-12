@@ -444,8 +444,7 @@ export default function App() {
   const playerIdByNetIdRef = useRef<Map<number, string>>(new Map())
   const pelletMapRef = useRef<Map<number, PelletSnapshot>>(new Map())
   const pelletsArrayRef = useRef<PelletSnapshot[]>([])
-  const pelletSuctionLockNetRef = useRef<Map<number, number>>(new Map())
-  const pelletSuctionLocksRef = useRef<Map<number, string>>(new Map())
+  const pelletConsumeTargetsRef = useRef<Map<number, string>>(new Map())
   const menuPhaseRef = useRef<MenuPhase>('preplay')
   const menuUiModeRef = useRef<MenuUiMode>('home')
   const menuOverlayExitingRef = useRef(false)
@@ -721,8 +720,16 @@ export default function App() {
     pointerRef.current.boost = false
   }
 
-  const syncPelletSuctionLocksToRenderer = () => {
-    webglRef.current?.setPelletSuctionLocks?.(pelletSuctionLocksRef.current)
+  const syncPelletConsumeTargetsToRenderer = () => {
+    const webgl = webglRef.current
+    if (!webgl || pelletConsumeTargetsRef.current.size <= 0) return
+    webgl.queuePelletConsumeTargets?.(pelletConsumeTargetsRef.current)
+    pelletConsumeTargetsRef.current.clear()
+  }
+
+  const clearPelletConsumeTargets = () => {
+    pelletConsumeTargetsRef.current.clear()
+    webglRef.current?.clearPelletConsumeTargets?.()
   }
 
   const resetBoostFxVisual = () => {
@@ -1557,7 +1564,7 @@ export default function App() {
         webgl.setDebugFlags?.(debugFlagsRef.current)
         webgl.setDayNightDebugMode?.(dayNightDebugModeRef.current)
         webgl.setWebgpuWorldSamples?.(adaptiveQualityRef.current.webgpuSamples)
-        syncPelletSuctionLocksToRenderer()
+        syncPelletConsumeTargetsToRenderer()
 
         const handleResize = () => {
           const rect = glCanvas.getBoundingClientRect()
@@ -2593,9 +2600,7 @@ export default function App() {
       lagImpairmentUntilMsRef.current = 0
       netTuningRef.current = resolveNetTuning(netTuningOverridesRef.current)
       tickIntervalRef.current = 50
-      pelletSuctionLockNetRef.current.clear()
-      pelletSuctionLocksRef.current.clear()
-      syncPelletSuctionLocksToRenderer()
+      clearPelletConsumeTargets()
       playerMetaRef.current = new Map()
       playerIdByNetIdRef.current = new Map()
       resetDeltaDecoderState()
@@ -2728,22 +2733,10 @@ export default function App() {
         }
 
         const getCurrentPellets = () => pelletsArrayRef.current
-        const rebuildResolvedPelletSuctionLocks = () => {
-          const resolved = new Map<number, string>()
-          for (const [pelletId, targetNetId] of pelletSuctionLockNetRef.current) {
-            const targetPlayerId = playerIdByNetIdRef.current.get(targetNetId)
-            if (targetPlayerId) {
-              resolved.set(pelletId, targetPlayerId)
-            }
-          }
-          pelletSuctionLocksRef.current = resolved
-          syncPelletSuctionLocksToRenderer()
-        }
 
         if (decoded.type === 'pellet_reset') {
           pelletMapRef.current = new Map(decoded.pellets.map((pellet) => [pellet.id, pellet]))
-          pelletSuctionLockNetRef.current.clear()
-          rebuildResolvedPelletSuctionLocks()
+          clearPelletConsumeTargets()
           const pellets = rebuildPelletsArray()
           const buffer = snapshotBufferRef.current
           if (buffer.length > 0) {
@@ -2754,23 +2747,9 @@ export default function App() {
         }
 
         if (decoded.type === 'pellet_delta') {
-          let lockMapChanged = false
           for (const pellet of decoded.adds) pelletMapRef.current.set(pellet.id, pellet)
           for (const pellet of decoded.updates) pelletMapRef.current.set(pellet.id, pellet)
           for (const id of decoded.removes) pelletMapRef.current.delete(id)
-          for (const pellet of decoded.adds) {
-            if (pelletSuctionLockNetRef.current.delete(pellet.id)) {
-              lockMapChanged = true
-            }
-          }
-          for (const id of decoded.removes) {
-            if (pelletSuctionLockNetRef.current.delete(id)) {
-              lockMapChanged = true
-            }
-          }
-          if (lockMapChanged) {
-            rebuildResolvedPelletSuctionLocks()
-          }
           const pellets = rebuildPelletsArray()
           const buffer = snapshotBufferRef.current
           if (buffer.length > 0) buffer[buffer.length - 1].pellets = pellets
@@ -2778,17 +2757,27 @@ export default function App() {
           return
         }
 
-        if (decoded.type === 'pellet_lock') {
-          let lockMapChanged = false
-          for (const lock of decoded.locks) {
-            const prev = pelletSuctionLockNetRef.current.get(lock.pelletId)
-            if (prev !== lock.targetNetId) {
-              pelletSuctionLockNetRef.current.set(lock.pelletId, lock.targetNetId)
-              lockMapChanged = true
+        if (decoded.type === 'pellet_consume') {
+          let pelletsChanged = false
+          let hasTargets = false
+          for (const consume of decoded.consumes) {
+            if (pelletMapRef.current.delete(consume.pelletId)) {
+              pelletsChanged = true
+            }
+            const targetPlayerId = playerIdByNetIdRef.current.get(consume.targetNetId)
+            if (targetPlayerId) {
+              pelletConsumeTargetsRef.current.set(consume.pelletId, targetPlayerId)
+              hasTargets = true
             }
           }
-          if (lockMapChanged) {
-            rebuildResolvedPelletSuctionLocks()
+          if (hasTargets) {
+            syncPelletConsumeTargetsToRenderer()
+          }
+          if (pelletsChanged) {
+            const pellets = rebuildPelletsArray()
+            const buffer = snapshotBufferRef.current
+            if (buffer.length > 0) buffer[buffer.length - 1].pellets = pellets
+            setGameState((previous) => (previous ? { ...previous, pellets } : previous))
           }
           return
         }
@@ -2808,7 +2797,7 @@ export default function App() {
             }
           }
           setEnvironment(decoded.environment)
-          rebuildResolvedPelletSuctionLocks()
+          clearPelletConsumeTargets()
           const state: GameStateSnapshot = { ...decoded.state, pellets: getCurrentPellets() }
           pushSnapshot(state)
           setGameState(state)
@@ -2816,7 +2805,6 @@ export default function App() {
         }
 
         if (decoded.type === 'meta') {
-          rebuildResolvedPelletSuctionLocks()
           return
         }
 

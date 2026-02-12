@@ -162,8 +162,6 @@ type PelletVisualState = {
   velocity: THREE.Vector3
   renderSize: number
   targetSize: number
-  lastLockTargetPlayerId: string | null
-  lastLockSeenAt: number
   lastServerAt: number
   colorIndex: number
 }
@@ -832,7 +830,8 @@ export type RenderScene = {
   setMenuPreviewVisible: (visible: boolean) => void
   setMenuPreviewSkin: (colors: string[] | null, previewLen?: number) => void
   setMenuPreviewOrbit: (yaw: number, pitch: number) => void
-  setPelletSuctionLocks?: (locks: ReadonlyMap<number, string> | null) => void
+  queuePelletConsumeTargets?: (targets: ReadonlyMap<number, string> | null) => void
+  clearPelletConsumeTargets?: () => void
   // WebGPU-only quality knob (offscreen MSAA samples). No-op on WebGL.
   setWebgpuWorldSamples?: (samples: number) => void
   setEnvironment: (environment: Environment) => void
@@ -1025,7 +1024,6 @@ const PELLET_CORRECTION_RATE = 9
 const PELLET_SIZE_SMOOTH_RATE = 14
 const PELLET_SNAP_DOT_THRESHOLD = 0.962
 const PELLET_CONSUME_GHOST_DURATION_SECS = 0.34
-const PELLET_CONSUME_RECENT_LOCK_TTL_SECS = 0.28
 const PELLET_CONSUME_GHOST_FORWARD_LEAD = HEAD_RADIUS * 1.08
 const PELLET_CONSUME_GHOST_WOBBLE_DISTANCE = PELLET_RADIUS * 0.44
 const PELLET_CONSUME_GHOST_WOBBLE_SPEED_MIN = 6.8
@@ -2873,15 +2871,18 @@ export const createScene = async (
     menuPreviewPitch = clamp(pitch, -1.25, 1.25)
   }
 
-  const setPelletSuctionLocks = (locks: ReadonlyMap<number, string> | null) => {
-    pelletSuctionTargetByPelletId.clear()
-    if (!locks) return
-    for (const [pelletId, targetPlayerId] of locks) {
+  const queuePelletConsumeTargets = (targets: ReadonlyMap<number, string> | null) => {
+    if (!targets) return
+    for (const [pelletId, targetPlayerId] of targets) {
       if (!Number.isFinite(pelletId) || typeof targetPlayerId !== 'string' || targetPlayerId.length <= 0) {
         continue
       }
-      pelletSuctionTargetByPelletId.set(pelletId, targetPlayerId)
+      pelletConsumeTargetByPelletId.set(pelletId, targetPlayerId)
     }
+  }
+
+  const clearPelletConsumeTargets = () => {
+    pelletConsumeTargetByPelletId.clear()
   }
 
   // WebGPU does not support variable-size point primitives, so render pellets via instanced sprites.
@@ -2975,7 +2976,7 @@ export const createScene = async (
   const pelletVisualStates = new Map<number, PelletVisualState>()
   const pelletConsumeGhosts: PelletConsumeGhost[] = []
   const pelletMouthTargets = new Map<string, THREE.Vector3>()
-  const pelletSuctionTargetByPelletId = new Map<number, string>()
+  const pelletConsumeTargetByPelletId = new Map<number, string>()
   const pelletIdsSeen = new Set<number>()
   let viewportWidth = 1
   let viewportHeight = 1
@@ -3342,7 +3343,7 @@ export const createScene = async (
     pelletVisualStates.clear()
     pelletConsumeGhosts.length = 0
     pelletMouthTargets.clear()
-    pelletSuctionTargetByPelletId.clear()
+    pelletConsumeTargetByPelletId.clear()
     if (planetMesh) {
       world.remove(planetMesh)
       planetMesh.geometry.dispose()
@@ -7007,8 +7008,6 @@ diffuseColor.a *= retireEdge;`,
         velocity: new THREE.Vector3(),
         renderSize: safeSize,
         targetSize: safeSize,
-        lastLockTargetPlayerId: null,
-        lastLockSeenAt: Number.NEGATIVE_INFINITY,
         lastServerAt: timeSeconds,
         colorIndex: pellet.colorIndex,
       }
@@ -9426,28 +9425,14 @@ diffuseColor.a *= retireEdge;`,
     for (let i = 0; i < pellets.length; i += 1) {
       const pellet = pellets[i]
       pelletIdsSeen.add(pellet.id)
-      const state = reconcilePelletVisualState(pellet, timeSeconds, safeDeltaSeconds)
-      const targetPlayerId = pelletSuctionTargetByPelletId.get(pellet.id) ?? null
-      if (targetPlayerId && targetPlayerId.length > 0) {
-        state.lastLockTargetPlayerId = targetPlayerId
-        state.lastLockSeenAt = timeSeconds
-      }
+      reconcilePelletVisualState(pellet, timeSeconds, safeDeltaSeconds)
     }
 
     for (const [id, state] of pelletVisualStates) {
       if (!pelletIdsSeen.has(id)) {
-        const liveLockTarget = pelletSuctionTargetByPelletId.get(id) ?? null
-        const recentLockTarget =
-          state.lastLockTargetPlayerId &&
-          timeSeconds - state.lastLockSeenAt <= PELLET_CONSUME_RECENT_LOCK_TTL_SECS
-            ? state.lastLockTargetPlayerId
-            : null
-        spawnPelletConsumeGhost(
-          id,
-          state,
-          liveLockTarget ?? recentLockTarget,
-        )
-        pelletSuctionTargetByPelletId.delete(id)
+        const consumeTarget = pelletConsumeTargetByPelletId.get(id) ?? null
+        spawnPelletConsumeGhost(id, state, consumeTarget)
+        pelletConsumeTargetByPelletId.delete(id)
         pelletVisualStates.delete(id)
       }
     }
@@ -10749,7 +10734,7 @@ diffuseColor.a *= retireEdge;`,
     pelletVisualStates.clear()
     pelletConsumeGhosts.length = 0
     pelletMouthTargets.clear()
-    pelletSuctionTargetByPelletId.clear()
+    pelletConsumeTargetByPelletId.clear()
     pelletIdsSeen.clear()
     for (const [id, visual] of snakes) {
       removeSnake(visual, id)
@@ -10775,17 +10760,18 @@ diffuseColor.a *= retireEdge;`,
     }
   }
 
-	  return {
-	    resize,
-	    render,
-	    setPointerScreen,
-	    getPointerAxis,
-	    setMenuPreviewVisible,
-	    setMenuPreviewSkin,
-	    setMenuPreviewOrbit,
-      setPelletSuctionLocks,
-      setWebgpuWorldSamples: webgpuOffscreenEnabled ? setWebgpuWorldSamples : undefined,
-	    setEnvironment,
+  return {
+    resize,
+    render,
+    setPointerScreen,
+    getPointerAxis,
+    setMenuPreviewVisible,
+    setMenuPreviewSkin,
+    setMenuPreviewOrbit,
+    queuePelletConsumeTargets,
+    clearPelletConsumeTargets,
+    setWebgpuWorldSamples: webgpuOffscreenEnabled ? setWebgpuWorldSamples : undefined,
+    setEnvironment,
     setDebugFlags,
     setDayNightDebugMode,
     dispose,
