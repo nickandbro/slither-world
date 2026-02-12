@@ -5,8 +5,20 @@ import JavaScriptObfuscator from 'javascript-obfuscator'
 
 import { cloudflare } from '@cloudflare/vite-plugin'
 
+const toFsPath = (relative: string) =>
+  decodeURIComponent(new URL(relative, (import.meta as { url: string }).url).pathname)
+
 // https://vite.dev/config/
 export default defineConfig({
+  resolve: {
+    alias: {
+      '@app': toFsPath('./src/app'),
+      '@game': toFsPath('./src/game'),
+      '@render': toFsPath('./src/render'),
+      '@services': toFsPath('./src/services'),
+      '@shared': toFsPath('./src/shared'),
+    },
+  },
   plugins: [
     react(),
     cloudflare({ configPath: 'wrangler.dev.toml' }),

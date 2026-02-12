@@ -7,16 +7,19 @@ Spherical Snake is a multiplayer, slither-style snake game where players steer g
 
 ## Project Structure & Module Organization
 - `frontend/` — Vite + React client and Cloudflare Worker for static asset serving plus matchmaking/room proxying.
-- `frontend/src/` — React UI source (`App.tsx`, `main.tsx`, CSS, and `assets/`).
-- `frontend/src/app/` — app-level UI decomposition (`components/`) and shared app runtime helpers (`core/`).
+- `frontend/src/` — React UI source (`App.tsx`, `main.tsx`, CSS, and `assets/`); `App.tsx` is the composition shell and `App.css` is a compatibility import entrypoint.
+- `frontend/src/app/` — app-layer modules split by ownership: `components/`, `core/`, `hooks/`, `orchestration/`, `debug/`, and `styles/`.
 - `frontend/src/game/` — client gameplay helpers (math, camera, snapshots, HUD, storage).
 - `frontend/src/game/wsProtocol.ts` — binary WebSocket codec (ArrayBuffer/DataView).
 - `frontend/src/game/skins.ts` — localStorage snake-skin design persistence + selection helpers.
-- `frontend/src/render/` — Three.js renderer entrypoint (`webglScene.ts`) plus runtime internals (`render/core/sceneRuntime.ts`).
-- `frontend/src/services/` — client API wrappers (leaderboard + backend URL helpers).
+- `frontend/src/render/` — Three.js renderer public entrypoint (`webglScene.ts`) plus modular runtime internals under `render/core/sceneRuntime/*`; `render/core/sceneRuntime.ts` remains a compatibility re-export.
+- `frontend/src/services/` — transport/API wrappers (`backend.ts`, `matchmake.ts`).
+- `frontend/src/shared/` — cross-layer shared utilities (`shared/storage/localStorage.ts`, `shared/color/hex.ts`, `shared/render/errors.ts`).
+- Dead client modules removed during refactor: `frontend/src/gameTypes.ts`, `frontend/src/app/components/GameOverOverlay.tsx`, and `frontend/src/services/leaderboard.ts`.
 - `frontend/worker/` — Cloudflare Worker entry (`worker/index.ts`) that serves `dist/client` assets and proxies `/api/matchmake` + `/api/room/:room`.
 - `frontend/public/` — static assets copied as-is.
 - `frontend/docs/` — Cloudflare Workers reference notes.
+- `frontend/docs/frontend-architecture.md` — frontend dependency direction, module ownership, and placement guidance.
 - `frontend/dist/` — production build output.
 - `frontend/vite.config.ts`, `frontend/tsconfig.*.json`, `frontend/wrangler*.toml/jsonc`, `frontend/eslint.config.js` — frontend tooling/config.
 - `backend/` — Rust server (Tokio runtime) for multiplayer + leaderboard.
@@ -41,6 +44,7 @@ Repo root (recommended for full stack):
 - `./scripts/simulate-lag-spikes.sh start|stop|status` — macOS-only PF/dummynet lag simulation helper. Defaults to backend-only shaping (`BACKEND_PORT`, default `8788`); use `PORTS=...` only when intentionally shaping additional ports.
 - `./scripts/run-lag-automation.sh` — single automated lag scenario run (bot drives movement/boost while lag shaping is active). Writes `report.json` under `output/lag-tests/<run-label>/`.
 - `./scripts/lag-autotune.sh` — multi-candidate lag tuning sweep. Runs repeated `run-lag-automation.sh` scenarios and ranks candidates by motion stability + delay metrics.
+- `cd frontend && npm run check` — maintainability gate (`lint` with `--max-warnings=0` + `build`) for fast structural validation after refactors.
 - Frontend production deploy script (`frontend/package.json`) uses an obfuscated client build (`npm run build:obfuscated`) before `wrangler deploy -c wrangler.toml`.
 
 ## Testing Expectations
@@ -54,6 +58,7 @@ Repo root (recommended for full stack):
   - For tuning work, run `./scripts/lag-autotune.sh` and compare `best-candidate.json` + per-run `report.json` outputs.
 - If you see Chrome console warnings like `[Violation] 'requestAnimationFrame' handler took <N>ms` (visible stutter), enable the optional rAF perf instrumentation (`?rafPerf=1`) and capture `window.__SNAKE_DEBUG__.getRafPerfInfo()`. During investigation, slow frames were dominated by `renderMs` (time spent inside `webgl.render()`), which points to renderer/GPU stalls (often shader/pipeline warm-up). The issue resolved after the renderer warmed up (a short run or a reload), with no evidence that snapshot interpolation/HUD work was the source.
 - If you see Chrome console warnings like `[Violation] 'requestAnimationFrame' handler took <N>ms` (visible stutter), enable the optional rAF perf instrumentation (`?rafPerf=1`) and capture `window.__SNAKE_DEBUG__.getRafPerfInfo()` plus `window.__SNAKE_DEBUG__.getRenderPerfInfo()`. Slow frames dominated by `renderMs` point to work inside `webgl.render()` (renderer/GPU stalls, pass-level spikes, or shader/pipeline compilation); with `?rafPerf=1`, the console slow-frame warning also emits a `[render] ...` line with pass timings (`passWorld`, `passOccluders`, `passPellets`, `passDepthRebuild`, `passLakes`).
+- If console errors mention unrelated injected bundles/components (for example `overlay_bundle.js`, `webcomponents-ce.js`, or duplicate custom-element definitions), verify in a clean browser profile/incognito before treating them as app regressions; browser extensions can inject those scripts.
 
 ## Configuration & Deployment Notes
 - Production deployment specifics (see `infra/deployment-notes.md` for latest values):
@@ -83,6 +88,12 @@ Repo root (recommended for full stack):
 - Debug-only route (guarded by `ENABLE_DEBUG_COMMANDS=1`):
   - `POST /api/debug/kill?room=<room>&target=bot|human|any` — force-kill a player for tests.
 - Frontend can target the backend with `VITE_BACKEND_URL` (e.g. `http://localhost:8787`). When unset, it uses same-origin.
+- Frontend import aliases are enforced in tooling: `@app/*`, `@game/*`, `@render/*`, `@services/*`, `@shared/*` (configured in `frontend/tsconfig.app.json` and `frontend/vite.config.ts`).
+- Lint boundaries enforce architecture direction (`frontend/eslint.config.js`):
+  - app code must import renderer via `@render/webglScene`, not `@render/core/sceneRuntime*`.
+  - game code must not import `@app/*` or `@render/*`.
+  - services code must remain transport-only (no `@app/*`, `@game/*`, or `@render/*` imports).
+- App styles are split under `frontend/src/app/styles/*.css` and imported via `frontend/src/app/styles/index.css`; keep `frontend/src/App.css` as the compatibility import entrypoint and preserve stable selectors used by runtime/tests.
 - Debug UI controls (renderer/collider/day-night/debug panel toggles) are enabled in `import.meta.env.DEV` or when `VITE_E2E_DEBUG=1`.
 - `window.__SNAKE_DEBUG__` runtime hooks are exposed during local runs (including `run-local-dev-copy.sh`). Network debug logging defaults on localhost and can be toggled via `?netDebug=1|0` or localStorage key `spherical_snake_net_debug`.
 - Menu snake-skin designs are stored in localStorage (`spherical_snake_skins_v1` for saved designs, `spherical_snake_selected_skin_v1` for the current selection).
@@ -192,7 +203,7 @@ Repo root (recommended for full stack):
 - Snake body visuals are smooth-shaded and use a repeat-wrapped per-player skin texture (`map` + `emissiveMap`) to create ring-band stripes along the tube with optional 8-slot color patterns; tail cap UVs are generated so stripe bands and the active pattern cycle continue down the cap without snapping/wrapping to the next repeat.
 - Snake skin UV progression includes fractional tail extension so stripe bands and color patterns advance smoothly as length accrues (no "only at full-node commit" pop). Snapshot interpolation for `snakeDetail='full'` blends length-units (`snakeLen + tailExtension`) and re-derives `{ snakeTotalLen, tailExtension }` across commit boundaries to avoid one-frame shrink/pops under rapid growth. The tail extension point is biased toward the raw last-segment direction near full extension so rapid growth commits don't visibly "pop" the tail tip.
 - Menu skin screens render a separate 3D preview snake as an overlay pass (separate scene/camera) after the main world/lake passes; it clears depth before rendering so it does not contaminate the multipass pellet occlusion pipeline (WebGL: `renderer.clearDepth()`, WebGPU: `renderer.clear(false, true, false)`).
-- Pointer aiming uses a 3D curved arrow overlay rendered after the main world/lake passes in `frontend/src/render/core/sceneRuntime.ts`; it clears depth before rendering so the arrow appears above everything while still self-occluding correctly (WebGL: `renderer.clearDepth()`, WebGPU: `renderer.clear(false, true, false)`).
+- Pointer aiming uses a 3D curved arrow overlay rendered after the main world/lake passes in `frontend/src/render/core/sceneRuntime/overlays/pointerArrow.ts`; it clears depth before rendering so the arrow appears above everything while still self-occluding correctly (WebGL: `renderer.clearDepth()`, WebGPU: `renderer.clear(false, true, false)`).
 - Pointer input is screen-space: `frontend/src/App.tsx` forwards pointer coords to the renderer via `setPointerScreen(x, y, active)`, and the renderer exposes a derived steering axis via `getPointerAxis()` (computed from a cursor ray hit on the planet surface).
 - The pointer arrow mesh is a single continuous low-poly extruded `BufferGeometry` (shaft + head) curved along the great-circle arc toward the cursor.
 - To stay stable over sharp low-poly terrain (e.g., dunes), the arrow body uses a constant-radius shell based on the cursor hit (`tipRadius + lift`) instead of resampling terrain height per segment.
@@ -200,7 +211,7 @@ Repo root (recommended for full stack):
 - Boost draft/trail shaders are warmed once during renderer bootstrap to reduce first-use stalls, and boost trail meshes are pooled/rebuilt allocation-light to reduce GC spikes when boost toggles.
 - Digestion bulges are applied in tube-ring space with identity-tracked progress, and the visual start is anchored by a fixed node index near the neck (default: one node behind the head) instead of a percentage-based body offset. Bulge intensity scales down as snake girth increases so larger snakes show subtler swallow bumps.
 - Digestion bulge start is consume-gated: server replication keeps digestion visual strength at `0` during intake delay, and client interpolation/rendering preserves that `0` (no minimum strength clamp), so bulges begin only after full mouth consume.
-- Pellet visuals use a slither-style multi-layer sprite stack in color buckets (WebGL: `THREE.Points`; WebGPU: instanced `THREE.Sprite` + `PointsNodeMaterial` since WebGPU point primitives are 1px): dark under-shadow + bright core + near/far additive glow layers with seeded per-pellet orbital wobble. Rendering uses a multipass depth composition: world base pass (without pellets/lakes), pellet-occluder depth pass (environment + opaque snakes), pellet pass (depth-tested for partial occlusion), full-depth rebuild pass, then lakes rendered last so underwater pellets still read through water overlay. Dead/fading transparent snakes are excluded from pellet occluder depth so pellets remain visible through them. The multipass path is intentionally allocation-light (reused scratch arrays and one shared snake-occluder mask across passes); preserve that when iterating on render passes. Keep near-side horizon culling (with margin), updates allocation-light, and per-pellet terrain grounding so sprites stay on top of elevated/sunken terrain. Active `TYPE_PELLET_CONSUME` hints are consume-only and must not pre-home/shrink/fade live pellets. Consumed pellets use a one-shot ghost animation (unique per pellet ID) that follows a Slither-style curve: quadratic pull toward a mouth-forward lead point, cubic size shrink, and decaying wobble until fade-out. For extremely large visible pellet counts (mass deaths), wobble is disabled to avoid main-thread stalls.
+- Pellet visuals use a slither-style multi-layer sprite stack in color buckets (WebGL: `THREE.Points`; WebGPU: instanced `THREE.Sprite` + `PointsNodeMaterial` since WebGPU point primitives are 1px): dark under-shadow + bright core + near/far additive glow layers with seeded per-pellet orbital wobble. Rendering uses a multipass depth composition: world base pass (without pellets/lakes), pellet-occluder depth pass (environment + opaque snakes), pellet pass (depth-tested for partial occlusion), full-depth rebuild pass, then lakes rendered last so underwater pellets still read through water overlay. Dead/fading transparent snakes are excluded from pellet occluder depth so pellets remain visible through them. The multipass path is intentionally allocation-light (reused scratch arrays and one shared snake-occluder mask across passes); preserve that when iterating on render passes. Keep near-side horizon culling (with margin), updates allocation-light, and per-pellet terrain grounding so sprites stay on top of elevated/sunken terrain. Active `TYPE_PELLET_CONSUME` hints are consume-only and must not pre-home/shrink/fade live pellets. Consumed pellets use a one-shot ghost animation (unique per pellet ID) that follows a Slither-style curve: quadratic pull toward a mouth-forward lead point, cubic size shrink, and decaying wobble until fade-out. For extremely large visible pellet counts (mass deaths), wobble is disabled to avoid main-thread stalls. For WebGL `PointsMaterial` shader patching (`onBeforeCompile`), inject real GLSL newlines (`\n`) rather than escaped literal sequences (`\\n`), or shader compile/validate can fail with `unexpected token` and `program not valid`.
 - WebGPU renders the full multi-pass world into an offscreen `THREE.RenderTarget` and presents once via a fullscreen quad. This avoids per-pass canvas output conversion overhead and ensures depth is consistent between passes (prevents pellet glow from being clipped by terrain depth).
 - Shoreline fill and shoreline line meshes are generated from the full deformed planet geometry in both patch and fallback paths to keep lake edges coherent.
 - Fallback terrain path (when patch mode is disabled) renders a full deformed icosphere mesh (`createIcosphereGeometry` + `applyLakeDepressions`).
@@ -209,5 +220,5 @@ Repo root (recommended for full stack):
   - WebGPU: generated lake surface geometry fallback for near visual parity.
 - To prevent shoreline seams, terrain depth is clamped to at least the lake surface depth, lake surfaces are slightly overdrawn/expanded, and lake materials use polygon offset to win depth testing.
 - Fishbowl crack visuals are exact in WebGL (`onBeforeCompile`) and approximated in WebGPU for parity without WebGL-only shader hooks.
-- Renderer bootstrap/fallback selection lives in `frontend/src/render/webglScene.ts`; scene/runtime implementation lives in `frontend/src/render/core/sceneRuntime.ts` (`buildPlanetPatchAtlas`, `updatePlanetPatchVisibility`, `updateEnvironmentVisibility`, `updateLakeVisibility`, `createLakes`, `sampleLakes`, `applyLakeDepressions`, `createLakeMaskMaterial`, `createLakeSurfaceGeometry`).
+- Renderer bootstrap/fallback selection lives in `frontend/src/render/webglScene.ts`; scene/runtime orchestration lives in `frontend/src/render/core/sceneRuntime/createSceneRuntimeImpl.ts` with subsystem modules under `frontend/src/render/core/sceneRuntime/{environment,snake,pellets,overlays,render,debug,utils}`. `frontend/src/render/core/sceneRuntime.ts` is kept as a compatibility re-export.
 - Mountain collider outlines are generated on the backend (smoothed radial samples) and visualized on the client via the debug overlay; lake and tree collider rings are rendered as line loops when debug is enabled.

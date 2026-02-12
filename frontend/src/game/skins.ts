@@ -1,3 +1,9 @@
+import { normalizeHexColor } from '@shared/color/hex'
+import {
+  readLocalStorageJson,
+  writeLocalStorage,
+} from '@shared/storage/localStorage'
+
 export const SKIN_PALETTE_COLORS = [
   '#ff5f6d',
   '#ffc857',
@@ -36,29 +42,12 @@ export const DEFAULT_SOLID_SKIN: SelectedSkinV1 = {
   color: SKIN_PALETTE_COLORS[0] ?? '#ffffff',
 }
 
-const safeParseJson = <T>(raw: string | null): T | null => {
-  if (!raw) return null
-  try {
-    return JSON.parse(raw) as T
-  } catch {
-    return null
-  }
-}
-
 const randomId = () => {
   try {
     return crypto.randomUUID()
   } catch {
     return `${Date.now()}-${Math.floor(Math.random() * 1e9)}`
   }
-}
-
-export const normalizeHexColor = (value: unknown): string | null => {
-  if (typeof value !== 'string') return null
-  const trimmed = value.trim().toLowerCase()
-  const match = /^#([0-9a-f]{6})$/.exec(trimmed)
-  if (!match) return null
-  return `#${match[1]}`
 }
 
 export const normalizeSkinColors = (colors: unknown): string[] | null => {
@@ -74,8 +63,7 @@ export const normalizeSkinColors = (colors: unknown): string[] | null => {
 }
 
 export const getSavedSkinDesigns = (): SnakeSkinDesignV1[] => {
-  if (typeof window === 'undefined') return []
-  const parsed = safeParseJson<unknown>(window.localStorage.getItem(STORAGE_SKINS_KEY))
+  const parsed = readLocalStorageJson<unknown>(STORAGE_SKINS_KEY)
   if (!Array.isArray(parsed)) return []
   const designs: SnakeSkinDesignV1[] = []
   for (const entry of parsed) {
@@ -95,14 +83,12 @@ export const getSavedSkinDesigns = (): SnakeSkinDesignV1[] => {
 }
 
 const storeSavedSkinDesigns = (designs: SnakeSkinDesignV1[]) => {
-  if (typeof window === 'undefined') return
   const clamped = designs.slice(0, MAX_SAVED_SKIN_DESIGNS)
-  window.localStorage.setItem(STORAGE_SKINS_KEY, JSON.stringify(clamped))
+  writeLocalStorage(STORAGE_SKINS_KEY, JSON.stringify(clamped))
 }
 
 export const getSelectedSkin = (): SelectedSkinV1 => {
-  if (typeof window === 'undefined') return DEFAULT_SOLID_SKIN
-  const parsed = safeParseJson<unknown>(window.localStorage.getItem(STORAGE_SELECTED_KEY))
+  const parsed = readLocalStorageJson<unknown>(STORAGE_SELECTED_KEY)
   if (!parsed || typeof parsed !== 'object') return DEFAULT_SOLID_SKIN
   const obj = parsed as Record<string, unknown>
   const kind = obj.kind
@@ -118,8 +104,7 @@ export const getSelectedSkin = (): SelectedSkinV1 => {
 }
 
 export const storeSelectedSkin = (selected: SelectedSkinV1) => {
-  if (typeof window === 'undefined') return
-  window.localStorage.setItem(STORAGE_SELECTED_KEY, JSON.stringify(selected))
+  writeLocalStorage(STORAGE_SELECTED_KEY, JSON.stringify(selected))
 }
 
 export const resolveSelectedSkinColors = (
@@ -168,4 +153,3 @@ export const deleteSkinDesign = (id: string) => {
   if (next.length === existing.length) return
   storeSavedSkinDesigns(next)
 }
-

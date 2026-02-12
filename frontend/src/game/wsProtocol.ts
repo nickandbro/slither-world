@@ -6,6 +6,9 @@ import type {
   PlayerSnapshot,
   Point,
 } from './types'
+import { parseHexColor } from '@shared/color/hex'
+import { Reader, readSkinColors } from './wsProtocol/reader'
+import { readEnvironment } from './wsProtocol/environment'
 
 export type PlayerMeta = {
   name: string
@@ -54,7 +57,6 @@ const VIEW_CAMERA_DISTANCE_MIN = 4
 const VIEW_CAMERA_DISTANCE_MAX = 10
 
 const textEncoder = new TextEncoder()
-const textDecoder = new TextDecoder()
 
 export type DecodedMessage =
   | {
@@ -776,135 +778,6 @@ function readPlayerStates(
   return players
 }
 
-function readEnvironment(reader: Reader): Environment | null {
-  const lakeCount = reader.readU16()
-  if (lakeCount === null) return null
-  const lakes: Environment['lakes'] = []
-  for (let i = 0; i < lakeCount; i += 1) {
-    const centerX = reader.readF32()
-    const centerY = reader.readF32()
-    const centerZ = reader.readF32()
-    const radius = reader.readF32()
-    const depth = reader.readF32()
-    const shelfDepth = reader.readF32()
-    const edgeFalloff = reader.readF32()
-    const noiseAmplitude = reader.readF32()
-    const noiseFrequency = reader.readF32()
-    const noiseFrequencyB = reader.readF32()
-    const noiseFrequencyC = reader.readF32()
-    const noisePhase = reader.readF32()
-    const noisePhaseB = reader.readF32()
-    const noisePhaseC = reader.readF32()
-    const warpAmplitude = reader.readF32()
-    const surfaceInset = reader.readF32()
-    if (
-      centerX === null ||
-      centerY === null ||
-      centerZ === null ||
-      radius === null ||
-      depth === null ||
-      shelfDepth === null ||
-      edgeFalloff === null ||
-      noiseAmplitude === null ||
-      noiseFrequency === null ||
-      noiseFrequencyB === null ||
-      noiseFrequencyC === null ||
-      noisePhase === null ||
-      noisePhaseB === null ||
-      noisePhaseC === null ||
-      warpAmplitude === null ||
-      surfaceInset === null
-    ) {
-      return null
-    }
-    lakes.push({
-      center: { x: centerX, y: centerY, z: centerZ },
-      radius,
-      depth,
-      shelfDepth,
-      edgeFalloff,
-      noiseAmplitude,
-      noiseFrequency,
-      noiseFrequencyB,
-      noiseFrequencyC,
-      noisePhase,
-      noisePhaseB,
-      noisePhaseC,
-      warpAmplitude,
-      surfaceInset,
-    })
-  }
-
-  const treeCount = reader.readU16()
-  if (treeCount === null) return null
-  const trees: Environment['trees'] = []
-  for (let i = 0; i < treeCount; i += 1) {
-    const nx = reader.readF32()
-    const ny = reader.readF32()
-    const nz = reader.readF32()
-    const widthScale = reader.readF32()
-    const heightScale = reader.readF32()
-    const twist = reader.readF32()
-    if (
-      nx === null ||
-      ny === null ||
-      nz === null ||
-      widthScale === null ||
-      heightScale === null ||
-      twist === null
-    ) {
-      return null
-    }
-    trees.push({
-      normal: { x: nx, y: ny, z: nz },
-      widthScale,
-      heightScale,
-      twist,
-    })
-  }
-
-  const mountainCount = reader.readU16()
-  if (mountainCount === null) return null
-  const mountains: Environment['mountains'] = []
-  for (let i = 0; i < mountainCount; i += 1) {
-    const nx = reader.readF32()
-    const ny = reader.readF32()
-    const nz = reader.readF32()
-    const radius = reader.readF32()
-    const height = reader.readF32()
-    const variant = reader.readU8()
-    const twist = reader.readF32()
-    const outlineLen = reader.readU16()
-    if (
-      nx === null ||
-      ny === null ||
-      nz === null ||
-      radius === null ||
-      height === null ||
-      variant === null ||
-      twist === null ||
-      outlineLen === null
-    ) {
-      return null
-    }
-    const outline: number[] = []
-    for (let j = 0; j < outlineLen; j += 1) {
-      const value = reader.readF32()
-      if (value === null) return null
-      outline.push(value)
-    }
-    mountains.push({
-      normal: { x: nx, y: ny, z: nz },
-      radius,
-      height,
-      variant,
-      twist,
-      outline,
-    })
-  }
-
-  return { lakes, trees, mountains }
-}
 
 function decodeOctI16ToPoint(xq: number, yq: number): Point {
   const inv = 1 / PELLET_NORMAL_MAX
@@ -1012,18 +885,6 @@ function encodeString(value: string): Uint8Array {
   return textEncoder.encode(result)
 }
 
-function parseHexColor(value: string): [number, number, number] | null {
-  const trimmed = value.trim().toLowerCase()
-  const match = /^#([0-9a-f]{6})$/.exec(trimmed)
-  if (!match) return null
-  const hex = match[1]
-  const r = Number.parseInt(hex.slice(0, 2), 16)
-  const g = Number.parseInt(hex.slice(2, 4), 16)
-  const b = Number.parseInt(hex.slice(4, 6), 16)
-  if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) return null
-  return [r, g, b]
-}
-
 function encodeSkinColors(colors: string[]): Uint8Array | null {
   const clampedLen = Math.max(0, Math.min(8, colors.length))
   if (clampedLen <= 0) return null
@@ -1032,18 +893,11 @@ function encodeSkinColors(colors: string[]): Uint8Array | null {
     const parsed = parseHexColor(colors[i] ?? '')
     if (!parsed) return null
     const offset = i * 3
-    bytes[offset] = parsed[0]
-    bytes[offset + 1] = parsed[1]
-    bytes[offset + 2] = parsed[2]
+    bytes[offset] = parsed.r
+    bytes[offset + 1] = parsed.g
+    bytes[offset + 2] = parsed.b
   }
   return bytes
-}
-
-function bytesToHexColor(r: number, g: number, b: number) {
-  const rr = r.toString(16).padStart(2, '0')
-  const gg = g.toString(16).padStart(2, '0')
-  const bb = b.toString(16).padStart(2, '0')
-  return `#${rr}${gg}${bb}`
 }
 
 function uuidToBytes(uuid: string): Uint8Array | null {
@@ -1054,124 +908,4 @@ function uuidToBytes(uuid: string): Uint8Array | null {
     bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16)
   }
   return bytes
-}
-
-function bytesToUuid(bytes: Uint8Array): string {
-  const hex = Array.from(bytes)
-    .map((value) => value.toString(16).padStart(2, '0'))
-    .join('')
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
-}
-
-function readSkinColors(reader: Reader): string[] | undefined | null {
-  const skinLen = reader.readU8()
-  if (skinLen === null) return null
-  if (skinLen === 0) return undefined
-  if (skinLen > 8) return null
-  const out: string[] = []
-  for (let i = 0; i < skinLen; i += 1) {
-    const r = reader.readU8()
-    const g = reader.readU8()
-    const b = reader.readU8()
-    if (r === null || g === null || b === null) return null
-    out.push(bytesToHexColor(r, g, b))
-  }
-  return out
-}
-
-class Reader {
-  private view: DataView
-  private offset = 0
-
-  constructor(buffer: ArrayBuffer) {
-    this.view = new DataView(buffer)
-  }
-
-  readU8(): number | null {
-    if (!this.ensure(1)) return null
-    const value = this.view.getUint8(this.offset)
-    this.offset += 1
-    return value
-  }
-
-  readU16(): number | null {
-    if (!this.ensure(2)) return null
-    const value = this.view.getUint16(this.offset, true)
-    this.offset += 2
-    return value
-  }
-
-  readI16(): number | null {
-    if (!this.ensure(2)) return null
-    const value = this.view.getInt16(this.offset, true)
-    this.offset += 2
-    return value
-  }
-
-  readI32(): number | null {
-    if (!this.ensure(4)) return null
-    const value = this.view.getInt32(this.offset, true)
-    this.offset += 4
-    return value
-  }
-
-  readU32(): number | null {
-    if (!this.ensure(4)) return null
-    const value = this.view.getUint32(this.offset, true)
-    this.offset += 4
-    return value
-  }
-
-  readI64(): number | null {
-    if (!this.ensure(8)) return null
-    const value = this.view.getBigInt64(this.offset, true)
-    this.offset += 8
-    return Number(value)
-  }
-
-  readF32(): number | null {
-    if (!this.ensure(4)) return null
-    const value = this.view.getFloat32(this.offset, true)
-    this.offset += 4
-    return value
-  }
-
-  readUuid(): string | null {
-    if (!this.ensure(16)) return null
-    const bytes = new Uint8Array(this.view.buffer, this.offset, 16)
-    this.offset += 16
-    return bytesToUuid(bytes)
-  }
-
-  readString(): string | null {
-    const length = this.readU8()
-    if (length === null) return null
-    if (!this.ensure(length)) return null
-    const bytes = new Uint8Array(this.view.buffer, this.offset, length)
-    this.offset += length
-    return textDecoder.decode(bytes)
-  }
-
-  readVarU32(): number | null {
-    let result = 0
-    let shift = 0
-    for (let i = 0; i < 5; i += 1) {
-      const byte = this.readU8()
-      if (byte === null) return null
-      result |= (byte & 0x7f) << shift
-      if ((byte & 0x80) === 0) return result >>> 0
-      shift += 7
-    }
-    return null
-  }
-
-  readVarI32(): number | null {
-    const raw = this.readVarU32()
-    if (raw === null) return null
-    return (raw >>> 1) ^ -(raw & 1)
-  }
-
-  private ensure(size: number) {
-    return this.offset + size <= this.view.byteLength
-  }
 }

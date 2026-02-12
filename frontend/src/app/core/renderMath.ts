@@ -1,16 +1,12 @@
 import { clamp } from '../../game/math'
+import { formatRendererError } from '@shared/render/errors'
 import {
   CAMERA_FOV_DEGREES,
   PLANET_RADIUS,
   VIEW_RADIUS_EXTRA_MARGIN,
 } from './constants'
 
-export const formatRendererError = (error: unknown) => {
-  if (error instanceof Error && error.message.trim()) {
-    return error.message.trim()
-  }
-  return 'Renderer initialization failed'
-}
+export { formatRendererError }
 
 const surfaceAngleFromRay = (cameraDistance: number, halfFov: number) => {
   const clampedDistance = Math.max(cameraDistance, PLANET_RADIUS + 1e-3)

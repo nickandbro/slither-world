@@ -1,9 +1,7 @@
-export const formatRendererError = (error: unknown) => {
-  if (error instanceof Error && error.message.trim()) {
-    return error.message.trim()
-  }
-  return 'WebGPU initialization failed'
-}
+import { formatRendererError as sharedFormatRendererError } from '@shared/render/errors'
+
+export const formatRendererError = (error: unknown) =>
+  sharedFormatRendererError(error, 'WebGPU initialization failed')
 
 export const hasWebGpuSupport = async () => {
   if (typeof navigator === 'undefined') return false

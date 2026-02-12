@@ -74,7 +74,7 @@ test('steering input turns the authoritative snake trajectory', async ({ page })
       const inv = 1 / PELLET_NORMAL_MAX
       let x = xq * inv
       let y = yq * inv
-      let z = 1 - Math.abs(x) - Math.abs(y)
+      const z = 1 - Math.abs(x) - Math.abs(y)
       const t = Math.max(-z, 0)
       x += x >= 0 ? -t : t
       y += y >= 0 ? -t : t
@@ -406,7 +406,14 @@ test('steering input turns the authoritative snake trajectory', async ({ page })
     try {
       // Wait until we've seen a few alive snapshots so the render loop has a local head/camera.
       await page.waitForFunction(() => {
-        const t = (window as any).__STEERING_TRACE__
+        const t = (
+          window as Window & {
+            __STEERING_TRACE__?: {
+              localNetId: number | null
+              heads: unknown[]
+            }
+          }
+        ).__STEERING_TRACE__
         return !!t && t.localNetId !== null && Array.isArray(t.heads) && t.heads.length >= 12
       }, null, { timeout: 30_000 })
     } catch {

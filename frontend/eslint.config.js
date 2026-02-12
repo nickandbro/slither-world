@@ -20,4 +20,52 @@ export default tseslint.config([
       globals: globals.browser,
     },
   },
+  {
+    files: ['src/app/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['@render/core/sceneRuntime*', '../render/core/sceneRuntime*', '../../render/core/sceneRuntime*'],
+              message: 'Import renderer internals through @render/webglScene only.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    files: ['src/game/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['@app/*', '@render/*'],
+              message: 'Game domain modules must not import app/render layers.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    files: ['src/services/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['@app/*', '@render/*', '@game/*'],
+              message: 'Services should remain transport-only and avoid app/game/render coupling.',
+            },
+          ],
+        },
+      ],
+    },
+  },
 ])

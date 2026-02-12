@@ -1,0 +1,174 @@
+.app {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.app--menu .boost-fx {
+  opacity: 0;
+}
+
+.app--menu .game-surface {
+  transform: none;
+  transition: none;
+}
+
+.app--playing .game-surface {
+  transform: none;
+  transition: transform 700ms cubic-bezier(0.2, 0.74, 0.16, 1);
+}
+
+.game-card {
+  position: absolute;
+  inset: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  border: 0;
+  overflow: hidden;
+}
+
+.play-area {
+  position: absolute;
+  inset: 0;
+  padding: 0;
+  display: block;
+  background: transparent;
+  z-index: 1;
+}
+
+.game-surface {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: hidden;
+}
+
+.game-canvas,
+.hud-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.game-canvas {
+  touch-action: none;
+}
+
+.hud-canvas {
+  pointer-events: none;
+}
+
+
+@media (pointer: coarse) {
+  .app--playing .control-panel {
+    display: none;
+  }
+
+  .leaderboard,
+  .player-stats-card {
+    /* Avoid long-press selection/callout overlays stealing touch focus while playing. */
+    pointer-events: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+}
+
+@media (max-width: 920px) {
+  .skin-screen {
+    grid-template-columns: 1fr;
+  }
+
+  .skin-preview-stage {
+    min-height: clamp(220px, 38vh, 460px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .menu-overlay {
+    transition: none;
+  }
+
+  .menu-title,
+  .menu-input-row,
+  .menu-play-button {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .menu-overlay {
+    padding-top: 0.9rem;
+    align-items: flex-start;
+  }
+
+  .menu-hero {
+    width: calc(100vw - 1.4rem);
+    gap: 0.5rem;
+  }
+
+  .menu-input-row {
+    width: min(90vw, 320px);
+  }
+
+  .leaderboard,
+  .control-panel {
+    width: calc(100vw - 2rem);
+    max-width: none;
+  }
+
+  .leaderboard {
+    max-height: 38vh;
+  }
+
+  .debug-drawer {
+    top: 0.65rem;
+    right: 0.65rem;
+  }
+
+}
+
+@media (max-width: 480px) {
+  .menu-title-o-logo {
+    width: 0.66em;
+    height: 0.66em;
+    transform: translateY(0.045em);
+  }
+
+  .menu-title {
+    font-size: 1.64rem;
+  }
+
+  .menu-play-button {
+    font-size: 1rem;
+  }
+
+  .player-stats-card {
+    left: 0.72rem;
+    bottom: 0.72rem;
+    padding: 0;
+    font-size: 0.73rem;
+  }
+
+  .leaderboard h2 {
+    font-size: 1.7rem;
+  }
+
+  .leaderboard-row {
+    font-size: 0.95rem;
+    grid-template-columns: 2.8rem minmax(0, 1fr) auto;
+  }
+}

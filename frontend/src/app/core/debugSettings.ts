@@ -1,3 +1,4 @@
+import { readLocalStorage, writeLocalStorage } from '@shared/storage/localStorage'
 import type { DayNightDebugMode } from '../../render/webglScene'
 
 const MOUNTAIN_DEBUG_KEY = 'spherical_snake_mountain_debug'
@@ -12,51 +13,26 @@ const TAIL_DEBUG_KEY = 'spherical_snake_tail_debug'
 export const DEBUG_UI_ENABLED = import.meta.env.DEV || import.meta.env.VITE_E2E_DEBUG === '1'
 
 export const getMountainDebug = () => {
-  if (typeof window === 'undefined') return false
-  try {
-    return window.localStorage.getItem(MOUNTAIN_DEBUG_KEY) === '1'
-  } catch {
-    return false
-  }
+  return readLocalStorage(MOUNTAIN_DEBUG_KEY) === '1'
 }
 
 export const getLakeDebug = () => {
-  if (typeof window === 'undefined') return false
-  try {
-    return window.localStorage.getItem(LAKE_DEBUG_KEY) === '1'
-  } catch {
-    return false
-  }
+  return readLocalStorage(LAKE_DEBUG_KEY) === '1'
 }
 
 export const getTreeDebug = () => {
-  if (typeof window === 'undefined') return false
-  try {
-    return window.localStorage.getItem(TREE_DEBUG_KEY) === '1'
-  } catch {
-    return false
-  }
+  return readLocalStorage(TREE_DEBUG_KEY) === '1'
 }
 
 export const getTerrainTessellationDebug = () => {
-  if (typeof window === 'undefined') return false
-  try {
-    const wireframe = window.localStorage.getItem(TERRAIN_WIREFRAME_DEBUG_KEY)
-    if (wireframe !== null) return wireframe === '1'
-    return window.localStorage.getItem(TERRAIN_TESSELLATION_DEBUG_KEY_LEGACY) === '1'
-  } catch {
-    return false
-  }
+  const wireframe = readLocalStorage(TERRAIN_WIREFRAME_DEBUG_KEY)
+  if (wireframe !== null) return wireframe === '1'
+  return readLocalStorage(TERRAIN_TESSELLATION_DEBUG_KEY_LEGACY) === '1'
 }
 
 export const getDayNightDebugMode = (): DayNightDebugMode => {
-  if (typeof window === 'undefined') return 'auto'
-  try {
-    const value = window.localStorage.getItem(DAY_NIGHT_DEBUG_MODE_KEY)
-    if (value === 'auto' || value === 'accelerated') return value
-  } catch {
-    // ignore persistence errors
-  }
+  const value = readLocalStorage(DAY_NIGHT_DEBUG_MODE_KEY)
+  if (value === 'auto' || value === 'accelerated') return value
   return 'auto'
 }
 
@@ -67,14 +43,14 @@ export const getNetDebugEnabled = () => {
     const host = url.hostname.toLowerCase()
     const queryValue = url.searchParams.get('netDebug')
     if (queryValue === '1') {
-      window.localStorage.setItem(NET_DEBUG_KEY, '1')
+      writeLocalStorage(NET_DEBUG_KEY, '1')
       return true
     }
     if (queryValue === '0') {
-      window.localStorage.setItem(NET_DEBUG_KEY, '0')
+      writeLocalStorage(NET_DEBUG_KEY, '0')
       return false
     }
-    const stored = window.localStorage.getItem(NET_DEBUG_KEY)
+    const stored = readLocalStorage(NET_DEBUG_KEY)
     if (stored === '1') return true
     if (stored === '0') return false
 
@@ -92,14 +68,14 @@ export const getTailDebugEnabled = () => {
     const url = new URL(window.location.href)
     const queryValue = url.searchParams.get('tailDebug')
     if (queryValue === '1') {
-      window.localStorage.setItem(TAIL_DEBUG_KEY, '1')
+      writeLocalStorage(TAIL_DEBUG_KEY, '1')
       return true
     }
     if (queryValue === '0') {
-      window.localStorage.setItem(TAIL_DEBUG_KEY, '0')
+      writeLocalStorage(TAIL_DEBUG_KEY, '0')
       return false
     }
-    const stored = window.localStorage.getItem(TAIL_DEBUG_KEY)
+    const stored = readLocalStorage(TAIL_DEBUG_KEY)
     if (stored === '1') return true
     if (stored === '0') return false
     return false
@@ -114,25 +90,15 @@ export const persistDebugSettings = (settings: {
   treeDebug: boolean
   terrainTessellationDebug: boolean
 }) => {
-  if (typeof window === 'undefined') return
-  try {
-    window.localStorage.setItem(MOUNTAIN_DEBUG_KEY, settings.mountainDebug ? '1' : '0')
-    window.localStorage.setItem(LAKE_DEBUG_KEY, settings.lakeDebug ? '1' : '0')
-    window.localStorage.setItem(TREE_DEBUG_KEY, settings.treeDebug ? '1' : '0')
-    window.localStorage.setItem(
-      TERRAIN_WIREFRAME_DEBUG_KEY,
-      settings.terrainTessellationDebug ? '1' : '0',
-    )
-  } catch {
-    // ignore persistence errors
-  }
+  writeLocalStorage(MOUNTAIN_DEBUG_KEY, settings.mountainDebug ? '1' : '0')
+  writeLocalStorage(LAKE_DEBUG_KEY, settings.lakeDebug ? '1' : '0')
+  writeLocalStorage(TREE_DEBUG_KEY, settings.treeDebug ? '1' : '0')
+  writeLocalStorage(
+    TERRAIN_WIREFRAME_DEBUG_KEY,
+    settings.terrainTessellationDebug ? '1' : '0',
+  )
 }
 
 export const persistDayNightDebugMode = (mode: DayNightDebugMode) => {
-  if (typeof window === 'undefined') return
-  try {
-    window.localStorage.setItem(DAY_NIGHT_DEBUG_MODE_KEY, mode)
-  } catch {
-    // ignore persistence errors
-  }
+  writeLocalStorage(DAY_NIGHT_DEBUG_MODE_KEY, mode)
 }
