@@ -710,7 +710,7 @@ fn write_player_state_encodes_digestion_id_and_progress() {
     });
 
     let mut encoder = protocol::Encoder::with_capacity(256);
-    state.write_player_state(&mut encoder, &player);
+    state.write_player_state_with_window(&mut encoder, &player, SnakeWindow::full(player.snake.len()));
     let payload = encoder.into_vec();
 
     let mut offset = 0usize;
@@ -780,7 +780,7 @@ fn write_player_state_encodes_authoritative_is_boosting_flag() {
     player.is_boosting = true;
 
     let mut encoder = protocol::Encoder::with_capacity(256);
-    state.write_player_state(&mut encoder, &player);
+    state.write_player_state_with_window(&mut encoder, &player, SnakeWindow::full(player.snake.len()));
     let payload = encoder.into_vec();
 
     let flags = payload[2];
@@ -805,7 +805,7 @@ fn write_player_state_encodes_most_recent_digestions_when_capped() {
     }
 
     let mut encoder = protocol::Encoder::with_capacity(8192);
-    state.write_player_state(&mut encoder, &player);
+    state.write_player_state_with_window(&mut encoder, &player, SnakeWindow::full(player.snake.len()));
     let payload = encoder.into_vec();
 
     let mut offset = 0usize;
@@ -1891,7 +1891,7 @@ fn snake_window_returns_stub_when_remote_snake_is_out_of_view() {
 }
 
 #[test]
-fn build_state_payload_for_session_excludes_stub_remote_players() {
+fn build_state_delta_payload_for_session_excludes_stub_remote_players() {
     let mut state = make_state();
     let local_id = "local-player".to_string();
     let visible_remote_id = "visible-remote".to_string();
@@ -1921,7 +1921,9 @@ fn build_state_payload_for_session_excludes_stub_remote_players() {
         Some(0.45),
     );
 
-    let payload = state.build_state_payload_for_session(1234, 77, "session-1");
+    let payload = state
+        .build_state_delta_payload_for_session(1234, 77, "session-1")
+        .expect("state delta payload");
     let (state_seq, total_players, visible_players) = decode_state_counts(&payload);
     assert_eq!(state_seq, 77);
     assert_eq!(total_players, 3);
@@ -1964,7 +1966,7 @@ fn build_init_payload_for_session_uses_view_scoped_player_count() {
 }
 
 #[test]
-fn build_state_payload_includes_local_player_when_local_snake_is_empty() {
+fn build_state_delta_payload_includes_local_player_when_local_snake_is_empty() {
     let mut state = make_state();
     let local_id = "local-empty".to_string();
     let mut local_player = make_player(&local_id, Vec::new());
@@ -1986,7 +1988,9 @@ fn build_state_payload_includes_local_player_when_local_snake_is_empty() {
         Some(0.45),
     );
 
-    let payload = state.build_state_payload_for_session(1234, 91, "session-3");
+    let payload = state
+        .build_state_delta_payload_for_session(1234, 91, "session-3")
+        .expect("state delta payload");
     let (state_seq, total_players, visible_players) = decode_state_counts(&payload);
     assert_eq!(state_seq, 91);
     assert_eq!(total_players, 2);
@@ -1994,7 +1998,7 @@ fn build_state_payload_includes_local_player_when_local_snake_is_empty() {
 }
 
 #[test]
-fn broadcast_state_increments_state_sequence_once_per_tick() {
+fn broadcast_state_delta_increments_state_sequence_once_per_tick() {
     let mut state = make_state();
     let outbound_state = Arc::new(LatestFrame::new());
     let (outbound_hi, _outbound_hi_rx) = mpsc::channel::<Vec<u8>>(1);
@@ -2019,10 +2023,10 @@ fn broadcast_state_increments_state_sequence_once_per_tick() {
         },
     );
 
-    state.broadcast_state(1234, state.next_state_seq);
+    state.broadcast_state_delta(1234, state.next_state_seq);
     let first_payload = outbound_state.take_latest().expect("first payload");
     state.next_state_seq = state.next_state_seq.wrapping_add(1);
-    state.broadcast_state(1234, state.next_state_seq);
+    state.broadcast_state_delta(1234, state.next_state_seq);
     let second_payload = outbound_state.take_latest().expect("second payload");
     state.next_state_seq = state.next_state_seq.wrapping_add(1);
 

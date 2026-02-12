@@ -12,12 +12,6 @@ const occlusionPointTemp = new THREE.Vector3()
 
 export const dotToAngle = (dot: number): number => Math.acos(clamp(dot, -1, 1))
 
-export const isWithinAngularThreshold = (
-  center: THREE.Vector3,
-  direction: THREE.Vector3,
-  threshold: number,
-): boolean => dotToAngle(center.dot(direction)) <= threshold
-
 export const isAngularVisible = (
   directionDot: number,
   viewAngle: number,

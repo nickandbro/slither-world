@@ -6,8 +6,6 @@ export type DigestionVisual = {
   strength: number
 }
 
-export const clampDigestionProgress = (value: number): number => clamp(value, 0, 1)
-
 export const buildDigestionVisuals = (
   digestions: DigestionSnapshot[],
   travelEase: number,

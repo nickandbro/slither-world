@@ -113,11 +113,6 @@ pub fn random_axis() -> Point {
     }
 }
 
-pub fn collision(a: Point, b: Point) -> bool {
-    let base_angular_radius = base_collision_angular_radius();
-    collision_with_angular_radii(a, b, base_angular_radius, base_angular_radius)
-}
-
 pub fn base_collision_angular_radius() -> f64 {
     clamp(COLLISION_DISTANCE * 0.5, 0.0, 1.0).asin()
 }
@@ -166,8 +161,9 @@ mod tests {
             y: 0.0,
             z: 0.0,
         };
-        assert!(collision(a, inside));
-        assert!(!collision(a, outside));
+        let base = base_collision_angular_radius();
+        assert!(collision_with_angular_radii(a, inside, base, base));
+        assert!(!collision_with_angular_radii(a, outside, base, base));
     }
 
     #[test]

@@ -28,7 +28,6 @@ export const CAMERA_DISTANCE_DEFAULT = 5.2
 export const CAMERA_DISTANCE_MIN = 4.2
 export const CAMERA_DISTANCE_MAX = 9
 export const CAMERA_ZOOM_SENSITIVITY = 0.0015
-export const POINTER_MAX_RANGE_RATIO = 0.25
 export const CAMERA_FOV_DEGREES = 40
 export const PLANET_RADIUS = 3
 export const VIEW_RADIUS_EXTRA_MARGIN = 0.08

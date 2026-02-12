@@ -2588,25 +2588,6 @@ impl RoomState {
         Some(encoder.into_vec())
     }
 
-    fn build_state_payload_for_session(
-        &mut self,
-        now: i64,
-        state_seq: u32,
-        session_id: &str,
-    ) -> Vec<u8> {
-        self.build_state_delta_payload_for_session(now, state_seq, session_id)
-            .unwrap_or_else(|| {
-                let mut encoder = protocol::Encoder::with_capacity(4 + 8 + 4 + 2 + 1 + 2);
-                encoder.write_header(protocol::TYPE_STATE_DELTA, 0);
-                encoder.write_i64(now);
-                encoder.write_u32(state_seq);
-                encoder.write_u16(self.players.len().min(u16::MAX as usize) as u16);
-                encoder.write_u8(DELTA_FRAME_KEYFRAME);
-                encoder.write_u16(0);
-                encoder.into_vec()
-            })
-    }
-
     fn build_player_meta_payload(&self, player_ids: &[String]) -> Option<Vec<u8>> {
         let mut players: Vec<&Player> = Vec::new();
         for id in player_ids {
@@ -2668,10 +2649,6 @@ impl RoomState {
         for session_id in stale {
             self.disconnect_session(&session_id);
         }
-    }
-
-    fn write_player_state(&self, encoder: &mut protocol::Encoder, player: &Player) {
-        self.write_player_state_with_window(encoder, player, SnakeWindow::full(player.snake.len()));
     }
 
     fn encode_delta_player_cache(&self, player: &Player, window: SnakeWindow) -> DeltaPlayerCache {
@@ -2959,10 +2936,6 @@ impl RoomState {
                 session.outbound_state.store(payload);
             }
         }
-    }
-
-    fn broadcast_state(&mut self, now: i64, state_seq: u32) {
-        self.broadcast_state_delta(now, state_seq);
     }
 
     fn pellet_needs_update(pellet: &Pellet) -> bool {

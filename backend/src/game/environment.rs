@@ -19,9 +19,6 @@ pub const LAKE_NOISE_AMPLITUDE: f64 = 0.55;
 pub const LAKE_NOISE_FREQ_MIN: f64 = 3.0;
 pub const LAKE_NOISE_FREQ_MAX: f64 = 6.0;
 pub const LAKE_SHELF_DEPTH_RATIO: f64 = 0.45;
-pub const LAKE_SHELF_CORE: f64 = 0.55;
-pub const LAKE_CENTER_PIT_START: f64 = 0.72;
-pub const LAKE_CENTER_PIT_RATIO: f64 = 0.5;
 pub const LAKE_SURFACE_INSET_RATIO: f64 = 0.5;
 pub const LAKE_SURFACE_EXTRA_INSET: f64 = BASE_PLANET_RADIUS * 0.01;
 pub const LAKE_WATER_MASK_THRESHOLD: f64 = 0.0;
@@ -109,12 +106,9 @@ pub struct Environment {
     pub mountains: Vec<MountainInstance>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct LakeSample {
     pub boundary: f64,
-    pub depth: f64,
-    pub lake_index: Option<usize>,
 }
 
 pub fn desert_biome_center() -> Point {
@@ -304,10 +298,8 @@ impl Environment {
 
 pub fn sample_lakes(normal: Point, lakes: &[Lake]) -> LakeSample {
     let mut max_boundary = 0.0;
-    let mut max_depth = 0.0;
-    let mut lake_index = None;
 
-    for (index, lake) in lakes.iter().enumerate() {
+    for lake in lakes {
         let dot_value = clamp(dot(lake.center, normal), -1.0, 1.0);
         let angle = dot_value.acos();
         if angle >= lake.radius + lake.edge_falloff {
@@ -341,30 +333,15 @@ pub fn sample_lakes(normal: Point, lakes: &[Lake]) -> LakeSample {
             continue;
         }
 
-        let shelf_radius = (edge_radius - lake.edge_falloff).max(1e-3);
         let edge_t = clamp((edge_radius - angle) / lake.edge_falloff, 0.0, 1.0);
         let edge_blend = edge_t.powf(LAKE_EDGE_SHARPNESS);
-        let core = clamp(1.0 - angle / shelf_radius, 0.0, 1.0);
-        let basin_factor = smoothstep(LAKE_SHELF_CORE, 1.0, core);
-        let pit_factor = smoothstep(LAKE_CENTER_PIT_START, 1.0, core);
-        let pit_depth = pit_factor * pit_factor * lake.depth * LAKE_CENTER_PIT_RATIO;
-        let depth = edge_blend
-            * (lake.shelf_depth + basin_factor * (lake.depth - lake.shelf_depth) + pit_depth);
 
         if edge_blend > max_boundary {
             max_boundary = edge_blend;
-            lake_index = Some(index);
-        }
-        if depth > max_depth {
-            max_depth = depth;
         }
     }
 
-    LakeSample {
-        boundary: max_boundary,
-        depth: max_depth,
-        lake_index,
-    }
+    LakeSample { boundary: max_boundary }
 }
 
 fn create_lakes(seed: u32, count: usize) -> Vec<Lake> {
@@ -527,11 +504,6 @@ fn hash3(seed: u32, x: i32, y: i32, z: i32) -> f64 {
     h = (h ^ z as u32).wrapping_mul(0x27d4eb2f);
     h ^= h >> 16;
     (h as f64) / 4294967296.0
-}
-
-fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
-    let t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
 }
 
 fn random_on_sphere(rng: &mut SeededRng) -> Point {

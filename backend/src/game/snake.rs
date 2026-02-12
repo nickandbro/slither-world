@@ -290,14 +290,6 @@ pub fn apply_snake_rotation_step(snake: &mut [SnakeNode], axis: Point, velocity:
     }
 }
 
-#[allow(dead_code)]
-pub fn apply_snake_rotation(snake: &mut [SnakeNode], axis: Point, step_velocity: f64, steps: i32) {
-    let step_count = steps.max(1);
-    for _ in 0..step_count {
-        apply_snake_rotation_step(snake, axis, step_velocity);
-    }
-}
-
 pub fn create_snake(axis: Point) -> Vec<SnakeNode> {
     let mut snake = Vec::with_capacity(STARTING_LENGTH);
     for _ in 0..STARTING_LENGTH {

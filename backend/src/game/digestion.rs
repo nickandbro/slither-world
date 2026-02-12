@@ -15,10 +15,6 @@ pub struct BoostDrainConfig {
     pub node_per_step: f64,
 }
 
-pub fn add_digestion(player: &mut Player) {
-    add_digestion_with_strength(player, 1.0, 1.0);
-}
-
 pub fn add_digestion_with_strength(player: &mut Player, strength: f32, growth_amount: f64) {
     let clamped_growth = growth_amount.max(0.0);
     if clamped_growth <= 0.0 {
@@ -42,10 +38,6 @@ pub fn add_digestion_with_strength(player: &mut Player, strength: f32, growth_am
         applied_growth: 0.0,
         strength: clamp(strength as f64, 0.05, 1.0) as f32,
     });
-}
-
-pub fn advance_digestions(player: &mut Player, steps: i32) {
-    let _ = advance_digestions_with_boost(player, steps, BoostDrainConfig::default());
 }
 
 fn tail_growth_rate_per_step(backlog: f64) -> f64 {
@@ -305,9 +297,9 @@ mod tests {
     #[test]
     fn add_digestion_assigns_monotonic_ids() {
         let mut player = make_player();
-        add_digestion(&mut player);
-        add_digestion(&mut player);
-        add_digestion(&mut player);
+        add_digestion_with_strength(&mut player, 1.0, 1.0);
+        add_digestion_with_strength(&mut player, 1.0, 1.0);
+        add_digestion_with_strength(&mut player, 1.0, 1.0);
 
         assert_eq!(player.next_digestion_id, 3);
         assert_eq!(player.digestions.len(), 3);
@@ -341,7 +333,7 @@ mod tests {
         ];
 
         let previous_len = player.snake.len();
-        advance_digestions(&mut player, 1);
+        let _ = advance_digestions_with_boost(&mut player, 1, BoostDrainConfig::default());
 
         assert_eq!(player.snake.len(), previous_len);
         assert_eq!(player.digestions.len(), 1);
@@ -355,8 +347,8 @@ mod tests {
         let mut player = make_player();
         player.next_digestion_id = u32::MAX;
 
-        add_digestion(&mut player);
-        add_digestion(&mut player);
+        add_digestion_with_strength(&mut player, 1.0, 1.0);
+        add_digestion_with_strength(&mut player, 1.0, 1.0);
 
         assert_eq!(player.digestions[0].id, u32::MAX);
         assert_eq!(player.digestions[1].id, 0);
@@ -377,7 +369,7 @@ mod tests {
         });
 
         let before_len = player.snake.len();
-        advance_digestions(&mut player, 1);
+        let _ = advance_digestions_with_boost(&mut player, 1, BoostDrainConfig::default());
         assert_eq!(player.snake.len(), before_len);
         assert!(!player.digestions.is_empty());
         assert!(player.tail_extension > 0.0);
@@ -386,7 +378,7 @@ mod tests {
 
         let mut iterations = 0;
         while !player.digestions.is_empty() && iterations < 300 {
-            advance_digestions(&mut player, 1);
+            let _ = advance_digestions_with_boost(&mut player, 1, BoostDrainConfig::default());
             iterations += 1;
         }
         assert!(player.digestions.is_empty());
@@ -410,14 +402,14 @@ mod tests {
         let before_len = player.snake.len();
         let mut iterations = 0;
         while player.snake.len() == before_len && iterations < 300 {
-            advance_digestions(&mut player, 1);
+            let _ = advance_digestions_with_boost(&mut player, 1, BoostDrainConfig::default());
             iterations += 1;
         }
         assert_eq!(player.snake.len(), before_len + 1);
 
         iterations = 0;
         while !player.digestions.is_empty() && iterations < 300 {
-            advance_digestions(&mut player, 1);
+            let _ = advance_digestions_with_boost(&mut player, 1, BoostDrainConfig::default());
             iterations += 1;
         }
         assert!(player.digestions.is_empty());
@@ -441,7 +433,7 @@ mod tests {
         let mut last_len = before_len;
         let mut iterations = 0;
         while !player.digestions.is_empty() && iterations < 2000 {
-            advance_digestions(&mut player, 1);
+            let _ = advance_digestions_with_boost(&mut player, 1, BoostDrainConfig::default());
             assert!(player.snake.len() <= last_len + 1);
             last_len = player.snake.len();
             iterations += 1;
@@ -457,7 +449,7 @@ mod tests {
         player.tail_extension = 2.2;
         let before_len = player.snake.len();
 
-        advance_digestions(&mut player, 2);
+        let _ = advance_digestions_with_boost(&mut player, 2, BoostDrainConfig::default());
 
         assert_eq!(player.snake.len(), before_len + 2);
         assert!(player.tail_extension > 0.19 && player.tail_extension < 0.21);

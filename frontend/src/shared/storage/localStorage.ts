@@ -19,16 +19,6 @@ export const writeLocalStorage = (key: string, value: string): boolean => {
   }
 }
 
-export const removeLocalStorage = (key: string): boolean => {
-  if (!hasWindow()) return false
-  try {
-    window.localStorage.removeItem(key)
-    return true
-  } catch {
-    return false
-  }
-}
-
 export const readLocalStorageJson = <T>(key: string): T | null => {
   const value = readLocalStorage(key)
   if (!value) return null

@@ -1,8 +1,6 @@
 import * as THREE from 'three'
 import { clamp } from '../utils/math'
 
-export const clampGirthScale = (value: number): number => clamp(value, 1, 2)
-
 export const projectToTangentPlane = (direction: THREE.Vector3, normal: THREE.Vector3) => {
   const projected = direction.clone().addScaledVector(normal, -direction.dot(normal))
   if (projected.lengthSq() <= 1e-8) return null

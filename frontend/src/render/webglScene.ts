@@ -58,8 +58,3 @@ export async function createRenderScene(
     }
   }
 }
-
-export async function createWebGLScene(canvas: HTMLCanvasElement): Promise<WebGLScene> {
-  const { scene } = await createRenderScene(canvas, 'webgl')
-  return scene
-}
