@@ -20,7 +20,15 @@ Spherical Snake is a multiplayer, slither-style snake game where players steer g
 - `frontend/dist/` — production build output.
 - `frontend/vite.config.ts`, `frontend/tsconfig.*.json`, `frontend/wrangler*.toml/jsonc`, `frontend/eslint.config.js` — frontend tooling/config.
 - `backend/` — Rust server (Tokio runtime) for multiplayer + leaderboard.
-- `backend/src/game/` — authoritative game loop, math, digestion, snake logic, room handling.
+- `backend/src/main.rs` — runtime role dispatcher (`SNAKE_ROLE`: `standalone`/`control`/`room`).
+- `backend/src/app/` — shared backend app helpers (room-name sanitization + time helpers).
+- `backend/src/standalone/` — standalone runtime (health/matchmake/leaderboard/ws routes + DB wiring).
+- `backend/src/room_runtime/` — room-only runtime (health/ws routes + control-plane heartbeat loop).
+- `backend/src/control/` — control-plane runtime (matchmake, autoscaling, Hetzner provisioning, room registry).
+- `backend/src/transport/ws_session.rs` — shared websocket session bridge used by standalone + room runtimes.
+- `backend/src/game/` — authoritative game loop, math, digestion, snake logic, room state + replication.
+- `backend/src/game/room.rs` + `backend/src/game/room/` — room core plus split submodules (`session`, `visibility`, tests).
+- `backend/src/game/geometry.rs` — shared spherical geometry helpers reused by room/environment/physics.
 - `backend/src/protocol.rs` — binary WebSocket protocol codec + constants.
 - `backend/src/shared/` — shared helpers (name sanitization + room token signing).
 - `backend/migrations/` — SQLite schema migrations.

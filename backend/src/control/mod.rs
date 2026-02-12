@@ -1,10 +1,11 @@
 mod cloud_init;
 mod hetzner;
-mod token;
 
+use crate::app::room_name::sanitize_room_name;
+use crate::app::time::now_millis;
 use crate::control::cloud_init::{build_room_cloud_init, RoomCloudInitConfig};
 use crate::control::hetzner::{CreateServerParams, HetznerClient};
-use crate::control::token::{sign_room_token, RoomTokenClaims};
+use crate::shared::room_token::{sign_room_token, RoomTokenClaims};
 use anyhow::{bail, Context};
 use axum::{
     extract::{Query, State},
@@ -688,19 +689,6 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     value.strip_prefix("Bearer ").map(str::trim)
 }
 
-fn sanitize_room_name(value: &str) -> String {
-    let mut cleaned = String::with_capacity(value.len().min(64));
-    for ch in value.chars() {
-        if cleaned.len() >= 64 {
-            break;
-        }
-        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-            cleaned.push(ch);
-        }
-    }
-    cleaned
-}
-
 fn parse_required_id_list_env(var_name: &str) -> anyhow::Result<Vec<i64>> {
     let raw = env::var(var_name).with_context(|| format!("missing {var_name}"))?;
     parse_id_list(var_name, &raw)
@@ -731,7 +719,7 @@ fn parse_id_list(var_name: &str, raw: &str) -> anyhow::Result<Vec<i64>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_id_list, sanitize_room_name};
+    use super::{parse_id_list, sanitize_room_name, sign_room_token, RoomTokenClaims};
 
     #[test]
     fn sanitize_room_name_preserves_generated_room_ids() {
@@ -768,12 +756,18 @@ mod tests {
         assert!(parse_id_list("HETZNER_ROOM_FIREWALL_IDS", "-1").is_err());
         assert!(parse_id_list("HETZNER_ROOM_FIREWALL_IDS", "abc").is_err());
     }
-}
 
-fn now_millis() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
+    #[test]
+    fn sign_room_token_returns_two_part_token() {
+        let claims = RoomTokenClaims {
+            room_id: "room-1".to_string(),
+            origin: "http://127.0.0.1:8787".to_string(),
+            expires_at_ms: 12345,
+        };
+        let token = sign_room_token(&claims, "secret").expect("token should be signed");
+        let mut parts = token.split('.');
+        assert!(parts.next().is_some());
+        assert!(parts.next().is_some());
+        assert!(parts.next().is_none());
+    }
 }

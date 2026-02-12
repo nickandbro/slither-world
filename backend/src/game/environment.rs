@@ -1,4 +1,5 @@
-use super::math::{clamp, cross, dot, normalize};
+use super::geometry::tangent_basis;
+use super::math::{clamp, dot};
 use super::types::Point;
 use crate::protocol::Encoder;
 use std::f64::consts::PI;
@@ -473,25 +474,6 @@ fn pick_sparse_normal(
         }
     }
     random_on_sphere(rng)
-}
-
-fn tangent_basis(normal: Point) -> (Point, Point) {
-    let up = if normal.y.abs() < 0.9 {
-        Point {
-            x: 0.0,
-            y: 1.0,
-            z: 0.0,
-        }
-    } else {
-        Point {
-            x: 1.0,
-            y: 0.0,
-            z: 0.0,
-        }
-    };
-    let tangent = normalize(cross(up, normal));
-    let bitangent = normalize(cross(normal, tangent));
-    (tangent, bitangent)
 }
 
 fn build_mountain_outline(seed: u32, base_angle: f64) -> Vec<f64> {

@@ -151,11 +151,7 @@ pub fn decode_client_message(data: &[u8]) -> Option<ClientMessage> {
             };
             let view_radius = if flags & FLAG_VIEW_RADIUS != 0 {
                 let q = reader.read_u16()?;
-                Some(dequantize_u16_to_range(
-                    q,
-                    VIEW_RADIUS_MIN,
-                    VIEW_RADIUS_MAX,
-                ))
+                Some(dequantize_u16_to_range(q, VIEW_RADIUS_MIN, VIEW_RADIUS_MAX))
             } else {
                 None
             };
@@ -446,9 +442,8 @@ mod tests {
                 assert!((view_center.z - 1.0).abs() < 1e-3);
 
                 let expected_radius = VIEW_RADIUS_MIN + (VIEW_RADIUS_MAX - VIEW_RADIUS_MIN) * 0.5;
-                let expected_camera =
-                    VIEW_CAMERA_DISTANCE_MIN
-                        + (VIEW_CAMERA_DISTANCE_MAX - VIEW_CAMERA_DISTANCE_MIN) * 0.5;
+                let expected_camera = VIEW_CAMERA_DISTANCE_MIN
+                    + (VIEW_CAMERA_DISTANCE_MAX - VIEW_CAMERA_DISTANCE_MIN) * 0.5;
                 assert!((view_radius.expect("view_radius") - expected_radius).abs() < 0.01);
                 assert!((camera_distance.expect("camera_distance") - expected_camera).abs() < 0.01);
             }

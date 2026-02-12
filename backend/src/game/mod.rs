@@ -1,6 +1,7 @@
 pub mod constants;
 pub mod digestion;
 pub mod environment;
+pub mod geometry;
 pub mod input;
 pub mod math;
 pub mod physics;
