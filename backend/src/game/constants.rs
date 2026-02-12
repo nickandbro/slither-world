@@ -79,6 +79,11 @@ pub const SPAWN_CONE_ANGLE: f64 = std::f64::consts::PI / 3.0;
 pub const MAX_SPAWN_ATTEMPTS: usize = 32;
 pub const SPAWN_PLAYER_MIN_DISTANCE: f64 = COLLISION_DISTANCE * 2.0;
 pub const DIGESTION_TAIL_SETTLE_STEPS: i64 = 4;
+// Delay digestion travel so bulges start after pellet intake reaches the mouth.
+// This is tuned to match the client consume-ghost duration (~0.34s).
+pub const DIGESTION_INTAKE_DELAY_MS: i64 = 340;
+pub const DIGESTION_INTAKE_DELAY_STEPS: i64 =
+    (DIGESTION_INTAKE_DELAY_MS + TICK_MS as i64 - 1) / TICK_MS as i64;
 // Tail growth is smoothed by draining "pending" tail growth at a dynamic rate:
 // `rate = base + mult * sqrt(backlog)`, clamped to `max`.
 // This keeps small growth smooth while letting large bursts catch up faster than linear.

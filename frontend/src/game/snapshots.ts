@@ -105,13 +105,13 @@ function blendDigestions(a: DigestionSnapshot[], b: DigestionSnapshot[], t: numb
           0,
           MAX_DIGESTION_PROGRESS,
         ),
-        strength: clamp(lerp(digestionA.strength, digestionB.strength, t), 0.05, 1),
+        strength: clamp(lerp(digestionA.strength, digestionB.strength, t), 0, 1),
       })
     } else {
       digestions.push({
         id: digestionB.id,
         progress: clamp(digestionB.progress, 0, MAX_DIGESTION_PROGRESS),
-        strength: clamp(digestionB.strength, 0.05, 1),
+        strength: clamp(digestionB.strength, 0, 1),
       })
     }
   }
@@ -122,7 +122,7 @@ function blendDigestions(a: DigestionSnapshot[], b: DigestionSnapshot[], t: numb
       digestions.push({
         id: digestionA.id,
         progress: clamp(digestionA.progress, 0, MAX_DIGESTION_PROGRESS),
-        strength: clamp(digestionA.strength, 0.05, 1),
+        strength: clamp(digestionA.strength, 0, 1),
       })
     }
   }

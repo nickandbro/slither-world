@@ -1,7 +1,7 @@
 use super::constants::{
-    DIGESTION_TAIL_GROWTH_BACKLOG_SQRT_MULT, DIGESTION_TAIL_GROWTH_BASE_PER_STEP,
-    DIGESTION_TAIL_GROWTH_MAX_PER_STEP, DIGESTION_TAIL_SETTLE_STEPS, DIGESTION_TRAVEL_SPEED_MULT,
-    MIN_SURVIVAL_LENGTH, NODE_QUEUE_SIZE,
+    DIGESTION_INTAKE_DELAY_STEPS, DIGESTION_TAIL_GROWTH_BACKLOG_SQRT_MULT,
+    DIGESTION_TAIL_GROWTH_BASE_PER_STEP, DIGESTION_TAIL_GROWTH_MAX_PER_STEP,
+    DIGESTION_TAIL_SETTLE_STEPS, DIGESTION_TRAVEL_SPEED_MULT, MIN_SURVIVAL_LENGTH, NODE_QUEUE_SIZE,
 };
 use super::math::clamp;
 use super::snake::{add_snake_node_for_growth, remove_snake_tail_node};
@@ -28,8 +28,9 @@ pub fn add_digestion_with_strength(player: &mut Player, strength: f32, growth_am
         / DIGESTION_TRAVEL_SPEED_MULT)
         .round()
         .max(1.0) as i64;
+    let intake_delay_steps = DIGESTION_INTAKE_DELAY_STEPS.max(0);
     let settle_steps = DIGESTION_TAIL_SETTLE_STEPS.max(0);
-    let total = travel_steps + settle_steps;
+    let total = travel_steps + settle_steps + intake_delay_steps;
     let id = player.next_digestion_id;
     player.next_digestion_id = player.next_digestion_id.wrapping_add(1);
     player.digestions.push(Digestion {
@@ -214,10 +215,12 @@ pub fn advance_digestions_with_boost(
 }
 
 pub fn get_digestion_progress(digestion: &Digestion) -> f64 {
+    let intake_delay_steps = DIGESTION_INTAKE_DELAY_STEPS.max(0);
     let settle_steps = digestion.settle_steps.max(0);
-    let travel_total = (digestion.total - settle_steps).max(1) as f64;
+    let travel_total = (digestion.total - settle_steps - intake_delay_steps).max(1) as f64;
     let travel_remaining = (digestion.remaining - settle_steps).max(0) as f64;
-    let travel_progress = clamp(1.0 - travel_remaining / travel_total, 0.0, 1.0);
+    let delayed_travel_remaining = travel_remaining.min(travel_total);
+    let travel_progress = clamp(1.0 - delayed_travel_remaining / travel_total, 0.0, 1.0);
 
     let settle_progress = if settle_steps > 0 && digestion.remaining <= settle_steps {
         clamp(
@@ -231,6 +234,18 @@ pub fn get_digestion_progress(digestion: &Digestion) -> f64 {
         0.0
     };
     clamp(travel_progress + settle_progress, 0.0, 2.0)
+}
+
+pub fn get_digestion_visual_strength(digestion: &Digestion) -> f32 {
+    let intake_delay_steps = DIGESTION_INTAKE_DELAY_STEPS.max(0);
+    let settle_steps = digestion.settle_steps.max(0);
+    let travel_total = (digestion.total - settle_steps - intake_delay_steps).max(1);
+    let travel_remaining = (digestion.remaining - settle_steps).max(0);
+    if travel_remaining >= travel_total {
+        0.0
+    } else {
+        clamp(digestion.strength as f64, 0.05, 1.0) as f32
+    }
 }
 
 #[cfg(test)]
@@ -473,6 +488,42 @@ mod tests {
         let finished_progress = get_digestion_progress(&finished);
         assert!((at_tail_progress - 1.0).abs() < 1e-6);
         assert!((finished_progress - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn digestion_progress_holds_at_zero_during_intake_delay() {
+        let mut player = make_player();
+        add_digestion_with_strength(&mut player, 0.7, 0.2);
+        assert_eq!(player.digestions.len(), 1);
+        assert!(DIGESTION_INTAKE_DELAY_STEPS > 0);
+
+        let mut digestion = player.digestions[0].clone();
+        assert!(get_digestion_progress(&digestion) <= 1e-6);
+        for _ in 0..DIGESTION_INTAKE_DELAY_STEPS {
+            digestion.remaining -= 1;
+            assert!(get_digestion_progress(&digestion) <= 1e-6);
+        }
+
+        digestion.remaining -= 1;
+        assert!(get_digestion_progress(&digestion) > 1e-6);
+    }
+
+    #[test]
+    fn digestion_visual_strength_is_zero_during_intake_delay() {
+        let mut player = make_player();
+        add_digestion_with_strength(&mut player, 0.7, 0.2);
+        assert_eq!(player.digestions.len(), 1);
+        assert!(DIGESTION_INTAKE_DELAY_STEPS > 0);
+
+        let mut digestion = player.digestions[0].clone();
+        assert!(get_digestion_visual_strength(&digestion) <= 1e-6);
+        for _ in 0..DIGESTION_INTAKE_DELAY_STEPS {
+            digestion.remaining -= 1;
+            assert!(get_digestion_visual_strength(&digestion) <= 1e-6);
+        }
+
+        digestion.remaining -= 1;
+        assert!(get_digestion_visual_strength(&digestion) >= 0.69);
     }
 
     #[test]

@@ -6697,7 +6697,7 @@ diffuseColor.a *= retireEdge;`,
       const travelT = clamp(progress, 0, 1)
       const dissolve = progress > 1 ? 1 - clamp(progress - 1, 0, 1) : 1
       const travelBiased = Math.pow(travelT, DIGESTION_TRAVEL_EASE)
-      const strength = clamp(digestion.strength, 0.05, 1) * dissolve
+      const strength = clamp(digestion.strength, 0, 1) * dissolve
       if (strength <= 1e-4) continue
       visuals.push({ t: travelBiased, strength })
     }

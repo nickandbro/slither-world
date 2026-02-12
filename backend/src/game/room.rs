@@ -27,6 +27,7 @@ use super::constants::{
 };
 use super::digestion::{
     add_digestion_with_strength, advance_digestions_with_boost, get_digestion_progress,
+    get_digestion_visual_strength,
     BoostDrainConfig,
 };
 use super::environment::{
@@ -3003,7 +3004,7 @@ impl RoomState {
             digestions.push(DeltaDigestionCache {
                 id: digestion.id,
                 progress_q: Self::quantize_unit_u16(get_digestion_progress(digestion)),
-                strength_q: Self::quantize_unit_u8(clamp(digestion.strength as f64, 0.0, 1.0)),
+                strength_q: Self::quantize_unit_u8(get_digestion_visual_strength(digestion) as f64),
             });
         }
 
@@ -3207,7 +3208,7 @@ impl RoomState {
         {
             encoder.write_u32(digestion.id);
             encoder.write_f32(get_digestion_progress(digestion) as f32);
-            encoder.write_f32(digestion.strength);
+            encoder.write_f32(get_digestion_visual_strength(digestion));
         }
     }
 
@@ -4285,7 +4286,8 @@ mod tests {
         offset += 4;
 
         let encoded_strength = f32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
-        assert!((encoded_strength - player.digestions[0].strength).abs() < 1e-6);
+        let expected_strength = get_digestion_visual_strength(&player.digestions[0]);
+        assert!((encoded_strength - expected_strength).abs() < 1e-6);
     }
 
     #[test]
