@@ -590,6 +590,36 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
       predictionEventsRef,
       getPredictionReport,
       clearPredictionEvents,
+      getLocalPlayerId: () => playerIdRef.current,
+      getLocalHeadNormal: () => {
+        const snake = localSnakeDisplayRef.current
+        const head = snake?.[0]
+        if (!head) return null
+        const normalized = normalize(head)
+        const mag = Math.hypot(normalized.x, normalized.y, normalized.z)
+        if (!(mag > 1e-6) || !Number.isFinite(mag)) return null
+        return normalized
+      },
+      getLocalHeadForward: () => {
+        const snake = localSnakeDisplayRef.current
+        if (!snake || snake.length < 2) return null
+        const head = snake[0]
+        const neck = snake[1]
+        if (!head || !neck) return null
+        const headNorm = normalize(head)
+        const rawX = head.x - neck.x
+        const rawY = head.y - neck.y
+        const rawZ = head.z - neck.z
+        const radial = rawX * headNorm.x + rawY * headNorm.y + rawZ * headNorm.z
+        const tangent = normalize({
+          x: rawX - headNorm.x * radial,
+          y: rawY - headNorm.y * radial,
+          z: rawZ - headNorm.z * radial,
+        })
+        const mag = Math.hypot(tangent.x, tangent.y, tangent.z)
+        if (!(mag > 1e-6) || !Number.isFinite(mag)) return null
+        return tangent
+      },
     })
   }, [
     applyNetTuningOverrides,
@@ -612,6 +642,8 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
     netTuningRef,
     predictionEventsRef,
     predictionInfoRef,
+    playerIdRef,
+    localSnakeDisplayRef,
     tailGrowthEventsRef,
   ])
 

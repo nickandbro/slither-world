@@ -305,6 +305,7 @@ export const createScene = async (
     enabled: debugEnabled || perfDebugEnabled,
     snakes,
     boostTrails,
+    lastForwardDirections,
     getRendererInfo: () => ({
       requestedBackend,
       activeBackend,

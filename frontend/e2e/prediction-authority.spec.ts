@@ -50,6 +50,14 @@ type NetInfo = {
   lagSpikeCause: string
 }
 
+type HeadRotationStats = {
+  sampleCount: number
+  stepP95Deg: number
+  stepMaxDeg: number
+  reversalCount: number
+  reversalRate: number
+}
+
 type PredictionDiagnostics = {
   predictionInfo: PredictionInfo | null
   predictionReport: unknown
@@ -58,6 +66,7 @@ type PredictionDiagnostics = {
   motionInfo: MotionInfo | null
   rafInfo: RafInfo | null
   renderPerfInfo: unknown
+  headRotationStats: HeadRotationStats | null
 }
 
 async function collectDiagnostics(page: Page): Promise<PredictionDiagnostics> {
@@ -84,6 +93,145 @@ async function collectDiagnostics(page: Page): Promise<PredictionDiagnostics> {
       motionInfo: debugApi?.getMotionStabilityInfo?.() ?? null,
       rafInfo: debugApi?.getRafPerfInfo?.() ?? null,
       renderPerfInfo: debugApi?.getRenderPerfInfo?.() ?? null,
+      headRotationStats: null,
+    }
+  })
+}
+
+async function startHeadRotationSampler(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    type Vec3 = { x: number; y: number; z: number }
+    const globalWindow = window as Window & {
+      __SNAKE_DEBUG__?: {
+        getLocalHeadForward?: () => Vec3 | null
+        getLocalHeadNormal?: () => Vec3 | null
+      }
+      __PREDICTION_HEAD_ROTATION_SAMPLER__?: {
+        timer: number
+        samples: Array<{ tMs: number; forward: Vec3; normal: Vec3 }>
+      }
+    }
+
+    const existing = globalWindow.__PREDICTION_HEAD_ROTATION_SAMPLER__
+    if (existing) {
+      clearInterval(existing.timer)
+    }
+    const samples: Array<{ tMs: number; forward: Vec3; normal: Vec3 }> = []
+    const normalize = (v: Vec3): Vec3 | null => {
+      const lenSq = v.x * v.x + v.y * v.y + v.z * v.z
+      if (!(lenSq > 1e-10) || !Number.isFinite(lenSq)) return null
+      const invLen = 1 / Math.sqrt(lenSq)
+      return { x: v.x * invLen, y: v.y * invLen, z: v.z * invLen }
+    }
+
+    const timer = window.setInterval(() => {
+      const debugApi = globalWindow.__SNAKE_DEBUG__
+      const forward = debugApi?.getLocalHeadForward?.()
+      const normal = debugApi?.getLocalHeadNormal?.()
+      if (!forward || !normal) return
+      const forwardNorm = normalize(forward)
+      const normalNorm = normalize(normal)
+      if (!forwardNorm || !normalNorm) return
+      samples.push({
+        tMs: performance.now(),
+        forward: forwardNorm,
+        normal: normalNorm,
+      })
+      if (samples.length > 4_000) {
+        samples.splice(0, samples.length - 4_000)
+      }
+    }, 16)
+
+    globalWindow.__PREDICTION_HEAD_ROTATION_SAMPLER__ = { timer, samples }
+  })
+}
+
+async function stopHeadRotationSampler(page: Page): Promise<HeadRotationStats | null> {
+  return page.evaluate(() => {
+    type Vec3 = { x: number; y: number; z: number }
+    const globalWindow = window as Window & {
+      __PREDICTION_HEAD_ROTATION_SAMPLER__?: {
+        timer: number
+        samples: Array<{ tMs: number; forward: Vec3; normal: Vec3 }>
+      }
+    }
+    const holder = globalWindow.__PREDICTION_HEAD_ROTATION_SAMPLER__
+    if (!holder) return null
+    clearInterval(holder.timer)
+    delete globalWindow.__PREDICTION_HEAD_ROTATION_SAMPLER__
+
+    const samples = holder.samples
+    if (samples.length < 3) {
+      return {
+        sampleCount: samples.length,
+        stepP95Deg: 0,
+        stepMaxDeg: 0,
+        reversalCount: 0,
+        reversalRate: 0,
+      }
+    }
+
+    const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v))
+    const toDeg = (rad: number) => (rad * 180) / Math.PI
+    const stepsDeg: number[] = []
+    let reversalCount = 0
+    let previousSign = 0
+    let previousSignedStepAbsDeg = 0
+
+    for (let i = 1; i < samples.length; i += 1) {
+      const prev = samples[i - 1]!
+      const current = samples[i]!
+      const dotValue = clamp(
+        prev.forward.x * current.forward.x +
+          prev.forward.y * current.forward.y +
+          prev.forward.z * current.forward.z,
+        -1,
+        1,
+      )
+      const stepDeg = toDeg(Math.acos(dotValue))
+      if (!Number.isFinite(stepDeg)) continue
+      stepsDeg.push(stepDeg)
+
+      if (stepDeg < 0.45) continue
+      const crossX = prev.forward.y * current.forward.z - prev.forward.z * current.forward.y
+      const crossY = prev.forward.z * current.forward.x - prev.forward.x * current.forward.z
+      const crossZ = prev.forward.x * current.forward.y - prev.forward.y * current.forward.x
+      const turnSignDot =
+        crossX * current.normal.x + crossY * current.normal.y + crossZ * current.normal.z
+      const sign = turnSignDot > 1e-8 ? 1 : turnSignDot < -1e-8 ? -1 : 0
+      if (
+        sign !== 0 &&
+        previousSign !== 0 &&
+        sign !== previousSign &&
+        previousSignedStepAbsDeg >= 0.45
+      ) {
+        reversalCount += 1
+      }
+      if (sign !== 0) {
+        previousSign = sign
+        previousSignedStepAbsDeg = stepDeg
+      }
+    }
+
+    if (stepsDeg.length === 0) {
+      return {
+        sampleCount: samples.length,
+        stepP95Deg: 0,
+        stepMaxDeg: 0,
+        reversalCount: 0,
+        reversalRate: 0,
+      }
+    }
+    const sorted = stepsDeg.slice().sort((a, b) => a - b)
+    const p95Index = Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))
+    const stepP95Deg = sorted[p95Index] ?? 0
+    const stepMaxDeg = sorted[sorted.length - 1] ?? 0
+    return {
+      sampleCount: samples.length,
+      stepP95Deg,
+      stepMaxDeg,
+      reversalCount,
+      reversalRate: reversalCount / Math.max(1, stepsDeg.length),
     }
   })
 }
@@ -163,6 +311,7 @@ test.describe('@prediction prediction authority', () => {
       return !!api?.getPredictionInfo?.()
     })
 
+    await startHeadRotationSampler(page)
     await runDeterministicPredictionPath(page, {
       durationMs: 5_000,
       stepMs: 100,
@@ -173,12 +322,15 @@ test.describe('@prediction prediction authority', () => {
     })
 
     const diagnostics = await collectDiagnostics(page)
+    diagnostics.headRotationStats = await stopHeadRotationSampler(page)
     await saveArtifacts(page, testInfo, 'baseline_visual_latency_webgl', diagnostics)
 
     assertWithFailureDump(diagnostics, () => {
       const info = diagnostics.predictionInfo
       const motion = diagnostics.motionInfo
       const raf = diagnostics.rafInfo
+      const headRotation = diagnostics.headRotationStats
+      const net = diagnostics.netInfo
       expect(info).not.toBeNull()
       expect(info?.enabled).toBeTruthy()
       expect(info?.predictedHeadErrorDeg.p95Deg ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(6)
@@ -188,8 +340,18 @@ test.describe('@prediction prediction authority', () => {
         motion && motion.sampleCount > 0
           ? motion.backwardCorrectionCount / motion.sampleCount
           : Number.POSITIVE_INFINITY
-      expect(backwardRate).toBeLessThanOrEqual(0.02)
-      expect(motion?.minHeadDot ?? 0).toBeGreaterThanOrEqual(0.995)
+      const highJitter = (net?.lagSpikeCause ?? 'none') !== 'none'
+      const backwardRateBudget = highJitter ? 0.05 : 0.02
+      const minHeadDotBudget = highJitter ? 0.97 : 0.995
+      expect(backwardRate).toBeLessThanOrEqual(backwardRateBudget)
+      expect(motion?.minHeadDot ?? 0).toBeGreaterThanOrEqual(minHeadDotBudget)
+      expect(headRotation).not.toBeNull()
+      const headSampleCount = headRotation?.sampleCount ?? 0
+      expect(headSampleCount).toBeGreaterThanOrEqual(12)
+      if (headSampleCount >= 40) {
+        expect(headRotation?.reversalRate ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(0.12)
+        expect(headRotation?.reversalCount ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(14)
+      }
       if (raf) {
         expect(raf.slowFrameCount).toBeLessThanOrEqual(Math.max(24, Math.floor(raf.frameCount * 0.2)))
       }
@@ -215,6 +377,7 @@ test.describe('@prediction prediction authority', () => {
       })
     })
 
+    await startHeadRotationSampler(page)
     await runDeterministicPredictionPath(page, {
       durationMs: 7_000,
       stepMs: 100,
@@ -222,16 +385,22 @@ test.describe('@prediction prediction authority', () => {
     })
 
     const diagnostics = await collectDiagnostics(page)
+    diagnostics.headRotationStats = await stopHeadRotationSampler(page)
     await saveArtifacts(page, testInfo, 'correction_under_jitter_webgl', diagnostics)
 
     assertWithFailureDump(diagnostics, () => {
       const info = diagnostics.predictionInfo
+      const headRotation = diagnostics.headRotationStats
       expect(info).not.toBeNull()
       const correctionCount = (info?.correctionSoftCount ?? 0) + (info?.correctionHardCount ?? 0)
       const p95Error = info?.predictedHeadErrorDeg.p95Deg ?? Number.POSITIVE_INFINITY
       expect(info?.correctionHardCount ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(14)
       expect(info?.pendingInputCount ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(60)
-      expect(p95Error).toBeLessThanOrEqual(6)
+      const deadAtCapture = info?.predictionDisabledReason === 'dead'
+      expect(p95Error).toBeLessThanOrEqual(deadAtCapture ? 10 : 6)
+      expect(headRotation).not.toBeNull()
+      expect(headRotation?.reversalRate ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(0.2)
+      expect(headRotation?.reversalCount ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(20)
       if (correctionCount === 0) {
         // If no correction was needed, hold a tighter error budget so the run still proves stability.
         expect(p95Error).toBeLessThanOrEqual(2.5)

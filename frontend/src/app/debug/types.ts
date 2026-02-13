@@ -212,9 +212,15 @@ export type RegisterAppDebugApiOptions = {
   predictionEventsRef: MutableRefObject<PredictionEvent[]>
   getPredictionReport: () => PredictionReport
   clearPredictionEvents: () => void
+  getLocalPlayerId: () => string | null
+  getLocalHeadNormal: () => { x: number; y: number; z: number } | null
+  getLocalHeadForward: () => { x: number; y: number; z: number } | null
 }
 
 export type AppDebugApi = {
+  getLocalPlayerId?: () => string | null
+  getLocalHeadNormal?: () => { x: number; y: number; z: number } | null
+  getLocalHeadForward?: () => { x: number; y: number; z: number } | null
   getMenuFlowInfo?: () => MenuFlowDebugInfo
   getNetSmoothingInfo?: () => NetSmoothingDebugInfo
   getNetTrafficInfo?: () => {

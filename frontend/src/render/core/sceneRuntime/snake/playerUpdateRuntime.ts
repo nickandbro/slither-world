@@ -18,6 +18,10 @@ import {
 const TAIL_CONTACT_NORMAL_SMOOTH_RATE = 9
 const TAIL_CONTACT_NORMAL_MIN_ALPHA = 0.07
 const TAIL_CONTACT_NORMAL_MAX_ALPHA = 0.28
+const HEAD_FORWARD_DEADBAND_RAD = (Math.PI * 0.45) / 180
+const HEAD_FORWARD_MIN_STEP_RAD = (Math.PI * 0.2) / 180
+const HEAD_FORWARD_MAX_TURN_RAD_PER_SEC_LOCAL = (Math.PI * 900) / 180
+const HEAD_FORWARD_MAX_TURN_RAD_PER_SEC_REMOTE = (Math.PI * 720) / 180
 
 type SnakePlayerRuntimeConstants = {
   deathFadeDuration: number
@@ -221,6 +225,9 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
   const snakeContactNormalTemp = new THREE.Vector3()
   const snakeContactFallbackTemp = new THREE.Vector3()
   const lakeSampleTemp = new THREE.Vector3()
+  const headForwardSlerpTemp = new THREE.Vector3()
+  const headForwardAxisTemp = new THREE.Vector3()
+  const headForwardRotateQuatTemp = new THREE.Quaternion()
 
   const updateSnake = (
     player: PlayerSnapshot,
@@ -628,47 +635,76 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
       }
       visual.bowl.visible = underwater && visual.group.visible
 
-      let forward = tempVectorB
-      let hasForward = false
-      const lastHead = lastHeadPositions.get(player.id)
-      const lastForward = lastForwardDirections.get(player.id)
-
-      if (lastHead) {
-        const delta = headPosition.clone().sub(lastHead)
-        delta.addScaledVector(headNormal, -delta.dot(headNormal))
-        if (delta.lengthSq() > 1e-8) {
-          delta.normalize()
-          forward.copy(delta)
-          hasForward = true
-          if (lastForward) {
-            lastForward.copy(forward)
-          } else {
-            lastForwardDirections.set(player.id, forward.clone())
-          }
-        } else if (lastForward) {
-          forward.copy(lastForward)
-          hasForward = true
+      const lastForward = lastForwardDirections.get(player.id) ?? null
+      const targetForward = tempVectorB
+      if (nodes.length > 1) {
+        const nextPoint =
+          secondCurvePoint ??
+          (() => {
+            const nextNode = nodes[1]
+            const nextNormal = new THREE.Vector3(nextNode.x, nextNode.y, nextNode.z).normalize()
+            const nextRadius = getSnakeCenterlineRadius(nextNormal, radiusOffset, radius)
+            return nextNormal.multiplyScalar(nextRadius)
+          })()
+        targetForward.copy(headPosition).sub(nextPoint)
+      } else {
+        targetForward.crossVectors(headNormal, new THREE.Vector3(0, 1, 0))
+      }
+      targetForward.addScaledVector(headNormal, -targetForward.dot(headNormal))
+      if (targetForward.lengthSq() < 1e-8) {
+        if (lastForward && lastForward.lengthSq() > 1e-8) {
+          targetForward.copy(lastForward)
+          targetForward.addScaledVector(headNormal, -targetForward.dot(headNormal))
+        } else {
+          targetForward.crossVectors(headNormal, new THREE.Vector3(1, 0, 0))
         }
       }
+      if (targetForward.lengthSq() < 1e-8) {
+        buildTangentBasis(headNormal, targetForward, headForwardAxisTemp)
+      } else {
+        targetForward.normalize()
+      }
 
-      if (!hasForward) {
-        if (nodes.length > 1) {
-          const nextPoint =
-            secondCurvePoint ??
-            (() => {
-              const nextNode = nodes[1]
-              const nextNormal = new THREE.Vector3(nextNode.x, nextNode.y, nextNode.z).normalize()
-              const nextRadius = getSnakeCenterlineRadius(nextNormal, radiusOffset, radius)
-              return nextNormal.multiplyScalar(nextRadius)
-            })()
-          forward = headPosition.clone().sub(nextPoint)
+      let forward = lastForward
+      if (!forward) {
+        forward = targetForward.clone()
+        lastForwardDirections.set(player.id, forward)
+      } else {
+        forward.addScaledVector(headNormal, -forward.dot(headNormal))
+        if (forward.lengthSq() <= 1e-8) {
+          forward.copy(targetForward)
         } else {
-          forward = new THREE.Vector3().crossVectors(headNormal, new THREE.Vector3(0, 1, 0))
+          forward.normalize()
         }
-        if (forward.lengthSq() < 0.00001) {
-          forward = new THREE.Vector3().crossVectors(headNormal, new THREE.Vector3(1, 0, 0))
+
+        const dotForward = clamp(forward.dot(targetForward), -1, 1)
+        const turnAngle = Math.acos(dotForward)
+        if (Number.isFinite(turnAngle) && turnAngle > HEAD_FORWARD_DEADBAND_RAD) {
+          const dt = clamp(deltaSeconds, 0, 0.1)
+          const maxTurnRate = isLocal
+            ? HEAD_FORWARD_MAX_TURN_RAD_PER_SEC_LOCAL
+            : HEAD_FORWARD_MAX_TURN_RAD_PER_SEC_REMOTE
+          const maxStep = Math.max(HEAD_FORWARD_MIN_STEP_RAD, maxTurnRate * dt)
+          const step = Math.min(turnAngle, maxStep)
+          if (step >= turnAngle - 1e-5) {
+            forward.copy(targetForward)
+          } else {
+            headForwardAxisTemp.crossVectors(forward, targetForward)
+            const axisDot = headForwardAxisTemp.dot(headNormal)
+            const signedStep = axisDot >= 0 ? step : -step
+            headForwardRotateQuatTemp.setFromAxisAngle(headNormal, signedStep)
+            headForwardSlerpTemp.copy(forward).applyQuaternion(headForwardRotateQuatTemp)
+            headForwardSlerpTemp.addScaledVector(
+              headNormal,
+              -headForwardSlerpTemp.dot(headNormal),
+            )
+            if (headForwardSlerpTemp.lengthSq() > 1e-8) {
+              forward.copy(headForwardSlerpTemp.normalize())
+            } else {
+              forward.copy(targetForward)
+            }
+          }
         }
-        forward.normalize()
       }
 
       const cachedHead = lastHeadPositions.get(player.id)

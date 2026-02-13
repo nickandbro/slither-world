@@ -13,6 +13,9 @@ export function registerAppDebugApi(options: RegisterAppDebugApiOptions): void {
   const rootDebugApi = getRootDebugApi()
   if (!rootDebugApi) return
 
+  rootDebugApi.getLocalPlayerId = () => options.getLocalPlayerId()
+  rootDebugApi.getLocalHeadNormal = () => options.getLocalHeadNormal()
+  rootDebugApi.getLocalHeadForward = () => options.getLocalHeadForward()
   rootDebugApi.getMenuFlowInfo = () => ({ ...options.menuDebugInfoRef.current })
   rootDebugApi.getNetSmoothingInfo = () => ({ ...options.netDebugInfoRef.current })
   rootDebugApi.getNetTrafficInfo = () => ({

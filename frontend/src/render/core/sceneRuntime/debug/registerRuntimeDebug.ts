@@ -12,6 +12,7 @@ type RegisterRuntimeDebugDeps = {
   enabled: RegisterSceneDebugApiParams['enabled']
   snakes: Map<string, SnakeVisual>
   boostTrails: Map<string, BoostTrailState[]>
+  lastForwardDirections: RegisterSceneDebugApiParams['lastForwardDirections']
   getRendererInfo: RegisterSceneDebugApiParams['getRendererInfo']
   renderPerfInfo: RenderPerfInfo
   getTerrainPatchInfo: RegisterSceneDebugApiParams['getTerrainPatchInfo']
@@ -26,6 +27,7 @@ export const registerRuntimeDebugApi = (deps: RegisterRuntimeDebugDeps): SceneDe
     enabled: deps.enabled,
     snakes: deps.snakes,
     boostTrails: deps.boostTrails,
+    lastForwardDirections: deps.lastForwardDirections,
     getRendererInfo: deps.getRendererInfo,
     getRenderPerfInfo: () => cloneRenderPerfInfo(deps.renderPerfInfo),
     getTerrainPatchInfo: deps.getTerrainPatchInfo,

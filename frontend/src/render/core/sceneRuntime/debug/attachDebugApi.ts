@@ -85,6 +85,7 @@ type DayNightInfo = {
 export type SceneDebugApi = {
   getSnakeOpacity: (id: string) => number | null
   getSnakeHeadPosition: (id: string) => { x: number; y: number; z: number } | null
+  getSnakeHeadForward: (id: string) => { x: number; y: number; z: number } | null
   isSnakeVisible: (id: string) => boolean | null
   getRendererInfo: () => RendererInfo
   getRenderPerfInfo: () => RenderPerfInfo
@@ -102,6 +103,7 @@ export type RegisterSceneDebugApiParams = {
   enabled: boolean
   snakes: Map<string, DebugSnakeVisual>
   boostTrails: Map<string, DebugBoostTrailState[]>
+  lastForwardDirections: Map<string, THREE.Vector3>
   getRendererInfo: () => RendererInfo
   getRenderPerfInfo: () => RenderPerfInfo
   getTerrainPatchInfo: () => TerrainPatchInfo
@@ -115,6 +117,7 @@ export const registerSceneDebugApi = ({
   enabled,
   snakes,
   boostTrails,
+  lastForwardDirections,
   getRendererInfo,
   getRenderPerfInfo,
   getTerrainPatchInfo,
@@ -134,6 +137,18 @@ export const registerSceneDebugApi = ({
       if (!visual) return null
       const pos = visual.head.position
       return { x: pos.x, y: pos.y, z: pos.z }
+    },
+    getSnakeHeadForward: (id: string) => {
+      const forward = lastForwardDirections.get(id)
+      if (!forward) return null
+      const lenSq = forward.lengthSq()
+      if (!(lenSq > 1e-10) || !Number.isFinite(lenSq)) return null
+      const invLen = 1 / Math.sqrt(lenSq)
+      return {
+        x: forward.x * invLen,
+        y: forward.y * invLen,
+        z: forward.z * invLen,
+      }
     },
     isSnakeVisible: (id: string) => {
       const visual = snakes.get(id)
