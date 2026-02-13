@@ -71,6 +71,11 @@ export type BoostTrailController = {
   disposeAllBoostTrails: () => void
 }
 
+const BOOST_TRAIL_NORMAL_SMOOTH_MIN_T = 0.08
+const BOOST_TRAIL_NORMAL_SMOOTH_FULL_ANGLE = Math.PI / 13
+const BOOST_TRAIL_MAX_ANGULAR_SPEED_RAD_PER_SEC = (Math.PI * 200) / 180
+const BOOST_TRAIL_MIN_ARC_STEP = Math.PI / 720
+
 export const createBoostTrailAlphaTexture = ({
   width,
   height,
@@ -509,6 +514,35 @@ export const createBoostTrailController = ({
     if (!last) {
       pushBoostTrailSample(trail, normalized, nowMs)
       return
+    }
+
+    const rawDot = clamp(last.normal.dot(normalized), -1, 1)
+    const rawArcAngle = Math.acos(rawDot)
+    if (Number.isFinite(rawArcAngle) && rawArcAngle > 1e-6) {
+      // Enforce a physically plausible turn-rate envelope for visual trail sampling so
+      // brief normal spikes do not create sawtooth marks during steering.
+      const deltaMs = Math.max(1, nowMs - last.createdAt)
+      const maxArcStep = Math.max(
+        BOOST_TRAIL_MIN_ARC_STEP,
+        (BOOST_TRAIL_MAX_ANGULAR_SPEED_RAD_PER_SEC * deltaMs) / 1000,
+      )
+      if (rawArcAngle > maxArcStep) {
+        const rateLimitedT = clamp(maxArcStep / rawArcAngle, 0, 1)
+        slerpNormals(last.normal, normalized, rateLimitedT, trailSlerpNormalTemp)
+        normalized.copy(trailSlerpNormalTemp)
+      }
+
+      const dampedDot = clamp(last.normal.dot(normalized), -1, 1)
+      const dampedArcAngle = Math.acos(dampedDot)
+      // Dampen high-frequency normal jitter from terrain/tail updates while still following
+      // intentional sharp turns quickly.
+      const followT = clamp(
+        dampedArcAngle / BOOST_TRAIL_NORMAL_SMOOTH_FULL_ANGLE,
+        BOOST_TRAIL_NORMAL_SMOOTH_MIN_T,
+        1,
+      )
+      slerpNormals(last.normal, normalized, followT, trailSlerpNormalTemp)
+      normalized.copy(trailSlerpNormalTemp)
     }
 
     getTrailSurfacePointFromNormal(normalized, trailSamplePointTemp)

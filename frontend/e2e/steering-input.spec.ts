@@ -6,7 +6,6 @@ const STORAGE_KEYS = {
   name: 'spherical_snake_player_name',
   best: 'spherical_snake_best_score',
   room: 'spherical_snake_room',
-  prediction: 'spherical_snake_prediction',
 }
 
 type MotionInfo = {
@@ -27,12 +26,11 @@ test('steering input keeps motion stable while local prediction remains active',
       localStorage.setItem(keys.name, 'E2E Steering')
       localStorage.setItem(keys.best, '0')
       localStorage.setItem(keys.room, roomName)
-      localStorage.setItem(keys.prediction, '1')
     },
     { keys: STORAGE_KEYS, roomName: room },
   )
 
-  await page.goto('/?renderer=webgl&prediction=1')
+  await page.goto('/?renderer=webgl')
   await enterGame(page)
 
   await runDeterministicPredictionPath(page, {

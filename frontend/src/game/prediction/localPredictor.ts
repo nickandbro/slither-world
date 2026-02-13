@@ -10,7 +10,8 @@ const BASE_SPEED = ((NODE_ANGLE * 2) / (NODE_QUEUE_SIZE + 1)) * MOVE_SPEED_MULTI
 const BOOST_MULTIPLIER = 3
 const TURN_RATE = 0.45 / WORLD_SCALE
 const TICK_MS = 50
-const REPLAY_SUBSTEP_MS = 8
+const REPLAY_MAX_TICKS = 4
+const REPLAY_SUBSTEP_TARGET_MS = 8
 const REPLAY_MAX_SUBSTEPS = 24
 
 export type ReplayPredictionOptions = {
@@ -152,38 +153,36 @@ export function replayPredictedSnake(options: ReplayPredictionOptions): ReplayPr
   let activeAxis: Point | null = null
   let activeBoost = false
   let commandIndex = 0
-  while (commandIndex < sortedCommands.length && sortedCommands[commandIndex]!.sentAtMs <= startMs) {
-    activeAxis = sortedCommands[commandIndex]!.axis
-    activeBoost = sortedCommands[commandIndex]!.boost
-    commandIndex += 1
-    replayedCommandCount += 1
-  }
 
-  const maxReplayMs = REPLAY_SUBSTEP_MS * REPLAY_MAX_SUBSTEPS
-  durationMs = Math.min(durationMs, maxReplayMs)
-  const stepCount = Math.max(
-    1,
-    Math.min(REPLAY_MAX_SUBSTEPS, Math.ceil(durationMs / REPLAY_SUBSTEP_MS)),
-  )
-  const stepMs = durationMs / stepCount
-
-  for (let step = 0; step < stepCount; step += 1) {
-    const stepTimeMs = startMs + step * stepMs
-    while (
-      commandIndex < sortedCommands.length &&
-      sortedCommands[commandIndex]!.sentAtMs <= stepTimeMs
-    ) {
+  const consumeCommandsUntil = (timeMs: number) => {
+    while (commandIndex < sortedCommands.length && sortedCommands[commandIndex]!.sentAtMs <= timeMs) {
       activeAxis = sortedCommands[commandIndex]!.axis
       activeBoost = sortedCommands[commandIndex]!.boost
       commandIndex += 1
       replayedCommandCount += 1
     }
+  }
+  consumeCommandsUntil(startMs)
+
+  const maxReplayMs = TICK_MS * REPLAY_MAX_TICKS
+  durationMs = Math.min(durationMs, maxReplayMs)
+  const substepCount = clamp(
+    Math.ceil(durationMs / REPLAY_SUBSTEP_TARGET_MS),
+    1,
+    REPLAY_MAX_SUBSTEPS,
+  )
+  const stepMs = durationMs / substepCount
+  const turnPerStep = TURN_RATE * (stepMs / TICK_MS)
+  const speedPerStep = BASE_SPEED * (stepMs / TICK_MS)
+
+  for (let step = 0; step < substepCount; step += 1) {
+    const stepEndMs = startMs + (step + 1) * stepMs
+    consumeCommandsUntil(stepEndMs)
 
     const targetAxis = activeAxis ? normalize(activeAxis) : axis
-    const turnStep = TURN_RATE * (stepMs / TICK_MS)
-    axis = rotateToward(axis, targetAxis, Math.max(0, turnStep))
+    axis = rotateToward(axis, targetAxis, Math.max(0, turnPerStep))
     const speedFactor = activeBoost && boostAllowed ? BOOST_MULTIPLIER : 1
-    const velocity = BASE_SPEED * speedFactor * (stepMs / TICK_MS)
+    const velocity = speedPerStep * speedFactor
     const nextSnake = applySnakeRotationStep(outputSnake, axis, velocity)
     outputSnake.splice(0, outputSnake.length, ...nextSnake)
   }

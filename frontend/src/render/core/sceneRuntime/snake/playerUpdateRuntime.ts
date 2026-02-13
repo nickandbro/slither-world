@@ -15,6 +15,10 @@ import {
   updateSnakeMaterial,
 } from './visual'
 
+const TAIL_CONTACT_NORMAL_SMOOTH_RATE = 9
+const TAIL_CONTACT_NORMAL_MIN_ALPHA = 0.07
+const TAIL_CONTACT_NORMAL_MAX_ALPHA = 0.28
+
 type SnakePlayerRuntimeConstants = {
   deathFadeDuration: number
   deathStartOpacity: number
@@ -824,7 +828,18 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
       const tailNormal = tailPos.clone().normalize()
       const contactNormal = lastTailContactNormals.get(player.id)
       if (contactNormal) {
-        contactNormal.copy(tailNormal)
+        const dt = clamp(deltaSeconds, 0, 0.1)
+        const alpha = clamp(
+          1 - Math.exp(-TAIL_CONTACT_NORMAL_SMOOTH_RATE * dt),
+          TAIL_CONTACT_NORMAL_MIN_ALPHA,
+          TAIL_CONTACT_NORMAL_MAX_ALPHA,
+        )
+        const normalDot = contactNormal.dot(tailNormal)
+        if (!Number.isFinite(normalDot) || normalDot < -0.2) {
+          contactNormal.copy(tailNormal)
+        } else {
+          contactNormal.lerp(tailNormal, alpha).normalize()
+        }
       } else {
         lastTailContactNormals.set(player.id, tailNormal.clone())
       }

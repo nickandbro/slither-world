@@ -99,7 +99,7 @@ Repo root (recommended for full stack):
 - App styles are split under `frontend/src/app/styles/*.css` and imported via `frontend/src/app/styles/index.css`; keep `frontend/src/App.css` as the compatibility import entrypoint and preserve stable selectors used by runtime/tests.
 - Debug UI controls (renderer/collider/day-night/debug panel toggles) are enabled in `import.meta.env.DEV` or when `VITE_E2E_DEBUG=1`.
 - `window.__SNAKE_DEBUG__` runtime hooks are exposed during local runs (including `run-local-dev-copy.sh`). Network debug logging defaults on localhost and can be toggled via `?netDebug=1|0` or localStorage key `spherical_snake_net_debug`.
-- Local client-side prediction is opt-in via URL/localStorage (`?prediction=1|0`, key `spherical_snake_prediction`). Optional prediction stress perturbation is available for local/E2E correction tests (`?predictionPerturb=1|0`, key `spherical_snake_prediction_perturb`).
+- Local client-side prediction is core/default (always active for local presentation and reconciliation). Optional prediction stress perturbation remains available for local/E2E correction tests (`?predictionPerturb=1|0`, key `spherical_snake_prediction_perturb`).
 - Menu snake-skin designs are stored in localStorage (`spherical_snake_skins_v1` for saved designs, `spherical_snake_selected_skin_v1` for the current selection).
 - Frontend renderer selection is controlled by URL query param `renderer=auto|webgpu|webgl` and persisted to localStorage key `spherical_snake_renderer`.
 - Default renderer mode is `auto`: it attempts WebGPU first and falls back to WebGL with a status note if WebGPU is unavailable or init fails.

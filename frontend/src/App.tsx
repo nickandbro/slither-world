@@ -8,6 +8,7 @@ import {
 } from './render/webglScene'
 import type { Camera, Environment, GameStateSnapshot, PelletSnapshot, Point } from './game/types'
 import { IDENTITY_QUAT, clamp } from './game/math'
+import { axisFromPointer } from './game/camera'
 import type { TimedSnapshot } from './game/snapshots'
 import { type RenderConfig } from './game/hud'
 import {
@@ -94,8 +95,6 @@ const LOCAL_STORAGE_ADAPTIVE_QUALITY = 'spherical_snake_adaptive_quality'
 const LOCAL_STORAGE_MIN_DPR = 'spherical_snake_min_dpr'
 const LOCAL_STORAGE_MAX_DPR = 'spherical_snake_max_dpr'
 const LOCAL_STORAGE_WEBGPU_MSAA_SAMPLES = 'spherical_snake_webgpu_msaa_samples'
-const LOCAL_STORAGE_PREDICTION = 'spherical_snake_prediction'
-const LOCAL_STORAGE_PREDICTION_PERTURB = 'spherical_snake_prediction_perturb'
 
 export default function App() {
   const RAF_SLOW_FRAME_THRESHOLD_MS = 50
@@ -318,41 +317,16 @@ export default function App() {
   const playerNameRef = useRef(playerName)
   const netDebugEnabled = useMemo(getNetDebugEnabled, [])
   const tailDebugEnabled = useMemo(getTailDebugEnabled, [])
-  const predictionEnabled = useMemo(() => {
-    if (typeof window === 'undefined') return false
-    try {
-      const url = new URL(window.location.href)
-      const query = url.searchParams.get('prediction')
-      if (query === '1') {
-        window.localStorage.setItem(LOCAL_STORAGE_PREDICTION, '1')
-        return true
-      }
-      if (query === '0') {
-        window.localStorage.setItem(LOCAL_STORAGE_PREDICTION, '0')
-        return false
-      }
-    } catch {
-      // ignore URL parsing errors
-    }
-    return window.localStorage.getItem(LOCAL_STORAGE_PREDICTION) === '1'
-  }, [])
   const predictionDebugPerturbation = useMemo(() => {
     if (typeof window === 'undefined') return false
     try {
       const url = new URL(window.location.href)
       const query = url.searchParams.get('predictionPerturb')
-      if (query === '1') {
-        window.localStorage.setItem(LOCAL_STORAGE_PREDICTION_PERTURB, '1')
-        return true
-      }
-      if (query === '0') {
-        window.localStorage.setItem(LOCAL_STORAGE_PREDICTION_PERTURB, '0')
-        return false
-      }
+      return query === '1'
     } catch {
       // ignore URL parsing errors
+      return false
     }
-    return window.localStorage.getItem(LOCAL_STORAGE_PREDICTION_PERTURB) === '1'
   }, [])
   const isPlaying = menuPhase === 'playing'
   const showMenuOverlay = menuPhase === 'preplay' || menuOverlayExiting
@@ -438,12 +412,34 @@ export default function App() {
     const socket = socketRef.current
     if (!socket || socket.readyState !== WebSocket.OPEN) return
 
+    const resolvePointerAxis = (): Point | null => {
+      if (!pointerRef.current.active) return null
+      const pointerX = pointerRef.current.screenX
+      const pointerY = pointerRef.current.screenY
+      const headScreen = headScreenRef.current
+      if (
+        headScreen &&
+        Number.isFinite(pointerX) &&
+        Number.isFinite(pointerY) &&
+        Number.isFinite(headScreen.x) &&
+        Number.isFinite(headScreen.y)
+      ) {
+        const dx = pointerX - headScreen.x
+        const dy = pointerY - headScreen.y
+        const distSq = dx * dx + dy * dy
+        if (distSq >= 9) {
+          return axisFromPointer(Math.atan2(dy, dx), cameraRef.current)
+        }
+        return null
+      }
+      return webglRef.current?.getPointerAxis?.() ?? null
+    }
+
     const axis = inputEnabledRef.current
-      ? joystickAxisRef.current ??
-        (pointerRef.current.active ? webglRef.current?.getPointerAxis?.() ?? null : null)
+      ? joystickAxisRef.current ?? resolvePointerAxis()
       : null
-    const boost = inputEnabledRef.current && pointerRef.current.boost
     const nowMs = performance.now()
+    const boost = inputEnabledRef.current && pointerRef.current.boost
     const axisSignature = axis
       ? `${axis.x.toFixed(4)},${axis.y.toFixed(4)},${axis.z.toFixed(4)}`
       : 'null'
@@ -528,7 +524,6 @@ export default function App() {
   } = useNetRuntime({
     netDebugEnabled,
     tailDebugEnabled,
-    predictionEnabled,
     predictionDebugPerturbation,
     menuPhaseRef,
     menuDebugInfoRef,
@@ -548,7 +543,6 @@ export default function App() {
     netTuningRef,
     netTuningRevisionRef,
     lagCameraHoldActiveRef,
-    lagCameraRecoveryStartMsRef,
     pointerRef,
     playerIdRef,
     snapshotBufferRef,

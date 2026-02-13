@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react'
 import type { MutableRefObject } from 'react'
 import type { GameStateSnapshot, Point } from '@game/types'
-import { clamp, lerpPoint, normalize } from '@game/math'
+import { clamp, normalize } from '@game/math'
 import { buildInterpolatedSnapshot, type TimedSnapshot } from '@game/snapshots'
 import type {
   PredictionDisabledReason,
@@ -60,7 +60,7 @@ const EMPTY_PREDICTION_ERROR = {
 }
 
 const EMPTY_PREDICTION_INFO: PredictionInfo = {
-  enabled: false,
+  enabled: true,
   latestInputSeq: null,
   latestAckSeq: null,
   pendingInputCount: 0,
@@ -75,7 +75,6 @@ const EMPTY_PREDICTION_INFO: PredictionInfo = {
 export type UseNetRuntimeOptions = {
   netDebugEnabled: boolean
   tailDebugEnabled: boolean
-  predictionEnabled: boolean
   predictionDebugPerturbation: boolean
   menuPhaseRef: MutableRefObject<MenuPhase>
   menuDebugInfoRef: MutableRefObject<MenuFlowDebugInfo>
@@ -95,8 +94,7 @@ export type UseNetRuntimeOptions = {
   netTuningRef: MutableRefObject<ReturnType<typeof resolveNetTuning>>
   netTuningRevisionRef: MutableRefObject<number>
   lagCameraHoldActiveRef: MutableRefObject<boolean>
-  lagCameraRecoveryStartMsRef: MutableRefObject<number | null>
-  pointerRef: MutableRefObject<{ boost: boolean }>
+  pointerRef: MutableRefObject<{ boost: boolean; active: boolean }>
   playerIdRef: MutableRefObject<string | null>
   snapshotBufferRef: MutableRefObject<TimedSnapshot[]>
   serverOffsetRef: MutableRefObject<number | null>
@@ -158,7 +156,6 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
   const {
     netDebugEnabled,
     tailDebugEnabled,
-    predictionEnabled,
     predictionDebugPerturbation,
     menuPhaseRef,
     menuDebugInfoRef,
@@ -178,7 +175,6 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
     netTuningRef,
     netTuningRevisionRef,
     lagCameraHoldActiveRef,
-    lagCameraRecoveryStartMsRef,
     pointerRef,
     playerIdRef,
     snapshotBufferRef,
@@ -212,13 +208,13 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
   const predictionEventIdRef = useRef(1)
   const predictionInfoRef = useRef<PredictionInfo>({
     ...EMPTY_PREDICTION_INFO,
-    enabled: predictionEnabled,
-    predictionDisabledReason: predictionEnabled ? 'not-ready' : 'none',
+    predictionDisabledReason: 'not-ready',
   })
   const predictionErrorSamplesRef = useRef<number[]>([])
   const predictionAuthoritativeSnakeRef = useRef<Point[] | null>(null)
   const predictionAuthoritativeReceivedAtMsRef = useRef<number | null>(null)
   const predictionAxisRef = useRef<Point | null>(null)
+  const predictionPhysicsSnakeRef = useRef<Point[] | null>(null)
   const predictionDisplaySnakeRef = useRef<Point[] | null>(null)
   const predictionSoftStartAtMsRef = useRef<number | null>(null)
   const predictionSoftUntilMsRef = useRef<number | null>(null)
@@ -226,6 +222,8 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
   const predictionHardDampenUntilMsRef = useRef<number | null>(null)
   const predictionLifeSpawnFloorRef = useRef<number | null>(null)
   const predictionLastAliveRef = useRef<boolean>(false)
+  const predictionNeedsReconcileCheckRef = useRef<boolean>(false)
+  const predictionForceHardNextReconcileRef = useRef<boolean>(false)
 
   const appendNetLagEvent = useCallback(
     (
@@ -398,6 +396,7 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
     predictionAuthoritativeSnakeRef.current = null
     predictionAuthoritativeReceivedAtMsRef.current = null
     predictionAxisRef.current = null
+    predictionPhysicsSnakeRef.current = null
     predictionDisplaySnakeRef.current = null
     predictionSoftStartAtMsRef.current = null
     predictionSoftUntilMsRef.current = null
@@ -405,17 +404,18 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
     predictionHardDampenUntilMsRef.current = null
     predictionLifeSpawnFloorRef.current = null
     predictionLastAliveRef.current = false
+    predictionNeedsReconcileCheckRef.current = false
+    predictionForceHardNextReconcileRef.current = false
     predictionInfoRef.current = {
       ...EMPTY_PREDICTION_INFO,
-      enabled: predictionEnabled,
-      predictionDisabledReason: predictionEnabled ? 'not-ready' : 'none',
+      predictionDisabledReason: 'not-ready',
     }
     clearPredictionEvents()
-  }, [clearPredictionEvents, predictionEnabled])
+  }, [clearPredictionEvents])
 
   useEffect(() => {
     resetPredictionState()
-  }, [predictionEnabled, resetPredictionState])
+  }, [resetPredictionState])
 
   const appendPredictionEvent = useCallback(
     (
@@ -486,34 +486,32 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
       const nextSeq = nextInputSeq(predictionLatestInputSeqRef.current)
       predictionLatestInputSeqRef.current = nextSeq
 
-      if (predictionEnabled) {
-        const normalizedAxis = axis ? normalize(axis) : null
-        const result = predictionCommandBufferRef.current.enqueue({
-          seq: nextSeq,
-          sentAtMs,
-          axis: normalizedAxis,
-          boost,
-        })
-        if (result.overflowPruned > 0) {
-          appendPredictionEvent('queue_prune', `pruned ${result.overflowPruned} overflow commands`, {
-            seq: nextSeq,
-          })
-        }
-        appendPredictionEvent('input_enqueued', `input seq=${nextSeq} boost=${boost ? 1 : 0}`, {
+      const normalizedAxis = axis ? normalize(axis) : null
+      const result = predictionCommandBufferRef.current.enqueue({
+        seq: nextSeq,
+        sentAtMs,
+        axis: normalizedAxis,
+        boost,
+      })
+      if (result.overflowPruned > 0) {
+        appendPredictionEvent('queue_prune', `pruned ${result.overflowPruned} overflow commands`, {
           seq: nextSeq,
         })
       }
+      appendPredictionEvent('input_enqueued', `input seq=${nextSeq} boost=${boost ? 1 : 0}`, {
+        seq: nextSeq,
+      })
 
       predictionInfoRef.current = {
         ...predictionInfoRef.current,
-        enabled: predictionEnabled,
+        enabled: true,
         latestInputSeq: nextSeq,
         pendingInputCount: predictionCommandBufferRef.current.size(),
       }
 
       return nextSeq
     },
-    [appendPredictionEvent, predictionEnabled],
+    [appendPredictionEvent],
   )
 
   const getRafPerfInfo = useCallback((): RafPerfInfo => {
@@ -857,94 +855,65 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
       const localId = playerIdRef.current
       const localPlayer = localId ? state.players.find((player) => player.id === localId) ?? null : null
 
-      if (predictionEnabled) {
-        const pendingInputCount = predictionCommandBufferRef.current.size()
-        const hasLocalSnake = !!localPlayer && localPlayer.alive && localPlayer.snake.length > 0
-        const wasAlive = predictionLastAliveRef.current
+      const pendingInputCount = predictionCommandBufferRef.current.size()
+      const hasLocalSnake = !!localPlayer && localPlayer.alive && localPlayer.snake.length > 0
+      const wasAlive = predictionLastAliveRef.current
 
-        if (!hasLocalSnake) {
-          predictionAuthoritativeSnakeRef.current = null
-          predictionAuthoritativeReceivedAtMsRef.current = null
-          predictionAxisRef.current = null
-          predictionDisplaySnakeRef.current = null
-          predictionSoftStartAtMsRef.current = null
-          predictionSoftUntilMsRef.current = null
-          predictionSoftDurationMsRef.current = 0
-          predictionHardDampenUntilMsRef.current = null
-          predictionLastAliveRef.current = false
-          if (!localPlayer || !localPlayer.alive) {
-            predictionLifeSpawnFloorRef.current = null
-          }
-          predictionInfoRef.current = {
-            ...predictionInfoRef.current,
-            enabled: true,
-            latestInputSeq: predictionLatestInputSeqRef.current,
-            latestAckSeq: predictionLatestAckSeqRef.current,
-            pendingInputCount,
-            predictionDisabledReason: localPlayer && !localPlayer.alive ? 'dead' : 'not-ready',
-          }
-        } else {
-          const authoritativeSnake = cloneSnake(localPlayer.snake)
-          const authoritativeHead = authoritativeSnake[0] ?? null
-          const displayHead = predictionDisplaySnakeRef.current?.[0] ?? null
-          if (displayHead && authoritativeHead) {
-            const errorDeg = angleBetweenDeg(displayHead, authoritativeHead)
-            pushPredictionErrorSample(errorDeg)
-            const decision = decideReconcile(errorDeg, !wasAlive)
-            if (decision.kind === 'soft') {
-              predictionSoftStartAtMsRef.current = nowMs
-              predictionSoftUntilMsRef.current = nowMs + decision.durationMs
-              predictionSoftDurationMsRef.current = decision.durationMs
-              predictionInfoRef.current = {
-                ...predictionInfoRef.current,
-                correctionSoftCount: predictionInfoRef.current.correctionSoftCount + 1,
-                lastCorrectionMagnitudeDeg: decision.magnitudeDeg,
-              }
-              appendPredictionEvent('reconcile_soft', `soft reconcile ${decision.magnitudeDeg.toFixed(2)}deg`, {
-                magnitudeDeg: decision.magnitudeDeg,
-              })
-            } else if (decision.kind === 'hard') {
-              predictionHardDampenUntilMsRef.current = nowMs + 120
-              predictionSoftStartAtMsRef.current = null
-              predictionSoftUntilMsRef.current = null
-              predictionSoftDurationMsRef.current = 0
-              predictionDisplaySnakeRef.current = cloneSnake(authoritativeSnake)
-              predictionInfoRef.current = {
-                ...predictionInfoRef.current,
-                correctionHardCount: predictionInfoRef.current.correctionHardCount + 1,
-                lastCorrectionMagnitudeDeg: decision.magnitudeDeg,
-              }
-              appendPredictionEvent('reconcile_hard', `hard reconcile ${decision.magnitudeDeg.toFixed(2)}deg`, {
-                magnitudeDeg: decision.magnitudeDeg,
-              })
-            }
-          }
-
-          predictionAuthoritativeSnakeRef.current = authoritativeSnake
-          predictionAuthoritativeReceivedAtMsRef.current = nowMs
-          predictionAxisRef.current = deriveLocalAxis(authoritativeSnake, predictionAxisRef.current)
-          if (!wasAlive || predictionLifeSpawnFloorRef.current === null) {
-            predictionLifeSpawnFloorRef.current = localPlayer.score
-          }
-          predictionLastAliveRef.current = true
-
-          predictionInfoRef.current = {
-            ...predictionInfoRef.current,
-            enabled: true,
-            latestInputSeq: predictionLatestInputSeqRef.current,
-            latestAckSeq: predictionLatestAckSeqRef.current,
-            pendingInputCount,
-            predictionDisabledReason: 'none',
-          }
+      if (!hasLocalSnake) {
+        predictionAuthoritativeSnakeRef.current = null
+        predictionAuthoritativeReceivedAtMsRef.current = null
+        predictionAxisRef.current = null
+        predictionPhysicsSnakeRef.current = null
+        predictionDisplaySnakeRef.current = null
+        predictionSoftStartAtMsRef.current = null
+        predictionSoftUntilMsRef.current = null
+        predictionSoftDurationMsRef.current = 0
+        predictionHardDampenUntilMsRef.current = null
+        predictionLastAliveRef.current = false
+        predictionNeedsReconcileCheckRef.current = false
+        predictionForceHardNextReconcileRef.current = false
+        if (!localPlayer || !localPlayer.alive) {
+          predictionLifeSpawnFloorRef.current = null
         }
-      } else {
         predictionInfoRef.current = {
           ...predictionInfoRef.current,
-          enabled: false,
+          enabled: true,
           latestInputSeq: predictionLatestInputSeqRef.current,
           latestAckSeq: predictionLatestAckSeqRef.current,
-          pendingInputCount: 0,
-          replayedInputCountLastFrame: 0,
+          pendingInputCount,
+          predictionDisabledReason: localPlayer && !localPlayer.alive ? 'dead' : 'not-ready',
+        }
+      } else {
+        const authoritativeSnake = cloneSnake(localPlayer.snake)
+        predictionAuthoritativeSnakeRef.current = authoritativeSnake
+        const serverOffsetMs = serverOffsetRef.current
+        let authoritativePerfMs = nowMs
+        if (serverOffsetMs !== null && Number.isFinite(serverOffsetMs)) {
+          const authoritativeWallMs = state.now - serverOffsetMs
+          const wallToPerfDeltaMs = nowMs - now
+          authoritativePerfMs = authoritativeWallMs + wallToPerfDeltaMs
+        }
+        const tickMs = Math.max(16, serverTickMsRef.current)
+        const maxLookbackMs = tickMs * 6
+        predictionAuthoritativeReceivedAtMsRef.current = clamp(
+          authoritativePerfMs,
+          nowMs - maxLookbackMs,
+          nowMs,
+        )
+        predictionAxisRef.current = deriveLocalAxis(authoritativeSnake, predictionAxisRef.current)
+        predictionNeedsReconcileCheckRef.current = true
+        predictionForceHardNextReconcileRef.current = !wasAlive
+        if (!wasAlive || predictionLifeSpawnFloorRef.current === null) {
+          predictionLifeSpawnFloorRef.current = localPlayer.score
+        }
+        predictionLastAliveRef.current = true
+
+        predictionInfoRef.current = {
+          ...predictionInfoRef.current,
+          enabled: true,
+          latestInputSeq: predictionLatestInputSeqRef.current,
+          latestAckSeq: predictionLatestAckSeqRef.current,
+          pendingInputCount,
           predictionDisabledReason: 'none',
         }
       }
@@ -1012,8 +981,6 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
       netTuningRevisionRef,
       playerIdRef,
       pointerRef,
-      predictionEnabled,
-      pushPredictionErrorSample,
       receiveIntervalMsRef,
       receiveJitterDelayMsRef,
       receiveJitterMsRef,
@@ -1196,200 +1163,202 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
       localId: string | null,
       frameDeltaSeconds: number,
     ): GameStateSnapshot | null => {
-      if (predictionEnabled) {
-        if (!snapshot || !localId) {
-          localSnakeDisplayRef.current = null
-          predictionInfoRef.current = {
-            ...predictionInfoRef.current,
-            enabled: true,
-            latestInputSeq: predictionLatestInputSeqRef.current,
-            latestAckSeq: predictionLatestAckSeqRef.current,
-            pendingInputCount: predictionCommandBufferRef.current.size(),
-            replayedInputCountLastFrame: 0,
-            predictionDisabledReason: 'not-ready',
-          }
-          return snapshot
-        }
-
-        const localIndex = snapshot.players.findIndex((player) => player.id === localId)
-        if (localIndex < 0) {
-          localSnakeDisplayRef.current = null
-          predictionInfoRef.current = {
-            ...predictionInfoRef.current,
-            enabled: true,
-            latestInputSeq: predictionLatestInputSeqRef.current,
-            latestAckSeq: predictionLatestAckSeqRef.current,
-            pendingInputCount: predictionCommandBufferRef.current.size(),
-            replayedInputCountLastFrame: 0,
-            predictionDisabledReason: 'not-ready',
-          }
-          return snapshot
-        }
-
-        const localPlayer = snapshot.players[localIndex]
-        const hardSpikeActive =
-          lagSpikeActiveRef.current &&
-          (lagSpikeCauseRef.current !== 'arrival-gap' ||
-            netDebugInfoRef.current.impairmentMsRemaining > 300)
-
-        let disabledReason: PredictionDisabledReason = 'none'
-        if (!localPlayer.alive || localPlayer.snake.length === 0) {
-          disabledReason = 'dead'
-        } else if (hardSpikeActive) {
-          disabledReason = 'spike'
-        } else if (
-          !predictionAuthoritativeSnakeRef.current ||
-          predictionAuthoritativeSnakeRef.current.length === 0 ||
-          predictionAuthoritativeReceivedAtMsRef.current === null
-        ) {
-          disabledReason = 'not-ready'
-        }
-
-        if (disabledReason !== 'none') {
-          const incomingSnake = localPlayer.snake.map((node) => normalize(node))
-          localSnakeDisplayRef.current = incomingSnake
-          predictionDisplaySnakeRef.current = cloneSnake(incomingSnake)
-          predictionAxisRef.current = deriveLocalAxis(incomingSnake, predictionAxisRef.current)
-          predictionInfoRef.current = {
-            ...predictionInfoRef.current,
-            enabled: true,
-            latestInputSeq: predictionLatestInputSeqRef.current,
-            latestAckSeq: predictionLatestAckSeqRef.current,
-            pendingInputCount: predictionCommandBufferRef.current.size(),
-            replayedInputCountLastFrame: 0,
-            predictionDisabledReason: disabledReason,
-          }
-          return snapshot
-        }
-
-        const pendingCommands = predictionCommandBufferRef.current.getPendingAfterAck(
-          predictionLatestAckSeqRef.current,
-        )
-        const baseSnake = predictionAuthoritativeSnakeRef.current ?? localPlayer.snake
-        const baseReceivedAtMs = predictionAuthoritativeReceivedAtMsRef.current ?? performance.now()
-        const spawnFloor = predictionLifeSpawnFloorRef.current ?? localPlayer.score
-        const boostAllowed = localPlayer.isBoosting || localPlayer.score >= spawnFloor + 1
-        const nowMs = performance.now()
-        const replayNowMs = predictionDebugPerturbation ? nowMs + 110 : nowMs
-        const replayed = replayPredictedSnake({
-          snake: baseSnake,
-          baseReceivedAtMs,
-          nowMs: replayNowMs,
-          pendingCommands,
-          fallbackAxis: predictionAxisRef.current,
-          boostAllowed,
-        })
-
-        let alpha = 1
-        const hardUntilMs = predictionHardDampenUntilMsRef.current
-        if (hardUntilMs !== null && nowMs < hardUntilMs) {
-          const dt = clamp(frameDeltaSeconds, 0, 0.1)
-          alpha = clamp(1 - Math.exp(-8 * dt), 0.15, 0.45)
-        } else {
-          predictionHardDampenUntilMsRef.current = null
-          const softUntilMs = predictionSoftUntilMsRef.current
-          if (softUntilMs !== null && nowMs < softUntilMs) {
-            const remainingMs = softUntilMs - nowMs
-            const durationMs = Math.max(1, predictionSoftDurationMsRef.current)
-            const progress = clamp(1 - remainingMs / durationMs, 0, 1)
-            alpha = clamp(0.1 + progress * 0.6, 0.1, 0.75)
-          } else {
-            predictionSoftStartAtMsRef.current = null
-            predictionSoftUntilMsRef.current = null
-            predictionSoftDurationMsRef.current = 0
-          }
-        }
-
-        const blendedSnake = blendPredictedSnake(predictionDisplaySnakeRef.current, replayed.snake, alpha)
-        predictionDisplaySnakeRef.current = cloneSnake(blendedSnake)
-        predictionAxisRef.current = replayed.axis
-        localSnakeDisplayRef.current = cloneSnake(blendedSnake)
+      if (!snapshot || !localId) {
+        localSnakeDisplayRef.current = null
         predictionInfoRef.current = {
           ...predictionInfoRef.current,
           enabled: true,
           latestInputSeq: predictionLatestInputSeqRef.current,
           latestAckSeq: predictionLatestAckSeqRef.current,
-          pendingInputCount: pendingCommands.length,
-          replayedInputCountLastFrame: replayed.replayedCommandCount,
-          predictionDisabledReason: 'none',
+          pendingInputCount: predictionCommandBufferRef.current.size(),
+          replayedInputCountLastFrame: 0,
+          predictionDisabledReason: 'not-ready',
         }
-
-        const players = snapshot.players.slice()
-        players[localIndex] = {
-          ...localPlayer,
-          snake: blendedSnake,
-        }
-        return {
-          ...snapshot,
-          players,
-        }
-      }
-
-      if (!snapshot || !localId) {
-        localSnakeDisplayRef.current = null
         return snapshot
       }
 
       const localIndex = snapshot.players.findIndex((player) => player.id === localId)
       if (localIndex < 0) {
         localSnakeDisplayRef.current = null
+        predictionInfoRef.current = {
+          ...predictionInfoRef.current,
+          enabled: true,
+          latestInputSeq: predictionLatestInputSeqRef.current,
+          latestAckSeq: predictionLatestAckSeqRef.current,
+          pendingInputCount: predictionCommandBufferRef.current.size(),
+          replayedInputCountLastFrame: 0,
+          predictionDisabledReason: 'not-ready',
+        }
         return snapshot
       }
 
       const localPlayer = snapshot.players[localIndex]
-      if (!localPlayer.alive || localPlayer.snake.length === 0) {
-        localSnakeDisplayRef.current = null
-        return snapshot
-      }
-
-      const incomingSnake = localPlayer.snake
-      const previousSnake = localSnakeDisplayRef.current
-      if (!previousSnake || previousSnake.length === 0) {
-        localSnakeDisplayRef.current = incomingSnake.map((node) => normalize(node))
-        return snapshot
-      }
-
-      const tuning = netTuningRef.current
+      const arrivalGapImpaired =
+        lagSpikeCauseRef.current === 'arrival-gap' &&
+        (netDebugInfoRef.current.impairmentMsRemaining > 120 || netDebugInfoRef.current.jitterMs > 45)
       const hardSpikeActive =
-        lagSpikeActiveRef.current && lagSpikeCauseRef.current !== 'arrival-gap'
-      const mildArrivalSpikeActive =
-        lagSpikeActiveRef.current && lagSpikeCauseRef.current === 'arrival-gap'
-      const nearSpike =
-        hardSpikeActive ||
-        lagCameraHoldActiveRef.current ||
-        lagCameraRecoveryStartMsRef.current !== null ||
-        delayBoostMsRef.current > serverTickMsRef.current * 0.85
-      const mildArrivalRate = Math.max(
-        tuning.localSnakeStabilizerRateSpike * 1.35,
-        tuning.localSnakeStabilizerRateNormal * 0.55,
-      )
-      const rate = nearSpike
-        ? tuning.localSnakeStabilizerRateSpike
-        : mildArrivalSpikeActive
-          ? mildArrivalRate
-          : tuning.localSnakeStabilizerRateNormal
-      const dt = clamp(frameDeltaSeconds, 0, 0.1)
-      const alpha = 1 - Math.exp(-rate * dt)
+        lagSpikeActiveRef.current &&
+        (lagSpikeCauseRef.current !== 'arrival-gap' || arrivalGapImpaired)
 
-      if (alpha >= 0.999) {
-        localSnakeDisplayRef.current = incomingSnake.map((node) => ({ ...node }))
+      let disabledReason: PredictionDisabledReason = 'none'
+      if (!localPlayer.alive || localPlayer.snake.length === 0) {
+        disabledReason = 'dead'
+      } else if (hardSpikeActive) {
+        disabledReason = 'spike'
+      } else if (
+        !predictionAuthoritativeSnakeRef.current ||
+        predictionAuthoritativeSnakeRef.current.length === 0 ||
+        predictionAuthoritativeReceivedAtMsRef.current === null
+      ) {
+        disabledReason = 'not-ready'
+      }
+
+      if (disabledReason !== 'none') {
+        const incomingSnake = localPlayer.snake.map((node) => normalize(node))
+        localSnakeDisplayRef.current = incomingSnake
+        predictionPhysicsSnakeRef.current = cloneSnake(incomingSnake)
+        predictionDisplaySnakeRef.current = cloneSnake(incomingSnake)
+        predictionAxisRef.current = deriveLocalAxis(incomingSnake, predictionAxisRef.current)
+        predictionInfoRef.current = {
+          ...predictionInfoRef.current,
+          enabled: true,
+          latestInputSeq: predictionLatestInputSeqRef.current,
+          latestAckSeq: predictionLatestAckSeqRef.current,
+          pendingInputCount: predictionCommandBufferRef.current.size(),
+          replayedInputCountLastFrame: 0,
+          predictionDisabledReason: disabledReason,
+        }
         return snapshot
       }
 
-      const blendLen = Math.min(previousSnake.length, incomingSnake.length)
-      const blendedSnake: Point[] = []
-      const lastIndex = Math.max(1, incomingSnake.length - 1)
-      for (let i = 0; i < incomingSnake.length; i += 1) {
-        if (i < blendLen) {
-          const t = i / lastIndex
-          const tailBias = t * t
-          const alphaNode = clamp(alpha + (1 - alpha) * tailBias, 0, 1)
-          blendedSnake.push(normalize(lerpPoint(previousSnake[i]!, incomingSnake[i]!, alphaNode)))
+      const pendingCommands = predictionCommandBufferRef.current.getPendingAfterAck(
+        predictionLatestAckSeqRef.current,
+      )
+      const activePredictionInput = pendingCommands.length > 0
+      const baseSnake = predictionAuthoritativeSnakeRef.current ?? localPlayer.snake
+      const baseReceivedAtMs = predictionAuthoritativeReceivedAtMsRef.current ?? performance.now()
+      const spawnFloor = predictionLifeSpawnFloorRef.current ?? localPlayer.score
+      const boostAllowed = localPlayer.isBoosting || localPlayer.score >= spawnFloor + 1
+      const nowMs = performance.now()
+      const replayNowMs = predictionDebugPerturbation ? nowMs + 110 : nowMs
+      const replayed = replayPredictedSnake({
+        snake: baseSnake,
+        baseReceivedAtMs,
+        nowMs: replayNowMs,
+        pendingCommands,
+        fallbackAxis: predictionAxisRef.current,
+        boostAllowed,
+      })
+
+      if (predictionNeedsReconcileCheckRef.current) {
+        const physicsHead =
+          predictionPhysicsSnakeRef.current?.[0] ??
+          predictionDisplaySnakeRef.current?.[0] ??
+          null
+        const replayHead = replayed.snake[0] ?? null
+        const errorDeg = angleBetweenDeg(physicsHead, replayHead)
+        pushPredictionErrorSample(errorDeg)
+        const forceHard = predictionForceHardNextReconcileRef.current
+        const softUntilMs = predictionSoftUntilMsRef.current
+        const hardUntilMs = predictionHardDampenUntilMsRef.current
+        const correctionWindowActive =
+          (hardUntilMs !== null && nowMs < hardUntilMs) ||
+          (softUntilMs !== null && nowMs < softUntilMs)
+        if (!correctionWindowActive || forceHard) {
+          let decision = decideReconcile(errorDeg, forceHard)
+          const activeSteering = activePredictionInput || pointerRef.current.active
+          if (
+            decision.kind === 'soft' &&
+            !forceHard &&
+            activeSteering &&
+            decision.magnitudeDeg < 4.5
+          ) {
+            decision = {
+              kind: 'none',
+              magnitudeDeg: decision.magnitudeDeg,
+              durationMs: 0,
+            }
+          }
+          const underNetworkStress =
+            lagSpikeActiveRef.current ||
+            netDebugInfoRef.current.jitterMs > 35 ||
+            netDebugInfoRef.current.receiveIntervalMs >
+              Math.max(70, serverTickMsRef.current * 1.45)
+          if (decision.kind === 'hard' && !forceHard && underNetworkStress) {
+            decision = {
+              kind: 'soft',
+              magnitudeDeg: decision.magnitudeDeg,
+              durationMs: 120,
+            }
+          }
+          if (decision.kind === 'soft') {
+            predictionSoftStartAtMsRef.current = nowMs
+            predictionSoftUntilMsRef.current = nowMs + decision.durationMs
+            predictionSoftDurationMsRef.current = decision.durationMs
+            predictionInfoRef.current = {
+              ...predictionInfoRef.current,
+              correctionSoftCount: predictionInfoRef.current.correctionSoftCount + 1,
+              lastCorrectionMagnitudeDeg: decision.magnitudeDeg,
+            }
+            appendPredictionEvent('reconcile_soft', `soft reconcile ${decision.magnitudeDeg.toFixed(2)}deg`, {
+              magnitudeDeg: decision.magnitudeDeg,
+            })
+          } else if (decision.kind === 'hard') {
+            predictionHardDampenUntilMsRef.current = nowMs + 120
+            predictionSoftStartAtMsRef.current = null
+            predictionSoftUntilMsRef.current = null
+            predictionSoftDurationMsRef.current = 0
+            predictionDisplaySnakeRef.current = cloneSnake(replayed.snake)
+            predictionInfoRef.current = {
+              ...predictionInfoRef.current,
+              correctionHardCount: predictionInfoRef.current.correctionHardCount + 1,
+              lastCorrectionMagnitudeDeg: decision.magnitudeDeg,
+            }
+            appendPredictionEvent('reconcile_hard', `hard reconcile ${decision.magnitudeDeg.toFixed(2)}deg`, {
+              magnitudeDeg: decision.magnitudeDeg,
+            })
+          }
+        }
+        predictionNeedsReconcileCheckRef.current = false
+        predictionForceHardNextReconcileRef.current = false
+      }
+      predictionPhysicsSnakeRef.current = cloneSnake(replayed.snake)
+
+      const dt = clamp(frameDeltaSeconds, 0, 0.1)
+      // Keep a small baseline presentation blend to smooth tick-boundary micro-jitter while
+      // preserving near-immediate local steering response.
+      let alpha = clamp(1 - Math.exp(-16 * dt), 0.14, 0.5)
+      const hardUntilMs = predictionHardDampenUntilMsRef.current
+      if (hardUntilMs !== null && nowMs < hardUntilMs) {
+        alpha = clamp(1 - Math.exp(-7 * dt), 0.12, 0.4)
+      } else {
+        predictionHardDampenUntilMsRef.current = null
+        const softUntilMs = predictionSoftUntilMsRef.current
+        if (softUntilMs !== null && nowMs < softUntilMs) {
+          const remainingMs = softUntilMs - nowMs
+          const durationMs = Math.max(1, predictionSoftDurationMsRef.current)
+          const progress = clamp(1 - remainingMs / durationMs, 0, 1)
+          alpha = clamp(0.08 + progress * 0.5, 0.08, 0.65)
         } else {
-          blendedSnake.push(normalize(incomingSnake[i]!))
+          predictionSoftStartAtMsRef.current = null
+          predictionSoftUntilMsRef.current = null
+          predictionSoftDurationMsRef.current = 0
         }
       }
-      localSnakeDisplayRef.current = blendedSnake.map((node) => ({ ...node }))
+
+      const blendedSnake = blendPredictedSnake(predictionDisplaySnakeRef.current, replayed.snake, alpha)
+      predictionDisplaySnakeRef.current = cloneSnake(blendedSnake)
+      predictionAxisRef.current = replayed.axis
+      localSnakeDisplayRef.current = cloneSnake(blendedSnake)
+      predictionInfoRef.current = {
+        ...predictionInfoRef.current,
+        enabled: true,
+        latestInputSeq: predictionLatestInputSeqRef.current,
+        latestAckSeq: predictionLatestAckSeqRef.current,
+        pendingInputCount: pendingCommands.length,
+        replayedInputCountLastFrame: replayed.replayedCommandCount,
+        predictionDisabledReason: 'none',
+      }
 
       const players = snapshot.players.slice()
       players[localIndex] = {
@@ -1402,16 +1371,14 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
       }
     },
     [
-      delayBoostMsRef,
-      lagCameraHoldActiveRef,
-      lagCameraRecoveryStartMsRef,
+      appendPredictionEvent,
       lagSpikeActiveRef,
       lagSpikeCauseRef,
       localSnakeDisplayRef,
       netDebugInfoRef,
-      netTuningRef,
-      predictionEnabled,
       predictionDebugPerturbation,
+      pointerRef,
+      pushPredictionErrorSample,
       serverTickMsRef,
     ],
   )
