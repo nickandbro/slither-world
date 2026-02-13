@@ -1,7 +1,9 @@
 import * as THREE from 'three'
 import type { PlayerSnapshot } from '../../../../game/types'
 import type { SnakeVisual } from '../runtimeTypes'
-import { clamp, smoothValue } from '../utils/math'
+import { SNAKE_STRIPE_DARK, SNAKE_STRIPE_EDGE, SNAKE_STRIPE_REPEAT } from '../constants'
+import { clamp, smoothValue, smoothstep } from '../utils/math'
+import { resolveSkinSlots } from '../utils/texture'
 import type { BoostDraftMaterialUserData } from './visual'
 import { hideBoostDraft } from './visual'
 
@@ -137,6 +139,7 @@ export const createSnakePlayerVisualRuntime = (deps: SnakePlayerVisualRuntimeDep
   const intakeConeOrientationMatrix = new THREE.Matrix4()
   const tempQuat = new THREE.Quaternion()
   const boostBodyGlowTintTemp = new THREE.Color()
+  const boostBodyGlowSamplePointTemp = new THREE.Vector3()
   const boostBodyGlowNormalTemp = new THREE.Vector3()
   const boostBodyGlowWhite = new THREE.Color('#ffffff')
 
@@ -606,10 +609,15 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
     ensureBoostBodyGlowSpriteCount(visual, targetSpriteCount)
     visual.boostBodyGlowMode = 'sprite-wave'
     visual.boostBodyGlowGroup.visible = true
-    boostBodyGlowTintTemp.set(visual.color).lerp(
-      boostBodyGlowWhite,
-      clamp(constants.boostBodyGlowSpriteColorBlend, 0, 1),
-    )
+    const skinSource =
+      player.skinColors && player.skinColors.length > 0 ? player.skinColors : [player.color]
+    const skinSlots = resolveSkinSlots(skinSource)
+    const stripeDark = clamp(SNAKE_STRIPE_DARK, 0, 1)
+    const stripeEdge = clamp(SNAKE_STRIPE_EDGE, 0.001, 0.49)
+    const stripeRepeat = Math.max(1, Math.floor(SNAKE_STRIPE_REPEAT))
+    const colorBlend = clamp(constants.boostBodyGlowSpriteColorBlend, 0, 1)
+    const safeSnakeStart = Number.isFinite(player.snakeStart) ? Math.max(0, player.snakeStart) : 0
+    const safeSnakeSpan = Number.isFinite(snakeLengthUnits) ? Math.max(0, snakeLengthUnits) : 0
     const safeRadius = Math.max(0.001, snakeRadius)
     const spriteSurfaceOffset = safeRadius * constants.boostBodyGlowSpriteSurfaceOffsetMult
     const spriteBaseScale = safeRadius * constants.boostBodyGlowSpriteScaleMult
@@ -643,24 +651,36 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
         sprite.material.opacity = 0
         continue
       }
-      const pointIndex = clamp(
-        Math.round(progress * (curvePoints.length - 1)),
-        0,
-        curvePoints.length - 1,
-      )
-      const point = curvePoints[pointIndex]
-      if (!point) {
+      const curveIndex = progress * (curvePoints.length - 1)
+      const pointIndexA = clamp(Math.floor(curveIndex), 0, curvePoints.length - 1)
+      const pointIndexB = clamp(pointIndexA + 1, 0, curvePoints.length - 1)
+      const pointA = curvePoints[pointIndexA]
+      const pointB = curvePoints[pointIndexB]
+      if (!pointA || !pointB) {
         sprite.visible = false
         sprite.material.opacity = 0
         continue
       }
-      boostBodyGlowNormalTemp.copy(point).normalize()
+      boostBodyGlowSamplePointTemp.copy(pointA).lerp(pointB, curveIndex - pointIndexA)
+      boostBodyGlowNormalTemp.copy(boostBodyGlowSamplePointTemp).normalize()
       // Keep sprite centers slightly inside the body so depth testing preserves snake-over-glow layering.
       sprite.position
-        .copy(point)
+        .copy(boostBodyGlowSamplePointTemp)
         .addScaledVector(boostBodyGlowNormalTemp, spriteSurfaceOffset)
       const scale = spriteBaseScale * (0.88 + waveMask * 0.28)
       sprite.scale.setScalar(scale)
+      const globalIndex = safeSnakeStart + progress * safeSnakeSpan
+      const slotWrapped = ((globalIndex % 8) + 8) % 8
+      const slotIndex = clamp(Math.floor(slotWrapped), 0, 7)
+      const slotColor = skinSlots[slotIndex] ?? visual.color
+      const u = globalIndex / 8
+      const stripeWave = Math.cos(u * Math.PI * 2 * stripeRepeat)
+      const stripeMix = smoothstep(-stripeEdge, stripeEdge, stripeWave)
+      const stripeValue = stripeDark + (1 - stripeDark) * stripeMix
+      boostBodyGlowTintTemp.set(slotColor).multiplyScalar(stripeValue)
+      if (colorBlend > 0) {
+        boostBodyGlowTintTemp.lerp(boostBodyGlowWhite, colorBlend)
+      }
       sprite.material.color.copy(boostBodyGlowTintTemp)
       sprite.material.opacity = alpha
       sprite.visible = true

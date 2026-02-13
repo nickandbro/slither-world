@@ -248,7 +248,7 @@ export const BOOST_BODY_GLOW_SPRITE_SCALE_MULT = 4.8
 // Negative offset keeps glow centers under the body so snake geometry stays visually on top.
 export const BOOST_BODY_GLOW_SPRITE_SURFACE_OFFSET_MULT = -0.28
 export const BOOST_BODY_GLOW_SPRITE_OPACITY = 0.72
-export const BOOST_BODY_GLOW_SPRITE_COLOR_BLEND = 0.32
+export const BOOST_BODY_GLOW_SPRITE_COLOR_BLEND = 0
 export const INTAKE_CONE_TEXTURE_WIDTH = 256
 export const INTAKE_CONE_TEXTURE_HEIGHT = 192
 export const INTAKE_CONE_BASE_LENGTH = PLANET_RADIUS * 0.11 * 1.1

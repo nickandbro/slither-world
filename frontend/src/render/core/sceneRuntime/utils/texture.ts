@@ -112,10 +112,11 @@ export const createPelletGlowTexture = () => {
 }
 
 export const createSnakeBoostGlowSpriteTexture = () => {
-  return createPelletRadialTexture(128, [
-    { offset: 0, color: 'rgba(255,255,255,0.04)' },
-    { offset: 0.28, color: 'rgba(255,255,255,0.42)' },
-    { offset: 0.56, color: 'rgba(255,255,255,0.95)' },
+  return createPelletRadialTexture(192, [
+    { offset: 0, color: 'rgba(255,255,255,0.84)' },
+    { offset: 0.24, color: 'rgba(255,255,255,0.76)' },
+    { offset: 0.52, color: 'rgba(255,255,255,0.44)' },
+    { offset: 0.8, color: 'rgba(255,255,255,0.14)' },
     { offset: 1, color: 'rgba(255,255,255,0)' },
   ])
 }
