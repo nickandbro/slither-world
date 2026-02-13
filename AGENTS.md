@@ -53,6 +53,9 @@ Repo root (recommended for full stack):
 - Do **not** run `npm run test:e2e` unless the user explicitly asks for E2E execution.
 - Only add or run E2E coverage when explicitly requested by the user (or when the task is explicitly E2E-focused).
 - When running E2E specifically for steering/netcode regressions, prefer a single targeted spec over the full suite: `cd frontend && npm run test:e2e -- e2e/steering-input.spec.ts --project=chromium --workers=1`.
+- When running E2E specifically for local prediction/authority regressions, prefer the targeted prediction suite:
+  - `cd frontend && npm run test:e2e -- e2e/prediction-authority.spec.ts --project=chromium --workers=1`
+  - `cd frontend && npm run test:e2e -- --grep @prediction --project=chromium --workers=1`
 - For lag-handling changes, prefer script-based validation over ad hoc manual checks:
   - Run at least one automated baseline pass (`./scripts/run-lag-automation.sh --profile harsh --duration-secs 45 --no-screenshot`).
   - For tuning work, run `./scripts/lag-autotune.sh` and compare `best-candidate.json` + per-run `report.json` outputs.
@@ -96,6 +99,7 @@ Repo root (recommended for full stack):
 - App styles are split under `frontend/src/app/styles/*.css` and imported via `frontend/src/app/styles/index.css`; keep `frontend/src/App.css` as the compatibility import entrypoint and preserve stable selectors used by runtime/tests.
 - Debug UI controls (renderer/collider/day-night/debug panel toggles) are enabled in `import.meta.env.DEV` or when `VITE_E2E_DEBUG=1`.
 - `window.__SNAKE_DEBUG__` runtime hooks are exposed during local runs (including `run-local-dev-copy.sh`). Network debug logging defaults on localhost and can be toggled via `?netDebug=1|0` or localStorage key `spherical_snake_net_debug`.
+- Local client-side prediction is opt-in via URL/localStorage (`?prediction=1|0`, key `spherical_snake_prediction`). Optional prediction stress perturbation is available for local/E2E correction tests (`?predictionPerturb=1|0`, key `spherical_snake_prediction_perturb`).
 - Menu snake-skin designs are stored in localStorage (`spherical_snake_skins_v1` for saved designs, `spherical_snake_selected_skin_v1` for the current selection).
 - Frontend renderer selection is controlled by URL query param `renderer=auto|webgpu|webgl` and persisted to localStorage key `spherical_snake_renderer`.
 - Default renderer mode is `auto`: it attempts WebGPU first and falls back to WebGL with a status note if WebGPU is unavailable or init fails.
@@ -141,6 +145,9 @@ Repo root (recommended for full stack):
   - `window.__SNAKE_DEBUG__.getMotionStabilityInfo()` returns `{ backwardCorrectionCount, minHeadDot, sampleCount }`.
   - `window.__SNAKE_DEBUG__.getNetLagEvents()` / `getNetLagReport()` expose event timelines; `clearNetLagEvents()` resets them.
   - `window.__SNAKE_DEBUG__.setNetTuningOverrides(overrides)` / `resetNetTuningOverrides()` apply runtime net-tuning changes for local testing; `getNetTuningOverrides()` and `getResolvedNetTuning()` expose current tuning.
+- Prediction debug hooks:
+  - `window.__SNAKE_DEBUG__.getPredictionInfo()` returns `{ enabled, latestInputSeq, latestAckSeq, pendingInputCount, replayedInputCountLastFrame, predictedHeadErrorDeg{lastDeg,p95Deg,maxDeg}, correctionSoftCount, correctionHardCount, lastCorrectionMagnitudeDeg, predictionDisabledReason }`.
+  - `window.__SNAKE_DEBUG__.getPredictionEvents()` / `getPredictionReport()` expose prediction events and a summary report; `clearPredictionEvents()` resets the prediction event log.
 - Tail growth debug hooks (opt-in via `?tailDebug=1`):
   - `window.__SNAKE_DEBUG__.getTailGrowthEvents()` returns the recent tail-growth event log (rx + render samples).
   - `window.__SNAKE_DEBUG__.getTailGrowthReport()` returns a compact summary (including recent `shrink`/`stretch` events).
@@ -150,9 +157,9 @@ Repo root (recommended for full stack):
   - `window.__SNAKE_DEBUG__.getRenderPerfInfo()` returns `{ frameCount, slowFrameCount, maxTotalMs, lastFrame, slowFrames, ... }` with renderer-side timings (setup/snakes/pellets/visibility/water plus per-pass `passWorldMs`, `passOccludersMs`, `passPelletsMs`, `passDepthRebuildMs`, `passLakesMs`).
   - `window.__SNAKE_DEBUG__.clearRafPerf()` resets the collected rAF perf samples.
 - Spawning is collision-safe: new spawns are rejected if any node overlaps existing alive snakes. Respawn retries are delayed if no safe spot is found.
-- Multiplayer WebSocket payloads are custom binary frames (versioned header). Current protocol version is `17`; when the protocol changes, deploy frontend and backend together. Join frames include `FLAG_JOIN_DEFER_SPAWN` so clients can connect/update identity without immediate spawn (used by the pre-spawn menu flow) plus `FLAG_JOIN_SKIN` to attach an optional skin pattern (`u8 skin_len` then `skin_len * (u8 r,g,b)`; max 8). Client codec lives in `frontend/src/game/wsProtocol.ts`.
-- Live replication now uses `TYPE_STATE_DELTA` (`0x15`) as the primary runtime state stream. Frames include `u16 total_players`, frame flags (keyframe marker), and a per-session view-scoped player delta list. Player deltas are field-masked and include scalar deltas, snake updates (`REBASE` or `SHIFT_HEAD`), and digestion updates. `TYPE_INIT` still seeds full state/environment on join.
-- Client input remains split across `TYPE_INPUT` and `TYPE_VIEW`, but both use tighter quantization: steering axis and view center are oct-encoded (`i16 ox, i16 oy`), while `view_radius` and `camera_distance` are `u16` quantized ranges. The client sends these in an event-driven path with heartbeat fallbacks rather than fixed high-frequency spam.
+- Multiplayer WebSocket payloads are custom binary frames (versioned header). Current protocol version is `18`; when the protocol changes, deploy frontend and backend together. Join frames include `FLAG_JOIN_DEFER_SPAWN` so clients can connect/update identity without immediate spawn (used by the pre-spawn menu flow) plus `FLAG_JOIN_SKIN` to attach an optional skin pattern (`u8 skin_len` then `skin_len * (u8 r,g,b)`; max 8). Client codec lives in `frontend/src/game/wsProtocol.ts`.
+- Live replication now uses `TYPE_STATE_DELTA` (`0x15`) as the primary runtime state stream. Frames include `u16 total_players`, per-session `u16 ack_input_seq`, frame flags (keyframe marker), and a per-session view-scoped player delta list. Player deltas are field-masked and include scalar deltas, snake updates (`REBASE` or `SHIFT_HEAD`), and digestion updates. `TYPE_INIT` still seeds full state/environment on join.
+- Client input remains split across `TYPE_INPUT` and `TYPE_VIEW`, but both use tighter quantization: steering axis and view center are oct-encoded (`i16 ox, i16 oy`), while `view_radius` and `camera_distance` are `u16` quantized ranges. `TYPE_INPUT` now appends `u16 input_seq` for server ack/reconciliation; sends remain event-driven with heartbeat fallbacks rather than fixed high-frequency spam.
 - Player payload entries remain compact (`u16 net_id` + packed flags + quantized scalars), and snake points remain oct-encoded (`i16 ox, i16 oy` per node).
 - Pellets are replicated via `TYPE_PELLET_RESET` (full), `TYPE_PELLET_DELTA` (adds/updates/removes), and `TYPE_PELLET_CONSUME` (one-shot consume hint: `u32 pellet_id` + `u16 target_net_id`, emitted when a pellet is actually consumed). Pellet entries use `u32 pellet_id` + oct normal (`i16 ox, i16 oy`) + `u8 color_index` + `u8 size`. `TYPE_PELLET_DELTA` update entries are reserved for evasive pellets; non-evasive attracted pellets rely on client-side intake animation plus consume-time hints.
 - Room tick pacing: `backend/src/game/room.rs` uses `tokio::time::interval(Duration::from_millis(TICK_MS))` with `MissedTickBehavior::Skip` so the server does not burst-catch-up after transient stalls (reduces jitter and CPU spikes under load).

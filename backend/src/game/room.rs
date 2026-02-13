@@ -124,6 +124,7 @@ struct SessionEntry {
     pellet_reset_retry_at: i64,
     delta_player_cache: HashMap<u16, DeltaPlayerCache>,
     force_next_keyframe: bool,
+    latest_applied_input_seq: u16,
 }
 
 #[derive(Debug)]
@@ -317,6 +318,7 @@ impl Room {
                 pellet_reset_retry_at: 0,
                 delta_player_cache: HashMap::new(),
                 force_next_keyframe: true,
+                latest_applied_input_seq: 0,
             },
         );
         SessionIo {
@@ -371,7 +373,7 @@ impl Room {
                 view_radius,
                 camera_distance,
             } => {
-                inbound.update_input(axis, boost.unwrap_or(false));
+                inbound.update_input(axis, boost.unwrap_or(false), None);
                 inbound.update_view(view_center, view_radius, camera_distance);
                 true
             }
@@ -388,8 +390,12 @@ impl Room {
             return true;
         };
         match message {
-            protocol::ClientMessage::Input { axis, boost } => {
-                inbound.update_input(axis, boost);
+            protocol::ClientMessage::Input {
+                axis,
+                boost,
+                input_seq,
+            } => {
+                inbound.update_input(axis, boost, Some(input_seq));
                 true
             }
             protocol::ClientMessage::View {
@@ -436,8 +442,12 @@ impl Room {
                 state.handle_respawn(session_id);
                 true
             }
-            protocol::ClientMessage::Input { axis, boost } => {
-                state.handle_input(session_id, axis, boost);
+            protocol::ClientMessage::Input {
+                axis,
+                boost,
+                input_seq,
+            } => {
+                state.handle_input(session_id, axis, boost, Some(input_seq));
                 true
             }
             protocol::ClientMessage::View {
@@ -651,7 +661,13 @@ impl RoomState {
         }
     }
 
-    fn handle_input(&mut self, session_id: &str, axis: Option<Point>, boost: bool) {
+    fn handle_input(
+        &mut self,
+        session_id: &str,
+        axis: Option<Point>,
+        boost: bool,
+        input_seq: Option<u16>,
+    ) {
         let Some(player_id) = self.session_player_id(session_id) else {
             return;
         };
@@ -665,6 +681,11 @@ impl RoomState {
 
         player.boost = boost;
         player.last_seen = Self::now_millis();
+        if let Some(seq) = input_seq {
+            if let Some(session) = self.sessions.get_mut(session_id) {
+                session.latest_applied_input_seq = seq;
+            }
+        }
     }
 
     fn handle_view(
@@ -2048,6 +2069,9 @@ impl RoomState {
                 player.target_axis = axis;
             }
             player.boost = inbound.boost;
+            if let Some(seq) = inbound.latest_input_seq {
+                session.latest_applied_input_seq = seq;
+            }
             if inbound.last_input_at > 0 {
                 player.last_seen = inbound.last_input_at;
             }
@@ -2443,6 +2467,7 @@ impl RoomState {
         encoder.write_i64(now);
         encoder.write_u32(state_seq);
         encoder.write_u16(total_players as u16);
+        encoder.write_u16(session.latest_applied_input_seq);
         encoder.write_u8(if keyframe { DELTA_FRAME_KEYFRAME } else { 0 });
         encoder.write_u16(visible_player_count as u16);
 

@@ -1,0 +1,219 @@
+Objective
+- Perceived local input latency should feel near 0ms visually.
+- Server remains authoritative for gameplay state and outcomes.
+- Corrections happen periodically and safely (no large visible snaps/hiccups).
+- Add fast, targeted Playwright E2E coverage for this feature only.
+
+Current Baseline (Codebase Findings)
+- Client input send path is in frontend/src/App.tsx (sendInputSnapshot).
+- Client sends TYPE_INPUT/TYPE_VIEW and keeps a 50ms send interval with heartbeat logic.
+- Local render currently comes from delayed snapshot interpolation in frontend/src/app/hooks/useNetRuntime.ts.
+- Local snake gets extra smoothing via stabilizeLocalSnapshot in frontend/src/app/hooks/useNetRuntime.ts.
+- There is no dedicated local client prediction simulation module in frontend/src/game.
+- Server runs authoritative 20Hz tick (TICK_MS=50) in backend/src/game/constants.rs and backend/src/game/room.rs.
+- Server applies latest inbound input per session (latest-input-wins) via SessionInbound snapshot in backend/src/game/room/session.rs and backend/src/game/room.rs.
+- Protocol is currently version 17 in backend/src/protocol.rs and frontend/src/game/wsProtocol.ts.
+- State replication is TYPE_STATE_DELTA (0x15), but payload does not include a per-session input-ack field yet.
+- Existing steering E2E spec (frontend/e2e/steering-input.spec.ts) is protocol-stale (expects VERSION 14 and TYPE_STATE float-axis patterns that no longer match v17).
+
+Recommended Architecture (Best Fit for This Repo)
+- Keep full server authority and current remote-player interpolation model.
+- Split local player rendering into a separate predicted presentation path.
+- Add command sequence + authoritative ack so local replay/reconciliation is deterministic and bounded.
+- Keep periodic correction based on authoritative snapshots every server tick.
+- Do not predict score/oxygen/digestion outcomes as truth; use server values for authority.
+
+Design Principle
+- "Predict local presentation, reconcile to authority often, never trust client for game truth."
+
+Phase 1: Add Prediction Instrumentation First
+- Add new prediction debug state and report APIs before behavior changes.
+- Files:
+  - frontend/src/app/debug/types.ts
+  - frontend/src/app/debug/registerAppDebugApi.ts
+  - frontend/src/app/hooks/useNetRuntime.ts
+- Add metrics:
+  - latestInputSeq
+  - latestAckSeq
+  - pendingInputCount
+  - replayedInputCountLastFrame
+  - predictedHeadErrorDeg (last/p95/max rolling window)
+  - correctionSoftCount
+  - correctionHardCount
+  - lastCorrectionMagnitudeDeg
+  - predictionDisabledReason (none/spike/dead/not-ready)
+- Add debug functions:
+  - getPredictionInfo()
+  - getPredictionEvents()
+  - clearPredictionEvents()
+  - getPredictionReport()
+- Keep logs concise, with event types:
+  - input_enqueued
+  - ack_advanced
+  - reconcile_soft
+  - reconcile_hard
+  - queue_prune
+
+Phase 2: Protocol Upgrade for Input Ack (VERSION 18)
+- Bump protocol version on both backend and frontend together.
+- Files:
+  - backend/src/protocol.rs
+  - frontend/src/game/wsProtocol.ts
+  - backend/src/game/room.rs
+  - backend/src/game/room/session.rs
+- Client -> Server TYPE_INPUT:
+  - Add input sequence field (u16) in payload.
+  - Keep existing compact axis oct encoding and boost flag.
+- Server session inbound:
+  - Store latest received input_seq alongside axis/boost.
+- Server tick:
+  - When applying inbound to player/session, record latest applied input_seq per session.
+- Server -> Client TYPE_STATE_DELTA:
+  - Add per-session authoritative ack_input_seq (u16) in state-delta header.
+  - Keep message session-specific (already true), so ack is cheap and unambiguous.
+- Update decode/encode tests:
+  - backend/src/protocol.rs tests
+  - backend/src/game/room/tests.rs (payload parsing assertions)
+  - frontend wsProtocol decoder tests (if present, add minimal coverage)
+
+Phase 3: Local Prediction Command Buffer and Replay
+- New frontend modules (game-domain ownership):
+  - frontend/src/game/prediction/types.ts
+  - frontend/src/game/prediction/commandBuffer.ts
+  - frontend/src/game/prediction/localPredictor.ts
+  - frontend/src/game/prediction/reconcile.ts
+- Keep dependency direction valid (game module cannot import app/render).
+
+Command Buffer
+- On every sent input command, assign monotonically increasing u16 seq.
+- Store command as:
+  - seq
+  - sentAtMs (perf time)
+  - axis (normalized point or null)
+  - boost
+- Ring buffer size target: 128 commands (prune oldest if overflow, emit debug event).
+
+Authoritative Base State
+- Maintain latest authoritative local player snapshot from server decode path.
+- For replay base, use latest authoritative state, not interpolated delayed render state.
+- Continue rendering remote players/pellets from existing interpolation path.
+
+Prediction Step
+- Per animation frame:
+  - Start from authoritative local base.
+  - Replay commands with seq > ack_input_seq up to current frame time.
+  - Apply local movement step using server-matching constants (TURN_RATE, BASE_SPEED, BOOST_MULTIPLIER, TICK_MS) and spherical math.
+  - Keep replay substep fixed and capped (example: 8ms substeps, max 24 substeps/frame).
+- Reuse/port server math primitives where possible:
+  - rotate_toward
+  - rotate_around_axis
+  - normalize/cross/dot/clamp
+- For first pass, local prediction scope:
+  - Predict head/axis and body transform for visual motion.
+  - Keep authoritative score/oxygen/digestion/tailExtension values for HUD and gameplay truth.
+  - Predict boost motion immediately only when local server-known score reserve allows it.
+
+Reconciliation
+- On each new authoritative snapshot:
+  - Advance ack, prune acknowledged commands.
+  - Rebuild predicted local state by replaying remaining commands.
+  - Compare predicted vs authoritative local head (angular error).
+- Correction policy:
+  - Error < 1.5 deg: no visible correction.
+  - 1.5 deg to 6 deg: soft correction blend over 60-120ms.
+  - > 6 deg or death/spawn transitions: hard correction (quick snap + 120ms prediction dampening).
+- Freeze or reduce prediction during heavy lag spike states from existing net debug info:
+  - stale
+  - seq-gap
+  - severe arrival-gap windows
+
+Integration Point
+- In frontend/src/app/hooks/useNetRuntime.ts:
+  - Replace/extend stabilizeLocalSnapshot with prediction-aware local substitution.
+  - Avoid double-smoothing local snake (prediction + old stabilizer simultaneously).
+- In frontend/src/App.tsx sendInputSnapshot:
+  - Emit input seq + enqueue command in prediction buffer.
+
+Phase 4: Keep Server Authority Explicit
+- Server stays source of truth for:
+  - collisions
+  - deaths
+  - pellet consume results
+  - score/growth/oxygen
+- Client prediction is presentation only.
+- Any mismatch resolves to latest authoritative snapshot.
+- Keep existing backpressure and latest-state-wins behavior unchanged.
+
+Phase 5: Targeted Playwright E2E for This Work
+- Add new spec file:
+  - frontend/e2e/prediction-authority.spec.ts
+- Add shared deterministic motion helper:
+  - frontend/e2e/predictionPath.ts
+- Path should be preconfigured and deterministic:
+  - fixed normalized waypoints
+  - fixed segment duration
+  - optional boost schedule array
+- Each test should be short (8 to 12 seconds of active capture).
+
+E2E Test Cases
+- @prediction baseline_visual_latency_webgl
+  - Launch with ?renderer=webgl&rafPerf=1.
+  - Enter game, run deterministic pointer path for ~8s.
+  - Collect:
+    - getPredictionInfo/report
+    - getMotionStabilityInfo
+    - getNetSmoothingInfo
+    - getRafPerfInfo + getRenderPerfInfo
+  - Assert:
+    - p95 predicted error within budget (example <= 2.5 deg)
+    - hard corrections near zero (example <= 1)
+    - backwardCorrectionRate <= 0.002
+    - minHeadDot >= 0.995
+    - no excessive slow-frame spikes
+
+- @prediction correction_under_jitter_webgl
+  - Same path, ~10s run.
+  - Use controlled perturbation for this test only (preferred: feature-flagged client debug perturbation, not brittle socket monkey-patching).
+  - Assert correction behavior:
+    - corrections happen but remain bounded (no repeated hard snaps)
+    - pending input queue does not grow unbounded
+    - recovered stable state by end of run
+
+- @prediction ack_monotonicity_and_queue_bounds
+  - Short run (~5s).
+  - Assert:
+    - ack_input_seq monotonic
+    - pendingInputCount bounded (example <= 40 steady-state)
+    - no queue overflow events
+
+Important E2E Note
+- Replace or refactor frontend/e2e/steering-input.spec.ts because it currently decodes outdated protocol assumptions.
+- Prefer debug API assertions over raw websocket binary interception for future protocol resilience.
+
+How To Run Only This Associated E2E Work
+- Single spec:
+  - cd frontend
+  - npm run test:e2e -- e2e/prediction-authority.spec.ts --project=chromium --workers=1
+- Tag-only (all prediction tests):
+  - cd frontend
+  - npm run test:e2e -- --grep @prediction --project=chromium --workers=1
+
+Artifacts and Diagnostics
+- Save debug JSON and screenshots to output/playwright/prediction/.
+- On failure, print:
+  - prediction report summary
+  - latest net lag summary
+  - raf/render perf summaries
+  - last 20 prediction events
+
+Rollout Strategy
+- Gate feature with URL/localStorage flag first (example: prediction=1).
+- Run internal testing with flag on, default off.
+- After passing thresholds, flip default on and keep emergency kill-switch.
+
+Definition of Done
+- Local steering feels immediate (visually near 0ms).
+- Server authority preserved; corrections are periodic and mostly soft.
+- No visible jitter regressions (head/body movement stays smooth).
+- Targeted Playwright prediction suite exists and runs quickly.
+- Protocol/version updates and tests are synchronized across frontend/backend.

@@ -94,6 +94,8 @@ const LOCAL_STORAGE_ADAPTIVE_QUALITY = 'spherical_snake_adaptive_quality'
 const LOCAL_STORAGE_MIN_DPR = 'spherical_snake_min_dpr'
 const LOCAL_STORAGE_MAX_DPR = 'spherical_snake_max_dpr'
 const LOCAL_STORAGE_WEBGPU_MSAA_SAMPLES = 'spherical_snake_webgpu_msaa_samples'
+const LOCAL_STORAGE_PREDICTION = 'spherical_snake_prediction'
+const LOCAL_STORAGE_PREDICTION_PERTURB = 'spherical_snake_prediction_perturb'
 
 export default function App() {
   const RAF_SLOW_FRAME_THRESHOLD_MS = 50
@@ -316,6 +318,42 @@ export default function App() {
   const playerNameRef = useRef(playerName)
   const netDebugEnabled = useMemo(getNetDebugEnabled, [])
   const tailDebugEnabled = useMemo(getTailDebugEnabled, [])
+  const predictionEnabled = useMemo(() => {
+    if (typeof window === 'undefined') return false
+    try {
+      const url = new URL(window.location.href)
+      const query = url.searchParams.get('prediction')
+      if (query === '1') {
+        window.localStorage.setItem(LOCAL_STORAGE_PREDICTION, '1')
+        return true
+      }
+      if (query === '0') {
+        window.localStorage.setItem(LOCAL_STORAGE_PREDICTION, '0')
+        return false
+      }
+    } catch {
+      // ignore URL parsing errors
+    }
+    return window.localStorage.getItem(LOCAL_STORAGE_PREDICTION) === '1'
+  }, [])
+  const predictionDebugPerturbation = useMemo(() => {
+    if (typeof window === 'undefined') return false
+    try {
+      const url = new URL(window.location.href)
+      const query = url.searchParams.get('predictionPerturb')
+      if (query === '1') {
+        window.localStorage.setItem(LOCAL_STORAGE_PREDICTION_PERTURB, '1')
+        return true
+      }
+      if (query === '0') {
+        window.localStorage.setItem(LOCAL_STORAGE_PREDICTION_PERTURB, '0')
+        return false
+      }
+    } catch {
+      // ignore URL parsing errors
+    }
+    return window.localStorage.getItem(LOCAL_STORAGE_PREDICTION_PERTURB) === '1'
+  }, [])
   const isPlaying = menuPhase === 'playing'
   const showMenuOverlay = menuPhase === 'preplay' || menuOverlayExiting
   const solidPaletteColor = SKIN_PALETTE_COLORS[solidPaletteIndex] ?? (SKIN_PALETTE_COLORS[0] ?? '#ffffff')
@@ -413,7 +451,8 @@ export default function App() {
     const inputChanged = force || inputSignature !== lastInputSignatureRef.current
     const inputHeartbeat = nowMs - lastInputSentAtMsRef.current >= 100
     if (inputChanged || inputHeartbeat || lastInputSentAtMsRef.current === 0) {
-      socket.send(encodeInputFast(axis, boost))
+      const inputSeq = enqueuePredictedInputCommand(axis, boost, nowMs)
+      socket.send(encodeInputFast(axis, boost, inputSeq))
       lastInputSignatureRef.current = inputSignature
       lastInputSentAtMsRef.current = nowMs
     }
@@ -481,12 +520,16 @@ export default function App() {
     buildNetLagReport,
     appendTailGrowthEvent,
     applyNetTuningOverrides,
+    enqueuePredictedInputCommand,
+    resetPredictionState,
     pushSnapshot,
     getRenderSnapshot,
     stabilizeLocalSnapshot,
   } = useNetRuntime({
     netDebugEnabled,
     tailDebugEnabled,
+    predictionEnabled,
+    predictionDebugPerturbation,
     menuPhaseRef,
     menuDebugInfoRef,
     netDebugInfoRef,
@@ -660,6 +703,7 @@ export default function App() {
     playerIdRef,
     pelletConsumeTargetsRef,
     syncPelletConsumeTargetsToRenderer,
+    resetPredictionState,
   })
 
   const {

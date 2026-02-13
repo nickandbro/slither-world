@@ -232,6 +232,7 @@ fn decode_state_counts(payload: &[u8]) -> (u32, u16, u16) {
     offset += 8; // now
     let state_seq = read_u32(payload, &mut offset);
     let total_players = read_u16(payload, &mut offset);
+    let _ack_input_seq = read_u16(payload, &mut offset);
     let _frame_flags = read_u8(payload, &mut offset);
     let visible_players = read_u16(payload, &mut offset);
     for _ in 0..visible_players {
@@ -239,6 +240,19 @@ fn decode_state_counts(payload: &[u8]) -> (u32, u16, u16) {
     }
     assert_eq!(offset, payload.len());
     (state_seq, total_players, visible_players)
+}
+
+fn decode_state_ack_input_seq(payload: &[u8]) -> u16 {
+    let mut offset = 0usize;
+    let version = read_u8(payload, &mut offset);
+    assert_eq!(version, protocol::VERSION);
+    let message_type = read_u8(payload, &mut offset);
+    assert_eq!(message_type, protocol::TYPE_STATE_DELTA);
+    let _flags = read_u16(payload, &mut offset);
+    offset += 8; // now
+    let _state_seq = read_u32(payload, &mut offset);
+    let _total_players = read_u16(payload, &mut offset);
+    read_u16(payload, &mut offset)
 }
 
 fn decode_init_counts(payload: &[u8]) -> (u32, u16, u16) {
@@ -450,6 +464,7 @@ fn insert_session_with_view(
             pellet_reset_retry_at: 0,
             delta_player_cache: HashMap::new(),
             force_next_keyframe: true,
+            latest_applied_input_seq: 0,
         },
     );
 }
@@ -1920,14 +1935,21 @@ fn build_state_delta_payload_for_session_excludes_stub_remote_players() {
         }),
         Some(0.45),
     );
+    state
+        .sessions
+        .get_mut("session-1")
+        .expect("session")
+        .latest_applied_input_seq = 321;
 
     let payload = state
         .build_state_delta_payload_for_session(1234, 77, "session-1")
         .expect("state delta payload");
     let (state_seq, total_players, visible_players) = decode_state_counts(&payload);
+    let ack_input_seq = decode_state_ack_input_seq(&payload);
     assert_eq!(state_seq, 77);
     assert_eq!(total_players, 3);
     assert_eq!(visible_players, 2);
+    assert_eq!(ack_input_seq, 321);
 }
 
 #[test]
@@ -2020,6 +2042,7 @@ fn broadcast_state_delta_increments_state_sequence_once_per_tick() {
             pellet_reset_retry_at: 0,
             delta_player_cache: HashMap::new(),
             force_next_keyframe: true,
+            latest_applied_input_seq: 0,
         },
     );
 

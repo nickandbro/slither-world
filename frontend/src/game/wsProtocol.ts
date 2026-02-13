@@ -16,7 +16,7 @@ export type PlayerMeta = {
   skinColors?: string[]
 }
 
-const VERSION = 17
+const VERSION = 18
 
 const TYPE_JOIN = 0x01
 const TYPE_INPUT = 0x02
@@ -175,14 +175,15 @@ export function encodeJoin(
   return buffer
 }
 
-export function encodeInputFast(axis: Point | null, boost: boolean): ArrayBuffer {
+export function encodeInputFast(axis: Point | null, boost: boolean, inputSeq: number): ArrayBuffer {
   const hasAxis = !!axis
 
   let flags = 0
   if (hasAxis) flags |= FLAG_INPUT_AXIS
   if (boost) flags |= FLAG_INPUT_BOOST
 
-  const length = 4 + (hasAxis ? 4 : 0)
+  const normalizedSeq = inputSeq & 0xffff
+  const length = 4 + (hasAxis ? 4 : 0) + 2
   const buffer = new ArrayBuffer(length)
   const view = new DataView(buffer)
   let offset = 0
@@ -193,6 +194,7 @@ export function encodeInputFast(axis: Point | null, boost: boolean): ArrayBuffer
     view.setInt16(offset + 2, oy, true)
     offset += 4
   }
+  view.setUint16(offset, normalizedSeq, true)
   return buffer
 }
 
@@ -311,7 +313,7 @@ function decodeInit(
     type: 'init',
     playerId,
     tickMs,
-    state: { now, seq, pellets: [], players, totalPlayers },
+    state: { now, seq, pellets: [], players, totalPlayers, ackInputSeq: null },
     environment,
   }
 }
@@ -330,7 +332,7 @@ function decodeState(
 
   return {
     type: 'state',
-    state: { now, seq, pellets: [], players, totalPlayers },
+    state: { now, seq, pellets: [], players, totalPlayers, ackInputSeq: null },
   }
 }
 
@@ -342,9 +344,17 @@ function decodeStateDelta(
   const now = reader.readI64()
   const seq = reader.readU32()
   const totalPlayers = reader.readU16()
+  const ackInputSeq = reader.readU16()
   const frameFlags = reader.readU8()
   const playerCount = reader.readU16()
-  if (now === null || seq === null || totalPlayers === null || frameFlags === null || playerCount === null) {
+  if (
+    now === null ||
+    seq === null ||
+    totalPlayers === null ||
+    ackInputSeq === null ||
+    frameFlags === null ||
+    playerCount === null
+  ) {
     return null
   }
 
@@ -431,7 +441,7 @@ function decodeStateDelta(
 
   return {
     type: 'state',
-    state: { now, seq, pellets: [], players, totalPlayers },
+    state: { now, seq, pellets: [], players, totalPlayers, ackInputSeq },
   }
 }
 

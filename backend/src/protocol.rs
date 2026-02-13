@@ -1,7 +1,7 @@
 use crate::game::types::Point;
 use uuid::Uuid;
 
-pub const VERSION: u8 = 17;
+pub const VERSION: u8 = 18;
 
 pub const TYPE_JOIN: u8 = 0x01;
 pub const TYPE_INPUT: u8 = 0x02;
@@ -77,6 +77,7 @@ pub enum ClientMessage {
     Input {
         axis: Option<Point>,
         boost: bool,
+        input_seq: u16,
     },
     View {
         view_center: Option<Point>,
@@ -139,7 +140,12 @@ pub fn decode_client_message(data: &[u8]) -> Option<ClientMessage> {
                 None
             };
             let boost = flags & FLAG_INPUT_BOOST != 0;
-            Some(ClientMessage::Input { axis, boost })
+            let input_seq = reader.read_u16()?;
+            Some(ClientMessage::Input {
+                axis,
+                boost,
+                input_seq,
+            })
         }
         TYPE_VIEW => {
             let view_center = if flags & FLAG_VIEW_CENTER != 0 {
@@ -401,13 +407,19 @@ mod tests {
         encoder.write_header(TYPE_INPUT, FLAG_INPUT_AXIS | FLAG_INPUT_BOOST);
         encoder.write_i16(0);
         encoder.write_i16(i16::MAX);
+        encoder.write_u16(42);
         let data = encoder.into_vec();
 
         let message = decode_client_message(&data).expect("message");
         match message {
-            ClientMessage::Input { axis, boost } => {
+            ClientMessage::Input {
+                axis,
+                boost,
+                input_seq,
+            } => {
                 let axis = axis.expect("axis");
                 assert!(boost);
+                assert_eq!(input_seq, 42);
                 assert!(axis.x.abs() < 1e-3);
                 assert!((axis.y - 1.0).abs() < 1e-3);
                 assert!(axis.z.abs() < 1e-3);

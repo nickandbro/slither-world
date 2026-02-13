@@ -92,6 +92,7 @@ export function useSocketConnectionRuntime(options: any): void {
     startInputLoop,
     setPlayerId,
     playerIdRef,
+    resetPredictionState,
   } = options
 
   useEffect(() => {
@@ -162,6 +163,7 @@ export function useSocketConnectionRuntime(options: any): void {
       lastNetSummaryLogMsRef.current = 0
       lastHeadSampleRef.current = null
       localSnakeDisplayRef.current = null
+      resetPredictionState()
       lastRenderFrameMsRef.current = null
       localHeadRef.current = MENU_CAMERA_TARGET
       stableGameplayCameraRef.current = { q: { ...MENU_CAMERA.q }, active: true }

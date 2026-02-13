@@ -1,0 +1,196 @@
+import { clamp, cross, dot, normalize } from '../math'
+import type { Point } from '../types'
+import type { PredictionCommand } from './types'
+
+const WORLD_SCALE = 3
+const NODE_ANGLE = Math.PI / 60 / WORLD_SCALE
+const NODE_QUEUE_SIZE = 9
+const MOVE_SPEED_MULTIPLIER = 1.35
+const BASE_SPEED = ((NODE_ANGLE * 2) / (NODE_QUEUE_SIZE + 1)) * MOVE_SPEED_MULTIPLIER
+const BOOST_MULTIPLIER = 3
+const TURN_RATE = 0.45 / WORLD_SCALE
+const TICK_MS = 50
+const REPLAY_SUBSTEP_MS = 8
+const REPLAY_MAX_SUBSTEPS = 24
+
+export type ReplayPredictionOptions = {
+  snake: Point[]
+  baseReceivedAtMs: number
+  nowMs: number
+  pendingCommands: PredictionCommand[]
+  fallbackAxis: Point | null
+  boostAllowed: boolean
+}
+
+export type ReplayPredictionResult = {
+  snake: Point[]
+  axis: Point
+  replayedCommandCount: number
+}
+
+export function cloneSnake(snake: Point[]): Point[] {
+  return snake.map((node) => normalize({ ...node }))
+}
+
+export function angleBetweenDeg(a: Point | null, b: Point | null): number {
+  if (!a || !b) return 0
+  const an = normalize(a)
+  const bn = normalize(b)
+  const d = clamp(dot(an, bn), -1, 1)
+  const radians = Math.acos(d)
+  return Number.isFinite(radians) ? radians * (180 / Math.PI) : 0
+}
+
+export function deriveLocalAxis(snake: Point[], fallbackAxis: Point | null): Point {
+  if (snake.length >= 2) {
+    const head = normalize(snake[0]!)
+    const neck = normalize(snake[1]!)
+    const raw = {
+      x: head.x - neck.x,
+      y: head.y - neck.y,
+      z: head.z - neck.z,
+    }
+    const radial = dot(raw, head)
+    const tangent = normalize({
+      x: raw.x - head.x * radial,
+      y: raw.y - head.y * radial,
+      z: raw.z - head.z * radial,
+    })
+    const derived = normalize(cross(head, tangent))
+    if (Number.isFinite(derived.x) && Number.isFinite(derived.y) && Number.isFinite(derived.z)) {
+      const mag = Math.hypot(derived.x, derived.y, derived.z)
+      if (mag > 1e-6) return derived
+    }
+  }
+
+  if (fallbackAxis) {
+    const normalized = normalize(fallbackAxis)
+    const mag = Math.hypot(normalized.x, normalized.y, normalized.z)
+    if (mag > 1e-6) return normalized
+  }
+
+  const head = snake.length > 0 ? normalize(snake[0]!) : { x: 0, y: 0, z: 1 }
+  const worldUp = Math.abs(head.y) > 0.95 ? { x: 1, y: 0, z: 0 } : { x: 0, y: 1, z: 0 }
+  return normalize(cross(head, worldUp))
+}
+
+function rotateAroundAxis(point: Point, axis: Point, angle: number): Point {
+  const u = normalize(axis)
+  const cosA = Math.cos(angle)
+  const sinA = Math.sin(angle)
+  const dotProd = u.x * point.x + u.y * point.y + u.z * point.z
+  return normalize({
+    x:
+      point.x * cosA +
+      (u.y * point.z - u.z * point.y) * sinA +
+      u.x * dotProd * (1 - cosA),
+    y:
+      point.y * cosA +
+      (u.z * point.x - u.x * point.z) * sinA +
+      u.y * dotProd * (1 - cosA),
+    z:
+      point.z * cosA +
+      (u.x * point.y - u.y * point.x) * sinA +
+      u.z * dotProd * (1 - cosA),
+  })
+}
+
+function rotateToward(current: Point, target: Point, maxAngle: number): Point {
+  const currentNorm = normalize(current)
+  const targetNorm = normalize(target)
+  const d = clamp(dot(currentNorm, targetNorm), -1, 1)
+  const angle = Math.acos(d)
+  if (!Number.isFinite(angle) || angle <= maxAngle) return targetNorm
+  if (angle <= 0) return currentNorm
+
+  const axis = normalize(cross(currentNorm, targetNorm))
+  const mag = Math.hypot(axis.x, axis.y, axis.z)
+  if (mag <= 1e-6) return currentNorm
+  return rotateAroundAxis(currentNorm, axis, maxAngle)
+}
+
+function applySnakeRotationStep(snake: Point[], axis: Point, velocity: number): Point[] {
+  return snake.map((node) => rotateAroundAxis(node, axis, velocity))
+}
+
+export function replayPredictedSnake(options: ReplayPredictionOptions): ReplayPredictionResult {
+  const {
+    snake,
+    baseReceivedAtMs,
+    nowMs,
+    pendingCommands,
+    fallbackAxis,
+    boostAllowed,
+  } = options
+  const outputSnake = cloneSnake(snake)
+  if (outputSnake.length === 0) {
+    return {
+      snake: outputSnake,
+      axis: fallbackAxis ? normalize(fallbackAxis) : { x: 0, y: 1, z: 0 },
+      replayedCommandCount: 0,
+    }
+  }
+
+  const startMs = Number.isFinite(baseReceivedAtMs) ? baseReceivedAtMs : nowMs
+  const cappedNowMs = Math.max(startMs, nowMs)
+  let durationMs = Math.max(0, cappedNowMs - startMs)
+  if (durationMs <= 0.25) {
+    return {
+      snake: outputSnake,
+      axis: deriveLocalAxis(outputSnake, fallbackAxis),
+      replayedCommandCount: 0,
+    }
+  }
+
+  const sortedCommands = pendingCommands
+    .slice()
+    .sort((a, b) => a.sentAtMs - b.sentAtMs)
+    .filter((command) => Number.isFinite(command.sentAtMs))
+
+  let axis = deriveLocalAxis(outputSnake, fallbackAxis)
+  let replayedCommandCount = 0
+  let activeAxis: Point | null = null
+  let activeBoost = false
+  let commandIndex = 0
+  while (commandIndex < sortedCommands.length && sortedCommands[commandIndex]!.sentAtMs <= startMs) {
+    activeAxis = sortedCommands[commandIndex]!.axis
+    activeBoost = sortedCommands[commandIndex]!.boost
+    commandIndex += 1
+    replayedCommandCount += 1
+  }
+
+  const maxReplayMs = REPLAY_SUBSTEP_MS * REPLAY_MAX_SUBSTEPS
+  durationMs = Math.min(durationMs, maxReplayMs)
+  const stepCount = Math.max(
+    1,
+    Math.min(REPLAY_MAX_SUBSTEPS, Math.ceil(durationMs / REPLAY_SUBSTEP_MS)),
+  )
+  const stepMs = durationMs / stepCount
+
+  for (let step = 0; step < stepCount; step += 1) {
+    const stepTimeMs = startMs + step * stepMs
+    while (
+      commandIndex < sortedCommands.length &&
+      sortedCommands[commandIndex]!.sentAtMs <= stepTimeMs
+    ) {
+      activeAxis = sortedCommands[commandIndex]!.axis
+      activeBoost = sortedCommands[commandIndex]!.boost
+      commandIndex += 1
+      replayedCommandCount += 1
+    }
+
+    const targetAxis = activeAxis ? normalize(activeAxis) : axis
+    const turnStep = TURN_RATE * (stepMs / TICK_MS)
+    axis = rotateToward(axis, targetAxis, Math.max(0, turnStep))
+    const speedFactor = activeBoost && boostAllowed ? BOOST_MULTIPLIER : 1
+    const velocity = BASE_SPEED * speedFactor * (stepMs / TICK_MS)
+    const nextSnake = applySnakeRotationStep(outputSnake, axis, velocity)
+    outputSnake.splice(0, outputSnake.length, ...nextSnake)
+  }
+
+  return {
+    snake: outputSnake,
+    axis,
+    replayedCommandCount,
+  }
+}

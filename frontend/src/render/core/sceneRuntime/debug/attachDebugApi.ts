@@ -205,8 +205,15 @@ export const registerSceneDebugApi = ({
   }
 
   const debugWindow = window as Window & {
-    __SNAKE_DEBUG__?: SceneDebugApi
+    __SNAKE_DEBUG__?: Record<string, unknown>
   }
-  debugWindow.__SNAKE_DEBUG__ = debugApi
+  const existing =
+    debugWindow.__SNAKE_DEBUG__ && typeof debugWindow.__SNAKE_DEBUG__ === 'object'
+      ? debugWindow.__SNAKE_DEBUG__
+      : {}
+  debugWindow.__SNAKE_DEBUG__ = {
+    ...existing,
+    ...debugApi,
+  }
   return debugApi
 }

@@ -313,6 +313,7 @@ function blendSnapshots(a: GameStateSnapshot, b: GameStateSnapshot, t: number): 
     pellets: blendPellets(a.pellets, b.pellets, t),
     players,
     totalPlayers: t < 0.5 ? a.totalPlayers : b.totalPlayers,
+    ackInputSeq: t < 0.5 ? (a.ackInputSeq ?? null) : (b.ackInputSeq ?? null),
   }
 }
 

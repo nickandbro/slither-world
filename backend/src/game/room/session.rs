@@ -38,6 +38,7 @@ impl LatestFrame {
 pub(crate) struct SessionInboundState {
     pub(crate) input_axis: Option<Point>,
     pub(crate) boost: bool,
+    pub(crate) latest_input_seq: Option<u16>,
     pub(crate) last_input_at: i64,
     pub(crate) view_center: Option<Point>,
     pub(crate) view_radius: Option<f64>,
@@ -56,12 +57,15 @@ impl SessionInbound {
         }
     }
 
-    pub(crate) fn update_input(&self, axis: Option<Point>, boost: bool) {
+    pub(crate) fn update_input(&self, axis: Option<Point>, boost: bool, input_seq: Option<u16>) {
         let mut state = self.inner.lock().unwrap();
         if let Some(axis) = axis.and_then(parse_axis) {
             state.input_axis = Some(axis);
         }
         state.boost = boost;
+        if let Some(seq) = input_seq {
+            state.latest_input_seq = Some(seq);
+        }
         state.last_input_at = now_millis();
     }
 
