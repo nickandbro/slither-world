@@ -7,6 +7,9 @@ type DebugSnakeVisual = {
   group: { visible: boolean }
   boostDraft: { visible: boolean }
   boostDraftMaterial: { opacity: number }
+  boostBodyGlowIntensity: number
+  boostBodyGlowWaveCount: number
+  boostBodyGlowMode: 'off' | 'sprite-wave'
 }
 
 type DebugBoostTrailState = {
@@ -66,6 +69,13 @@ type BoostDraftInfo = {
   planeCount: number
 }
 
+type BoostBodyGlowInfo = {
+  visible: boolean
+  intensity: number
+  waveCount: number
+  backendMode: 'off' | 'sprite-wave'
+}
+
 type DayNightInfo = {
   mode: 'auto' | 'accelerated'
   phase: number
@@ -86,6 +96,7 @@ export type SceneDebugApi = {
   getSnakeIds: () => string[]
   getBoostTrailInfo: (id: string) => BoostTrailInfo | null
   getBoostDraftInfo: (id: string) => BoostDraftInfo | null
+  getBoostBodyGlowInfo: (id: string) => BoostBodyGlowInfo | null
   getDayNightInfo: () => DayNightInfo
 }
 
@@ -100,6 +111,7 @@ export type RegisterSceneDebugApiParams = {
   getSnakeGroundingInfo: () => SnakeGroundingInfoSnapshot | null
   getDayNightInfo: () => DayNightInfo
   boostDraftMinActiveOpacity: number
+  boostBodyGlowMinActiveOpacity: number
 }
 
 export const registerSceneDebugApi = ({
@@ -113,6 +125,7 @@ export const registerSceneDebugApi = ({
   getSnakeGroundingInfo,
   getDayNightInfo,
   boostDraftMinActiveOpacity,
+  boostBodyGlowMinActiveOpacity,
 }: RegisterSceneDebugApiParams): SceneDebugApi | null => {
   if (!enabled || typeof window === 'undefined') return null
   const debugApi: SceneDebugApi = {
@@ -179,6 +192,21 @@ export const registerSceneDebugApi = ({
         visible,
         opacity,
         planeCount: 1,
+      }
+    },
+    getBoostBodyGlowInfo: (id: string) => {
+      const visual = snakes.get(id)
+      if (!visual) return null
+      const intensity = Math.max(0, visual.boostBodyGlowIntensity)
+      const backendMode =
+        intensity > boostBodyGlowMinActiveOpacity
+          ? visual.boostBodyGlowMode
+          : 'off'
+      return {
+        visible: backendMode !== 'off',
+        intensity,
+        waveCount: Math.max(1, visual.boostBodyGlowWaveCount),
+        backendMode,
       }
     },
     getDayNightInfo,

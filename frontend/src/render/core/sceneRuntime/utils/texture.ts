@@ -111,6 +111,15 @@ export const createPelletGlowTexture = () => {
   ])
 }
 
+export const createSnakeBoostGlowSpriteTexture = () => {
+  return createPelletRadialTexture(128, [
+    { offset: 0, color: 'rgba(255,255,255,0.04)' },
+    { offset: 0.28, color: 'rgba(255,255,255,0.42)' },
+    { offset: 0.56, color: 'rgba(255,255,255,0.95)' },
+    { offset: 1, color: 'rgba(255,255,255,0)' },
+  ])
+}
+
 export const createBoostDraftTexture = () => {
   const canvas = document.createElement('canvas')
   canvas.width = BOOST_DRAFT_TEXTURE_WIDTH

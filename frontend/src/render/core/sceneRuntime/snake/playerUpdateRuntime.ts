@@ -7,7 +7,14 @@ import { createGroundingInfo, finalizeGroundingInfo, type SnakeGroundingInfo } f
 import { clamp, smoothstep } from '../utils/math'
 import type { DeathState, SnakeVisual } from '../runtimeTypes'
 import type { TailFrameState } from './tailShape'
-import { hideBoostDraft, hideIntakeCone, hideNameplate, updateNameplateText, updateSnakeMaterial } from './visual'
+import {
+  hideBoostBodyGlow,
+  hideBoostDraft,
+  hideIntakeCone,
+  hideNameplate,
+  updateNameplateText,
+  updateSnakeMaterial,
+} from './visual'
 
 type SnakePlayerRuntimeConstants = {
   deathFadeDuration: number
@@ -145,6 +152,15 @@ type SnakePlayerRuntimeDeps = {
     snakeOpacity: number
     deltaSeconds: number
   }) => void
+  updateBoostBodyGlow: (args: {
+    visual: SnakeVisual
+    player: PlayerSnapshot
+    snakeLengthUnits: number
+    curvePoints: THREE.Vector3[] | null
+    snakeRadius: number
+    snakeOpacity: number
+    deltaSeconds: number
+  }) => void
   updateIntakeCone: (args: {
     visual: SnakeVisual
     activeByLock: boolean
@@ -199,6 +215,7 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
     storeTailFrameStateForPlayer,
     updateSnakeTailCap,
     updateBoostDraft,
+    updateBoostBodyGlow,
     updateIntakeCone,
   } = deps
 
@@ -294,6 +311,7 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
       visual.pupilRight.visible = false
       visual.bowl.visible = false
       hideBoostDraft(visual)
+      hideBoostBodyGlow(visual)
       hideIntakeCone(visual)
       hideNameplate(visual)
       return
@@ -328,6 +346,8 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
     let tailCurvePrev: THREE.Vector3 | null = null
     let tailExtensionDirection: THREE.Vector3 | null = null
     let tailDirMinLen = 0
+    let extensionRatio = 0
+    let boostBodyGlowCurvePoints: THREE.Vector3[] | null = null
     if (nodes.length < 2) {
       visual.tube.visible = false
       visual.selfOverlapGlow.visible = false
@@ -339,6 +359,7 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
       visual.tube.visible = true
       visual.tail.visible = true
       const curvePoints = buildSnakeCurvePoints(nodes, radiusOffset, radius, groundingInfo)
+      boostBodyGlowCurvePoints = curvePoints
       headCurvePoint = curvePoints[0]?.clone() ?? null
       secondCurvePoint = curvePoints[1]?.clone() ?? null
       let tailBasisPrev: THREE.Vector3 | null = null
@@ -366,7 +387,7 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
         : 0
       const hasAuthoritativeTailWindow =
         player.snakeStart + nodes.length === player.snakeTotalLen
-      const extensionRatio = hasAuthoritativeTailWindow
+      extensionRatio = hasAuthoritativeTailWindow
         ? clamp(player.tailExtension, 0, 0.999_999)
         : 0
       const extensionBaseLength =
@@ -501,6 +522,20 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
         overlapMax > constants.snakeSelfOverlapGlowVisibilityThreshold
     }
 
+    const snakeLengthUnits = Math.max(
+      0,
+      Math.max(player.snakeTotalLen, player.snakeStart + nodes.length + extensionRatio),
+    )
+    updateBoostBodyGlow({
+      visual,
+      player,
+      snakeLengthUnits,
+      curvePoints: boostBodyGlowCurvePoints,
+      snakeRadius: radius,
+      snakeOpacity: opacity,
+      deltaSeconds,
+    })
+
     if (nodes.length === 0) {
       visual.head.visible = false
       visual.eyeLeft.visible = false
@@ -509,6 +544,7 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
       visual.pupilRight.visible = false
       visual.bowl.visible = false
       hideBoostDraft(visual)
+      hideBoostBodyGlow(visual)
       hideIntakeCone(visual)
       hideNameplate(visual)
       lastHeadPositions.delete(player.id)

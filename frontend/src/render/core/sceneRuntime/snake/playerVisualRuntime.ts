@@ -18,6 +18,7 @@ type SnakePlayerVisualRuntimeDeps = {
   pupilMaterial: THREE.MeshStandardMaterial
   boostDraftGeometry: THREE.SphereGeometry
   boostDraftTexture: THREE.Texture | null
+  boostBodyGlowTexture: THREE.Texture | null
   intakeConeGeometry: THREE.PlaneGeometry
   intakeConeTexture: THREE.Texture | null
   createNameplateTexture: (name: string) =>
@@ -41,6 +42,26 @@ type SnakePlayerVisualRuntimeDeps = {
     boostDraftFrontOffset: number
     boostDraftLift: number
     boostDraftLocalForwardAxis: THREE.Vector3
+    boostBodyGlowFadeInRate: number
+    boostBodyGlowFadeOutRate: number
+    boostBodyGlowMinActiveOpacity: number
+    boostBodyGlowTravelSpeed: number
+    boostBodyGlowNodesPerWave: number
+    boostBodyGlowMinWaveCount: number
+    boostBodyGlowMaxWaveCount: number
+    boostBodyGlowWaveCountRate: number
+    boostBodyGlowWaveHalfWidth: number
+    boostBodyGlowWaveFalloffPower: number
+    boostBodyGlowWavePeakRatio: number
+    boostBodyGlowWavePeakBoost: number
+    boostBodyGlowWaveBaseline: number
+    boostBodyGlowSpriteMinCount: number
+    boostBodyGlowSpriteMaxCount: number
+    boostBodyGlowSpritesPerNode: number
+    boostBodyGlowSpriteScaleMult: number
+    boostBodyGlowSpriteSurfaceOffsetMult: number
+    boostBodyGlowSpriteOpacity: number
+    boostBodyGlowSpriteColorBlend: number
     intakeConeDisengageHoldMs: number
     intakeConeViewMargin: number
     intakeConeFadeInRate: number
@@ -78,6 +99,16 @@ type UpdateBoostDraftArgs = {
   deltaSeconds: number
 }
 
+type UpdateBoostBodyGlowArgs = {
+  visual: SnakeVisual
+  player: PlayerSnapshot
+  snakeLengthUnits: number
+  curvePoints: THREE.Vector3[] | null
+  snakeRadius: number
+  snakeOpacity: number
+  deltaSeconds: number
+}
+
 export const createSnakePlayerVisualRuntime = (deps: SnakePlayerVisualRuntimeDeps) => {
   const {
     webglShaderHooksEnabled,
@@ -92,6 +123,7 @@ export const createSnakePlayerVisualRuntime = (deps: SnakePlayerVisualRuntimeDep
     pupilMaterial,
     boostDraftGeometry,
     boostDraftTexture,
+    boostBodyGlowTexture,
     intakeConeGeometry,
     intakeConeTexture,
     createNameplateTexture,
@@ -104,6 +136,9 @@ export const createSnakePlayerVisualRuntime = (deps: SnakePlayerVisualRuntimeDep
   const intakeConeClipTemp = new THREE.Vector3()
   const intakeConeOrientationMatrix = new THREE.Matrix4()
   const tempQuat = new THREE.Quaternion()
+  const boostBodyGlowTintTemp = new THREE.Color()
+  const boostBodyGlowNormalTemp = new THREE.Vector3()
+  const boostBodyGlowWhite = new THREE.Color('#ffffff')
 
   const createBoostDraftMaterial = () => {
     const materialParams: THREE.MeshBasicMaterialParameters = {
@@ -183,6 +218,10 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
     const tubeGeometry = new THREE.BufferGeometry()
     const tube = new THREE.Mesh(tubeGeometry, tubeMaterial)
     group.add(tube)
+
+    const boostBodyGlowGroup = new THREE.Group()
+    boostBodyGlowGroup.visible = false
+    group.add(boostBodyGlowGroup)
 
     const selfOverlapGlowMaterial = new THREE.MeshBasicMaterial({
       color: primaryColor,
@@ -314,6 +353,12 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
       boostDraftMaterial,
       boostDraftPhase: 0,
       boostDraftIntensity: 0,
+      boostBodyGlowGroup,
+      boostBodyGlowSprites: [],
+      boostBodyGlowPhase: 0,
+      boostBodyGlowIntensity: 0,
+      boostBodyGlowWaveCount: 1,
+      boostBodyGlowMode: 'off',
       intakeCone,
       intakeConeMaterial,
       intakeConeIntensity: 0,
@@ -450,10 +495,183 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
     }
   }
 
+  const createBoostBodyGlowSprite = () => {
+    const material = new THREE.SpriteMaterial({
+      map: boostBodyGlowTexture ?? undefined,
+      color: '#ffffff',
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      depthTest: true,
+      blending: THREE.AdditiveBlending,
+      toneMapped: false,
+    })
+    const sprite = new THREE.Sprite(material)
+    sprite.visible = false
+    sprite.renderOrder = 1.6
+    return sprite
+  }
+
+  const ensureBoostBodyGlowSpriteCount = (visual: SnakeVisual, count: number) => {
+    const target = Math.max(0, Math.floor(count))
+    while (visual.boostBodyGlowSprites.length < target) {
+      const sprite = createBoostBodyGlowSprite()
+      visual.boostBodyGlowSprites.push(sprite)
+      visual.boostBodyGlowGroup.add(sprite)
+    }
+    while (visual.boostBodyGlowSprites.length > target) {
+      const sprite = visual.boostBodyGlowSprites.pop()
+      if (!sprite) continue
+      visual.boostBodyGlowGroup.remove(sprite)
+      sprite.material.dispose()
+    }
+  }
+
+  const repeatWaveDistance = (value: number) => {
+    const wrapped = ((value % 1) + 1) % 1
+    return Math.abs(wrapped - 0.5)
+  }
+
+  const updateBoostBodyGlow = ({
+    visual,
+    player,
+    snakeLengthUnits,
+    curvePoints,
+    snakeRadius,
+    snakeOpacity,
+    deltaSeconds,
+  }: UpdateBoostBodyGlowArgs) => {
+    const hasVisibleBody = visual.group.visible && visual.tube.visible
+    const hasCurve = !!curvePoints && curvePoints.length > 1
+    const active =
+      hasVisibleBody &&
+      hasCurve &&
+      player.alive &&
+      player.isBoosting &&
+      snakeOpacity > constants.boostBodyGlowMinActiveOpacity &&
+      snakeLengthUnits > 0
+    const safeDelta = Math.max(0, deltaSeconds)
+    visual.boostBodyGlowIntensity = smoothValue(
+      visual.boostBodyGlowIntensity,
+      active ? 1 : 0,
+      safeDelta,
+      constants.boostBodyGlowFadeInRate,
+      constants.boostBodyGlowFadeOutRate,
+    )
+    const intensity = clamp(visual.boostBodyGlowIntensity, 0, 1)
+    const targetWaveCount = clamp(
+      Math.floor(Math.max(0, snakeLengthUnits) / Math.max(1, constants.boostBodyGlowNodesPerWave)),
+      constants.boostBodyGlowMinWaveCount,
+      constants.boostBodyGlowMaxWaveCount,
+    )
+    visual.boostBodyGlowWaveCount = smoothValue(
+      visual.boostBodyGlowWaveCount,
+      targetWaveCount,
+      safeDelta,
+      constants.boostBodyGlowWaveCountRate,
+      constants.boostBodyGlowWaveCountRate,
+    )
+    const waveCount = clamp(
+      visual.boostBodyGlowWaveCount,
+      constants.boostBodyGlowMinWaveCount,
+      constants.boostBodyGlowMaxWaveCount,
+    )
+    if (intensity > constants.boostBodyGlowMinActiveOpacity) {
+      visual.boostBodyGlowPhase =
+        (visual.boostBodyGlowPhase + safeDelta * constants.boostBodyGlowTravelSpeed) % 1
+    } else {
+      visual.boostBodyGlowPhase = 0
+    }
+
+    const intensityWithOpacity = intensity * snakeOpacity
+    if (intensityWithOpacity <= constants.boostBodyGlowMinActiveOpacity || !curvePoints) {
+      visual.boostBodyGlowGroup.visible = false
+      visual.boostBodyGlowMode = 'off'
+      for (const sprite of visual.boostBodyGlowSprites) {
+        sprite.visible = false
+        sprite.material.opacity = 0
+      }
+      return
+    }
+
+    const targetSpriteCount = clamp(
+      Math.round(Math.max(
+        constants.boostBodyGlowSpriteMinCount,
+        snakeLengthUnits * constants.boostBodyGlowSpritesPerNode,
+        waveCount * 42,
+      )),
+      constants.boostBodyGlowSpriteMinCount,
+      constants.boostBodyGlowSpriteMaxCount,
+    )
+    ensureBoostBodyGlowSpriteCount(visual, targetSpriteCount)
+    visual.boostBodyGlowMode = 'sprite-wave'
+    visual.boostBodyGlowGroup.visible = true
+    boostBodyGlowTintTemp.set(visual.color).lerp(
+      boostBodyGlowWhite,
+      clamp(constants.boostBodyGlowSpriteColorBlend, 0, 1),
+    )
+    const safeRadius = Math.max(0.001, snakeRadius)
+    const spriteSurfaceOffset = safeRadius * constants.boostBodyGlowSpriteSurfaceOffsetMult
+    const spriteBaseScale = safeRadius * constants.boostBodyGlowSpriteScaleMult
+    for (let i = 0; i < visual.boostBodyGlowSprites.length; i += 1) {
+      const sprite = visual.boostBodyGlowSprites[i]
+      const progress =
+        visual.boostBodyGlowSprites.length <= 1
+          ? 0
+          : i / (visual.boostBodyGlowSprites.length - 1)
+      const waveCoord = (progress - visual.boostBodyGlowPhase) * waveCount
+      const waveDistance = repeatWaveDistance(waveCoord)
+      const waveSpan = Math.max(0.001, constants.boostBodyGlowWaveHalfWidth)
+      const peakSpan = Math.max(0.001, waveSpan * clamp(constants.boostBodyGlowWavePeakRatio, 0.1, 1))
+      const spanNorm = waveDistance / waveSpan
+      const peakNorm = waveDistance / peakSpan
+      const broadMask = Math.exp(
+        -Math.pow(spanNorm, 2) * Math.max(0.1, constants.boostBodyGlowWaveFalloffPower),
+      )
+      const peakMask = Math.exp(-Math.pow(peakNorm, 2) * 2.2)
+      const waveMask = clamp(
+        broadMask * (1 + peakMask * Math.max(0, constants.boostBodyGlowWavePeakBoost)),
+        clamp(constants.boostBodyGlowWaveBaseline, 0, 0.3),
+        1,
+      )
+      const alpha =
+        intensityWithOpacity *
+        constants.boostBodyGlowSpriteOpacity *
+        waveMask
+      if (alpha <= constants.boostBodyGlowMinActiveOpacity) {
+        sprite.visible = false
+        sprite.material.opacity = 0
+        continue
+      }
+      const pointIndex = clamp(
+        Math.round(progress * (curvePoints.length - 1)),
+        0,
+        curvePoints.length - 1,
+      )
+      const point = curvePoints[pointIndex]
+      if (!point) {
+        sprite.visible = false
+        sprite.material.opacity = 0
+        continue
+      }
+      boostBodyGlowNormalTemp.copy(point).normalize()
+      // Keep sprite centers slightly inside the body so depth testing preserves snake-over-glow layering.
+      sprite.position
+        .copy(point)
+        .addScaledVector(boostBodyGlowNormalTemp, spriteSurfaceOffset)
+      const scale = spriteBaseScale * (0.88 + waveMask * 0.28)
+      sprite.scale.setScalar(scale)
+      sprite.material.color.copy(boostBodyGlowTintTemp)
+      sprite.material.opacity = alpha
+      sprite.visible = true
+    }
+  }
+
   return {
     createBoostDraftMaterial,
     createSnakeVisual,
     updateIntakeCone,
     updateBoostDraft,
+    updateBoostBodyGlow,
   }
 }

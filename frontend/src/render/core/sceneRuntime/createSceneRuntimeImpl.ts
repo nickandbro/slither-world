@@ -81,6 +81,7 @@ import {
   createPelletGlowTexture,
   createPelletInnerGlowTexture,
   createPelletShadowTexture,
+  createSnakeBoostGlowSpriteTexture,
 } from './utils/texture'
 import * as SCENE_CONSTANTS from './constants'
 import type {
@@ -179,6 +180,7 @@ export const createScene = async (
   const pupilMaterial = new THREE.MeshStandardMaterial({ color: '#1b1b1b', roughness: 0.4 })
   const boostDraftGeometry = new THREE.SphereGeometry(1, 24, 16, 0, Math.PI * 2, 0, Math.PI * 0.5)
   const boostDraftTexture = createBoostDraftTexture()
+  const boostBodyGlowTexture = createSnakeBoostGlowSpriteTexture()
   const intakeConeGeometry = new THREE.PlaneGeometry(1, 1, 1, 1)
   intakeConeGeometry.translate(0, 0.5, 0)
   const intakeConeTexture = createIntakeConeTexture()
@@ -344,6 +346,7 @@ export const createScene = async (
         : null,
     getDayNightInfo,
     boostDraftMinActiveOpacity: SCENE_CONSTANTS.BOOST_DRAFT_MIN_ACTIVE_OPACITY,
+    boostBodyGlowMinActiveOpacity: SCENE_CONSTANTS.BOOST_BODY_GLOW_MIN_ACTIVE_OPACITY,
   })
   const resetSnakeTransientState = (id: string) => {
     lastHeadPositions.delete(id)
@@ -385,6 +388,7 @@ export const createScene = async (
     createSnakeVisual,
     updateIntakeCone,
     updateBoostDraft,
+    updateBoostBodyGlow,
   } = createSnakePlayerVisualRuntime({
     webglShaderHooksEnabled,
     world,
@@ -398,13 +402,58 @@ export const createScene = async (
     pupilMaterial,
     boostDraftGeometry,
     boostDraftTexture,
+    boostBodyGlowTexture,
     intakeConeGeometry,
     intakeConeTexture,
     createNameplateTexture,
     nameplateWorldWidth: SCENE_CONSTANTS.NAMEPLATE_WORLD_WIDTH,
     nameplateWorldAspect: SCENE_CONSTANTS.NAMEPLATE_WORLD_ASPECT,
     headRadius: SCENE_CONSTANTS.HEAD_RADIUS,
-    constants: { boostDraftEdgeFadeStart: SCENE_CONSTANTS.BOOST_DRAFT_EDGE_FADE_START, boostDraftEdgeFadeEnd: SCENE_CONSTANTS.BOOST_DRAFT_EDGE_FADE_END, boostDraftColorA: SCENE_CONSTANTS.BOOST_DRAFT_COLOR_A, boostDraftColorB: SCENE_CONSTANTS.BOOST_DRAFT_COLOR_B, boostDraftColorShiftSpeed: SCENE_CONSTANTS.BOOST_DRAFT_COLOR_SHIFT_SPEED, boostDraftPulseSpeed: SCENE_CONSTANTS.BOOST_DRAFT_PULSE_SPEED, boostDraftOpacity: SCENE_CONSTANTS.BOOST_DRAFT_OPACITY, boostDraftFadeInRate: SCENE_CONSTANTS.BOOST_DRAFT_FADE_IN_RATE, boostDraftFadeOutRate: SCENE_CONSTANTS.BOOST_DRAFT_FADE_OUT_RATE, boostDraftMinActiveOpacity: SCENE_CONSTANTS.BOOST_DRAFT_MIN_ACTIVE_OPACITY, boostDraftBaseRadius: SCENE_CONSTANTS.BOOST_DRAFT_BASE_RADIUS, boostDraftFrontOffset: SCENE_CONSTANTS.BOOST_DRAFT_FRONT_OFFSET, boostDraftLift: SCENE_CONSTANTS.BOOST_DRAFT_LIFT, boostDraftLocalForwardAxis: SCENE_CONSTANTS.BOOST_DRAFT_LOCAL_FORWARD_AXIS, intakeConeDisengageHoldMs: SCENE_CONSTANTS.INTAKE_CONE_DISENGAGE_HOLD_MS, intakeConeViewMargin: SCENE_CONSTANTS.INTAKE_CONE_VIEW_MARGIN, intakeConeFadeInRate: SCENE_CONSTANTS.INTAKE_CONE_FADE_IN_RATE, intakeConeFadeOutRate: SCENE_CONSTANTS.INTAKE_CONE_FADE_OUT_RATE, intakeConeMaxOpacity: SCENE_CONSTANTS.INTAKE_CONE_MAX_OPACITY, intakeConeBaseLength: SCENE_CONSTANTS.INTAKE_CONE_BASE_LENGTH, intakeConeBaseWidth: SCENE_CONSTANTS.INTAKE_CONE_BASE_WIDTH, intakeConeLift: SCENE_CONSTANTS.INTAKE_CONE_LIFT, deathVisibilityCutoff: SCENE_CONSTANTS.DEATH_VISIBILITY_CUTOFF },
+    constants: {
+      boostDraftEdgeFadeStart: SCENE_CONSTANTS.BOOST_DRAFT_EDGE_FADE_START,
+      boostDraftEdgeFadeEnd: SCENE_CONSTANTS.BOOST_DRAFT_EDGE_FADE_END,
+      boostDraftColorA: SCENE_CONSTANTS.BOOST_DRAFT_COLOR_A,
+      boostDraftColorB: SCENE_CONSTANTS.BOOST_DRAFT_COLOR_B,
+      boostDraftColorShiftSpeed: SCENE_CONSTANTS.BOOST_DRAFT_COLOR_SHIFT_SPEED,
+      boostDraftPulseSpeed: SCENE_CONSTANTS.BOOST_DRAFT_PULSE_SPEED,
+      boostDraftOpacity: SCENE_CONSTANTS.BOOST_DRAFT_OPACITY,
+      boostDraftFadeInRate: SCENE_CONSTANTS.BOOST_DRAFT_FADE_IN_RATE,
+      boostDraftFadeOutRate: SCENE_CONSTANTS.BOOST_DRAFT_FADE_OUT_RATE,
+      boostDraftMinActiveOpacity: SCENE_CONSTANTS.BOOST_DRAFT_MIN_ACTIVE_OPACITY,
+      boostDraftBaseRadius: SCENE_CONSTANTS.BOOST_DRAFT_BASE_RADIUS,
+      boostDraftFrontOffset: SCENE_CONSTANTS.BOOST_DRAFT_FRONT_OFFSET,
+      boostDraftLift: SCENE_CONSTANTS.BOOST_DRAFT_LIFT,
+      boostDraftLocalForwardAxis: SCENE_CONSTANTS.BOOST_DRAFT_LOCAL_FORWARD_AXIS,
+      boostBodyGlowFadeInRate: SCENE_CONSTANTS.BOOST_BODY_GLOW_FADE_IN_RATE,
+      boostBodyGlowFadeOutRate: SCENE_CONSTANTS.BOOST_BODY_GLOW_FADE_OUT_RATE,
+      boostBodyGlowMinActiveOpacity: SCENE_CONSTANTS.BOOST_BODY_GLOW_MIN_ACTIVE_OPACITY,
+      boostBodyGlowTravelSpeed: SCENE_CONSTANTS.BOOST_BODY_GLOW_TRAVEL_SPEED,
+      boostBodyGlowNodesPerWave: SCENE_CONSTANTS.BOOST_BODY_GLOW_NODES_PER_WAVE,
+      boostBodyGlowMinWaveCount: SCENE_CONSTANTS.BOOST_BODY_GLOW_MIN_WAVE_COUNT,
+      boostBodyGlowMaxWaveCount: SCENE_CONSTANTS.BOOST_BODY_GLOW_MAX_WAVE_COUNT,
+      boostBodyGlowWaveCountRate: SCENE_CONSTANTS.BOOST_BODY_GLOW_WAVE_COUNT_RATE,
+      boostBodyGlowWaveHalfWidth: SCENE_CONSTANTS.BOOST_BODY_GLOW_WAVE_HALF_WIDTH,
+      boostBodyGlowWaveFalloffPower: SCENE_CONSTANTS.BOOST_BODY_GLOW_WAVE_FALLOFF_POWER,
+      boostBodyGlowWavePeakRatio: SCENE_CONSTANTS.BOOST_BODY_GLOW_WAVE_PEAK_RATIO,
+      boostBodyGlowWavePeakBoost: SCENE_CONSTANTS.BOOST_BODY_GLOW_WAVE_PEAK_BOOST,
+      boostBodyGlowWaveBaseline: SCENE_CONSTANTS.BOOST_BODY_GLOW_WAVE_BASELINE,
+      boostBodyGlowSpriteMinCount: SCENE_CONSTANTS.BOOST_BODY_GLOW_SPRITE_MIN_COUNT,
+      boostBodyGlowSpriteMaxCount: SCENE_CONSTANTS.BOOST_BODY_GLOW_SPRITE_MAX_COUNT,
+      boostBodyGlowSpritesPerNode: SCENE_CONSTANTS.BOOST_BODY_GLOW_SPRITES_PER_NODE,
+      boostBodyGlowSpriteScaleMult: SCENE_CONSTANTS.BOOST_BODY_GLOW_SPRITE_SCALE_MULT,
+      boostBodyGlowSpriteSurfaceOffsetMult: SCENE_CONSTANTS.BOOST_BODY_GLOW_SPRITE_SURFACE_OFFSET_MULT,
+      boostBodyGlowSpriteOpacity: SCENE_CONSTANTS.BOOST_BODY_GLOW_SPRITE_OPACITY,
+      boostBodyGlowSpriteColorBlend: SCENE_CONSTANTS.BOOST_BODY_GLOW_SPRITE_COLOR_BLEND,
+      intakeConeDisengageHoldMs: SCENE_CONSTANTS.INTAKE_CONE_DISENGAGE_HOLD_MS,
+      intakeConeViewMargin: SCENE_CONSTANTS.INTAKE_CONE_VIEW_MARGIN,
+      intakeConeFadeInRate: SCENE_CONSTANTS.INTAKE_CONE_FADE_IN_RATE,
+      intakeConeFadeOutRate: SCENE_CONSTANTS.INTAKE_CONE_FADE_OUT_RATE,
+      intakeConeMaxOpacity: SCENE_CONSTANTS.INTAKE_CONE_MAX_OPACITY,
+      intakeConeBaseLength: SCENE_CONSTANTS.INTAKE_CONE_BASE_LENGTH,
+      intakeConeBaseWidth: SCENE_CONSTANTS.INTAKE_CONE_BASE_WIDTH,
+      intakeConeLift: SCENE_CONSTANTS.INTAKE_CONE_LIFT,
+      deathVisibilityCutoff: SCENE_CONSTANTS.DEATH_VISIBILITY_CUTOFF,
+    },
   })
   const getAnalyticTerrainRadius = (
     normal: THREE.Vector3,
@@ -659,6 +708,7 @@ export const createScene = async (
     storeTailFrameStateForPlayer,
     updateSnakeTailCap,
     updateBoostDraft,
+    updateBoostBodyGlow,
     updateIntakeCone,
   })
   const { removeSnake, updateSnakes } = createSnakeCollectionRuntime({
@@ -877,6 +927,7 @@ export const createScene = async (
     pupilMaterial.dispose()
 	    boostDraftGeometry.dispose()
 	    boostDraftTexture?.dispose()
+    boostBodyGlowTexture?.dispose()
     intakeConeGeometry.dispose()
     intakeConeTexture?.dispose()
     menuPreviewOverlay.dispose()

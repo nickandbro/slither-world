@@ -12,6 +12,15 @@ type SnakeBoostDraftVisual = {
   boostDraftIntensity: number
 }
 
+type SnakeBoostBodyGlowVisual = {
+  boostBodyGlowGroup: THREE.Group
+  boostBodyGlowSprites: THREE.Sprite[]
+  boostBodyGlowPhase: number
+  boostBodyGlowIntensity: number
+  boostBodyGlowWaveCount: number
+  boostBodyGlowMode: 'off' | 'sprite-wave'
+}
+
 type SnakeIntakeConeVisual = {
   intakeCone: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>
   intakeConeMaterial: THREE.MeshBasicMaterial
@@ -63,6 +72,18 @@ export const hideBoostDraft = (visual: SnakeBoostDraftVisual) => {
   }
   if (userData.opacityUniform) {
     userData.opacityUniform.value = 0
+  }
+}
+
+export const hideBoostBodyGlow = (visual: SnakeBoostBodyGlowVisual) => {
+  visual.boostBodyGlowPhase = 0
+  visual.boostBodyGlowIntensity = 0
+  visual.boostBodyGlowWaveCount = 1
+  visual.boostBodyGlowMode = 'off'
+  visual.boostBodyGlowGroup.visible = false
+  for (const sprite of visual.boostBodyGlowSprites) {
+    sprite.visible = false
+    sprite.material.opacity = 0
   }
 }
 

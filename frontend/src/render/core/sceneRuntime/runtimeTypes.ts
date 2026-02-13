@@ -19,6 +19,12 @@ export type SnakeVisual = {
   boostDraftMaterial: THREE.MeshBasicMaterial
   boostDraftPhase: number
   boostDraftIntensity: number
+  boostBodyGlowGroup: THREE.Group
+  boostBodyGlowSprites: THREE.Sprite[]
+  boostBodyGlowPhase: number
+  boostBodyGlowIntensity: number
+  boostBodyGlowWaveCount: number
+  boostBodyGlowMode: 'off' | 'sprite-wave'
   intakeCone: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>
   intakeConeMaterial: THREE.MeshBasicMaterial
   intakeConeIntensity: number

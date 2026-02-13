@@ -19,6 +19,7 @@ type RegisterRuntimeDebugDeps = {
   getSnakeGroundingInfo: RegisterSceneDebugApiParams['getSnakeGroundingInfo']
   getDayNightInfo: RegisterSceneDebugApiParams['getDayNightInfo']
   boostDraftMinActiveOpacity: RegisterSceneDebugApiParams['boostDraftMinActiveOpacity']
+  boostBodyGlowMinActiveOpacity: RegisterSceneDebugApiParams['boostBodyGlowMinActiveOpacity']
 }
 
 export const registerRuntimeDebugApi = (deps: RegisterRuntimeDebugDeps): SceneDebugApi | null =>
@@ -33,4 +34,5 @@ export const registerRuntimeDebugApi = (deps: RegisterRuntimeDebugDeps): SceneDe
     getSnakeGroundingInfo: deps.getSnakeGroundingInfo,
     getDayNightInfo: deps.getDayNightInfo,
     boostDraftMinActiveOpacity: deps.boostDraftMinActiveOpacity,
+    boostBodyGlowMinActiveOpacity: deps.boostBodyGlowMinActiveOpacity,
   })
