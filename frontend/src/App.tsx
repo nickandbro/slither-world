@@ -60,10 +60,6 @@ import {
   type MenuPhase,
 } from './app/core/menuCamera'
 import { createInitialBoostFxState } from './app/core/boostFx'
-import {
-  createInitialScoreRadialState,
-  type ScoreRadialVisualState,
-} from './app/core/scoreRadial'
 import { ControlPanel } from './app/components/ControlPanel'
 import { MenuOverlay } from './app/components/MenuOverlay'
 import { SkinBuilderOverlay } from './app/components/SkinBuilderOverlay'
@@ -271,7 +267,6 @@ export default function App() {
   const lastTailEndSampleRef = useRef<TailEndSample | null>(null)
   const lastHeadSampleRef = useRef<Point | null>(null)
   const boostFxStateRef = useRef(createInitialBoostFxState())
-  const scoreRadialStateRef = useRef<ScoreRadialVisualState>(createInitialScoreRadialState())
 
   const [gameState, setGameState] = useState<GameStateSnapshot | null>(null)
   const [environment, setEnvironment] = useState<Environment | null>(null)
@@ -620,7 +615,6 @@ export default function App() {
     playerIdByNetIdRef,
     pelletMapRef,
     pelletsArrayRef,
-    scoreRadialStateRef,
     netDebugInfoRef,
     netTuningRevisionRef,
     motionDebugInfoRef,
@@ -788,7 +782,6 @@ export default function App() {
     builderPatternRef,
     builderPaletteColorRef,
     joinSkinColorsRef,
-    scoreRadialStateRef,
     menuDebugInfoRef,
     netDebugEnabled,
     netDebugInfoRef,

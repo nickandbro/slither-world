@@ -5,8 +5,6 @@ type DebugSnakeVisual = {
   tube: { material: { opacity: number } }
   head: { position: THREE.Vector3 }
   group: { visible: boolean }
-  boostDraft: { visible: boolean }
-  boostDraftMaterial: { opacity: number }
   boostBodyGlowIntensity: number
   boostBodyGlowWaveCount: number
   boostBodyGlowMode: 'off' | 'sprite-wave'
@@ -110,7 +108,6 @@ export type RegisterSceneDebugApiParams = {
   getEnvironmentCullInfo: () => EnvironmentCullInfo
   getSnakeGroundingInfo: () => SnakeGroundingInfoSnapshot | null
   getDayNightInfo: () => DayNightInfo
-  boostDraftMinActiveOpacity: number
   boostBodyGlowMinActiveOpacity: number
 }
 
@@ -124,7 +121,6 @@ export const registerSceneDebugApi = ({
   getEnvironmentCullInfo,
   getSnakeGroundingInfo,
   getDayNightInfo,
-  boostDraftMinActiveOpacity,
   boostBodyGlowMinActiveOpacity,
 }: RegisterSceneDebugApiParams): SceneDebugApi | null => {
   if (!enabled || typeof window === 'undefined') return null
@@ -184,14 +180,10 @@ export const registerSceneDebugApi = ({
     getBoostDraftInfo: (id: string) => {
       const visual = snakes.get(id)
       if (!visual) return null
-      const visible =
-        visual.boostDraft.visible &&
-        visual.boostDraftMaterial.opacity > boostDraftMinActiveOpacity
-      const opacity = visual.boostDraftMaterial.opacity
       return {
-        visible,
-        opacity,
-        planeCount: 1,
+        visible: false,
+        opacity: 0,
+        planeCount: 0,
       }
     },
     getBoostBodyGlowInfo: (id: string) => {

@@ -1,7 +1,5 @@
 import * as THREE from 'three'
 import {
-  BOOST_DRAFT_TEXTURE_HEIGHT,
-  BOOST_DRAFT_TEXTURE_WIDTH,
   INTAKE_CONE_TEXTURE_HEIGHT,
   INTAKE_CONE_TEXTURE_WIDTH,
   NAMEPLATE_BG_COLOR,
@@ -119,46 +117,6 @@ export const createSnakeBoostGlowSpriteTexture = () => {
     { offset: 0.8, color: 'rgba(255,255,255,0.14)' },
     { offset: 1, color: 'rgba(255,255,255,0)' },
   ])
-}
-
-export const createBoostDraftTexture = () => {
-  const canvas = document.createElement('canvas')
-  canvas.width = BOOST_DRAFT_TEXTURE_WIDTH
-  canvas.height = BOOST_DRAFT_TEXTURE_HEIGHT
-  const ctx = canvas.getContext('2d')
-  if (!ctx) return null
-
-  const width = canvas.width
-  const height = canvas.height
-  const imageData = ctx.createImageData(width, height)
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const u = width > 1 ? x / (width - 1) : 0
-      const v = height > 1 ? y / (height - 1) : 0
-      // Keep U-frequency integral so u=0 and u=1 match and do not create a seam.
-      const swirlA = Math.sin((u * 8 + v * 4) * Math.PI * 2) * 0.5 + 0.5
-      const swirlB = Math.sin((u * 12 - v * 3) * Math.PI * 2) * 0.5 + 0.5
-      const noise = 0.84 + 0.16 * (swirlA * 0.6 + swirlB * 0.4)
-      const equatorFade = 1 - smoothstep(0.72, 1, v)
-      const alpha = clamp(noise * equatorFade, 0, 1)
-      const alphaByte = Math.round(alpha * 255)
-      const offset = (y * width + x) * 4
-      imageData.data[offset] = 255
-      imageData.data[offset + 1] = 255
-      imageData.data[offset + 2] = 255
-      imageData.data[offset + 3] = alphaByte
-    }
-  }
-
-  ctx.putImageData(imageData, 0, 0)
-  const texture = new THREE.CanvasTexture(canvas)
-  texture.wrapS = THREE.ClampToEdgeWrapping
-  texture.wrapT = THREE.ClampToEdgeWrapping
-  texture.magFilter = THREE.LinearFilter
-  texture.minFilter = THREE.LinearFilter
-  texture.colorSpace = THREE.NoColorSpace
-  texture.needsUpdate = true
-  return texture
 }
 
 export const createIntakeConeTexture = () => {

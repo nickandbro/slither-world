@@ -1,17 +1,6 @@
 import * as THREE from 'three'
 import { paintNameplateTexture } from '../utils/texture'
 
-export type BoostDraftMaterialUserData = {
-  timeUniform?: { value: number }
-  opacityUniform?: { value: number }
-}
-
-type SnakeBoostDraftVisual = {
-  boostDraft: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>
-  boostDraftMaterial: THREE.MeshBasicMaterial
-  boostDraftIntensity: number
-}
-
 type SnakeBoostBodyGlowVisual = {
   boostBodyGlowGroup: THREE.Group
   boostBodyGlowSprites: THREE.Sprite[]
@@ -60,19 +49,6 @@ export const updateSnakeMaterial = (
     material.needsUpdate = true
   }
   material.depthWrite = !shouldBeTransparent
-}
-
-export const hideBoostDraft = (visual: SnakeBoostDraftVisual) => {
-  visual.boostDraft.visible = false
-  visual.boostDraftMaterial.opacity = 0
-  visual.boostDraftIntensity = 0
-  const userData = visual.boostDraftMaterial.userData as BoostDraftMaterialUserData
-  if (userData.timeUniform) {
-    userData.timeUniform.value = 0
-  }
-  if (userData.opacityUniform) {
-    userData.opacityUniform.value = 0
-  }
 }
 
 export const hideBoostBodyGlow = (visual: SnakeBoostBodyGlowVisual) => {

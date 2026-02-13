@@ -15,10 +15,6 @@ export type SnakeVisual = {
   bowl: THREE.Mesh<THREE.BufferGeometry, THREE.MeshPhysicalMaterial>
   bowlMaterial: THREE.MeshPhysicalMaterial
   bowlCrackUniform: { value: number }
-  boostDraft: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>
-  boostDraftMaterial: THREE.MeshBasicMaterial
-  boostDraftPhase: number
-  boostDraftIntensity: number
   boostBodyGlowGroup: THREE.Group
   boostBodyGlowSprites: THREE.Sprite[]
   boostBodyGlowPhase: number

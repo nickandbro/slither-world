@@ -237,7 +237,6 @@ export const createSceneFrameRuntime = (deps: SceneFrameRuntimeDeps) => {
       }
       hideForDepth(visual.bowl)
       hideForDepth(visual.selfOverlapGlow)
-      hideForDepth(visual.boostDraft)
       hideForDepth(visual.intakeCone)
       hideForDepth(visual.nameplate)
     }

@@ -30,7 +30,6 @@ import {
 } from '@app/core/menuCamera'
 import { formatRendererError } from '@app/core/renderMath'
 import { resetBoostFx, updateBoostFx, type BoostFxState } from '@app/core/boostFx'
-import type { ScoreRadialVisualState } from '@app/core/scoreRadial'
 import {
   updateAdaptiveQuality,
   type AdaptiveQualityState,
@@ -40,7 +39,6 @@ import {
   computeTailEndMetrics,
   digestionMaxProgress,
 } from '@app/orchestration/tailGrowthDebug'
-import { updateScoreRadialController } from '@app/orchestration/scoreRadialController'
 import type {
   LagSpikeCause,
   MotionStabilityDebugInfo,
@@ -136,7 +134,6 @@ type UseRendererSceneRuntimeOptions = {
   builderPatternRef: MutableRefObject<Array<string | null>>
   builderPaletteColorRef: MutableRefObject<string>
   joinSkinColorsRef: MutableRefObject<string[]>
-  scoreRadialStateRef: MutableRefObject<ScoreRadialVisualState>
   menuDebugInfoRef: MutableRefObject<MenuFlowDebugInfo>
   netDebugEnabled: boolean
   netDebugInfoRef: MutableRefObject<NetSmoothingDebugInfo>
@@ -226,7 +223,6 @@ export function useRendererSceneRuntime(options: UseRendererSceneRuntimeOptions)
     builderPatternRef,
     builderPaletteColorRef,
     joinSkinColorsRef,
-    scoreRadialStateRef,
     menuDebugInfoRef,
     netDebugEnabled,
     netDebugInfoRef,
@@ -748,13 +744,6 @@ export function useRendererSceneRuntime(options: UseRendererSceneRuntimeOptions)
               const oxygenPct = localSnapshotPlayer
                 ? clamp(localSnapshotPlayer.oxygen, 0, 1) * 100
                 : null
-              const scoreRadialView = updateScoreRadialController(
-                scoreRadialStateRef.current,
-                localSnapshotPlayer,
-                nowMs,
-                pointerRef.current.boost,
-                !!localSnapshotPlayer && localSnapshotPlayer.alive && localSnapshotPlayer.isBoosting,
-              )
               drawHud(
                 hudCtx,
                 config,
@@ -765,14 +754,6 @@ export function useRendererSceneRuntime(options: UseRendererSceneRuntimeOptions)
                 {
                   pct: oxygenPct,
                   low: oxygenPct !== null && oxygenPct <= 35,
-                  anchor: headScreen,
-                },
-                {
-                  active: scoreRadialView.active,
-                  score: scoreRadialView.score,
-                  intervalPct: scoreRadialView.intervalPct,
-                  blocked: scoreRadialView.blocked,
-                  opacity: scoreRadialView.opacity,
                   anchor: headScreen,
                 },
               )

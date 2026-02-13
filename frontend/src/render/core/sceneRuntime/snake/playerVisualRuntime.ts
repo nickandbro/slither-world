@@ -4,8 +4,6 @@ import type { SnakeVisual } from '../runtimeTypes'
 import { SNAKE_STRIPE_DARK, SNAKE_STRIPE_EDGE, SNAKE_STRIPE_REPEAT } from '../constants'
 import { clamp, smoothValue, smoothstep } from '../utils/math'
 import { resolveSkinSlots } from '../utils/texture'
-import type { BoostDraftMaterialUserData } from './visual'
-import { hideBoostDraft } from './visual'
 
 type SnakePlayerVisualRuntimeDeps = {
   webglShaderHooksEnabled: boolean
@@ -18,8 +16,6 @@ type SnakePlayerVisualRuntimeDeps = {
   pupilGeometry: THREE.SphereGeometry
   eyeMaterial: THREE.MeshStandardMaterial
   pupilMaterial: THREE.MeshStandardMaterial
-  boostDraftGeometry: THREE.SphereGeometry
-  boostDraftTexture: THREE.Texture | null
   boostBodyGlowTexture: THREE.Texture | null
   intakeConeGeometry: THREE.PlaneGeometry
   intakeConeTexture: THREE.Texture | null
@@ -30,20 +26,6 @@ type SnakePlayerVisualRuntimeDeps = {
   nameplateWorldAspect: number
   headRadius: number
   constants: {
-    boostDraftEdgeFadeStart: number
-    boostDraftEdgeFadeEnd: number
-    boostDraftColorA: THREE.Color
-    boostDraftColorB: THREE.Color
-    boostDraftColorShiftSpeed: number
-    boostDraftPulseSpeed: number
-    boostDraftOpacity: number
-    boostDraftFadeInRate: number
-    boostDraftFadeOutRate: number
-    boostDraftMinActiveOpacity: number
-    boostDraftBaseRadius: number
-    boostDraftFrontOffset: number
-    boostDraftLift: number
-    boostDraftLocalForwardAxis: THREE.Vector3
     boostBodyGlowFadeInRate: number
     boostBodyGlowFadeOutRate: number
     boostBodyGlowMinActiveOpacity: number
@@ -90,17 +72,6 @@ type UpdateIntakeConeArgs = {
   nowMs: number
 }
 
-type UpdateBoostDraftArgs = {
-  visual: SnakeVisual
-  player: PlayerSnapshot
-  headPosition: THREE.Vector3
-  headNormal: THREE.Vector3
-  forward: THREE.Vector3
-  headRadius: number
-  snakeOpacity: number
-  deltaSeconds: number
-}
-
 type UpdateBoostBodyGlowArgs = {
   visual: SnakeVisual
   player: PlayerSnapshot
@@ -123,8 +94,6 @@ export const createSnakePlayerVisualRuntime = (deps: SnakePlayerVisualRuntimeDep
     pupilGeometry,
     eyeMaterial,
     pupilMaterial,
-    boostDraftGeometry,
-    boostDraftTexture,
     boostBodyGlowTexture,
     intakeConeGeometry,
     intakeConeTexture,
@@ -137,69 +106,10 @@ export const createSnakePlayerVisualRuntime = (deps: SnakePlayerVisualRuntimeDep
 
   const intakeConeClipTemp = new THREE.Vector3()
   const intakeConeOrientationMatrix = new THREE.Matrix4()
-  const tempQuat = new THREE.Quaternion()
   const boostBodyGlowTintTemp = new THREE.Color()
   const boostBodyGlowSamplePointTemp = new THREE.Vector3()
   const boostBodyGlowNormalTemp = new THREE.Vector3()
   const boostBodyGlowWhite = new THREE.Color('#ffffff')
-
-  const createBoostDraftMaterial = () => {
-    const materialParams: THREE.MeshBasicMaterialParameters = {
-      color: constants.boostDraftColorA,
-      transparent: true,
-      opacity: 0,
-      side: THREE.FrontSide,
-      blending: THREE.NormalBlending,
-    }
-    if (!webglShaderHooksEnabled && boostDraftTexture) {
-      // CanvasTexture alpha lives in the alpha channel; `alphaMap` samples the green channel.
-      materialParams.map = boostDraftTexture
-    }
-    const material = new THREE.MeshBasicMaterial(materialParams)
-    material.depthWrite = false
-    material.depthTest = true
-    material.alphaTest = 0
-    const materialUserData = material.userData as BoostDraftMaterialUserData
-    if (webglShaderHooksEnabled) {
-      material.onBeforeCompile = (shader) => {
-        const timeUniform = { value: 0 }
-        const opacityUniform = { value: 0 }
-        materialUserData.timeUniform = timeUniform
-        materialUserData.opacityUniform = opacityUniform
-        shader.uniforms.boostDraftTime = timeUniform
-        shader.uniforms.boostDraftOpacity = opacityUniform
-        shader.vertexShader = shader.vertexShader
-          .replace(
-            '#include <common>',
-            '#include <common>\nvarying vec3 vBoostDraftLocalPos;',
-          )
-          .replace(
-            '#include <begin_vertex>',
-            '#include <begin_vertex>\n  vBoostDraftLocalPos = position;',
-          )
-        shader.fragmentShader = shader.fragmentShader
-          .replace(
-            '#include <common>',
-            '#include <common>\nvarying vec3 vBoostDraftLocalPos;\nuniform float boostDraftTime;\nuniform float boostDraftOpacity;',
-          )
-          .replace(
-            '#include <color_fragment>',
-            `#include <color_fragment>
-vec3 boostLocal = normalize(vBoostDraftLocalPos);
-float boostRim = length(boostLocal.xz);
-float boostEdgeFade =
-  1.0 - smoothstep(${constants.boostDraftEdgeFadeStart.toFixed(3)}, ${constants.boostDraftEdgeFadeEnd.toFixed(3)}, boostRim);
-float boostNoiseA = sin((boostLocal.x * 9.5) + (boostLocal.z * 8.2) + boostDraftTime * 3.7) * 0.5 + 0.5;
-float boostNoiseB = sin((boostLocal.z * 11.3) - (boostLocal.x * 7.6) - boostDraftTime * 2.9) * 0.5 + 0.5;
-float boostColorMix = clamp(0.28 + 0.72 * (boostNoiseA * 0.58 + boostNoiseB * 0.42), 0.0, 1.0);
-vec3 boostColor = mix(vec3(0.337, 0.851, 1.0), vec3(1.0), boostColorMix);
-diffuseColor.rgb = boostColor;
-diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
-          )
-      }
-    }
-    return material
-  }
 
   const createSnakeVisual = (
     primaryColor: string,
@@ -301,12 +211,6 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
     group.add(pupilLeft)
     group.add(pupilRight)
 
-    const boostDraftMaterial = createBoostDraftMaterial()
-    const boostDraft = new THREE.Mesh(boostDraftGeometry, boostDraftMaterial)
-    boostDraft.visible = false
-    boostDraft.renderOrder = 2
-    group.add(boostDraft)
-
     const intakeConeMaterial = new THREE.MeshBasicMaterial({
       color: '#d6f5ff',
       map: intakeConeTexture ?? undefined,
@@ -352,10 +256,6 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
       bowl,
       bowlMaterial,
       bowlCrackUniform,
-      boostDraft,
-      boostDraftMaterial,
-      boostDraftPhase: 0,
-      boostDraftIntensity: 0,
       boostBodyGlowGroup,
       boostBodyGlowSprites: [],
       boostBodyGlowPhase: 0,
@@ -434,68 +334,6 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
     visual.intakeCone.scale.set(coneWidth, coneLength, 1)
     visual.intakeConeMaterial.opacity = constants.intakeConeMaxOpacity * snakeOpacity * intensity
     visual.intakeCone.visible = true
-  }
-
-  const updateBoostDraft = ({
-    visual,
-    player,
-    headPosition,
-    headNormal,
-    forward,
-    headRadius,
-    snakeOpacity,
-    deltaSeconds,
-  }: UpdateBoostDraftArgs) => {
-    const active =
-      player.alive &&
-      player.isBoosting &&
-      snakeOpacity > constants.boostDraftMinActiveOpacity
-    const safeDelta = Math.max(0, deltaSeconds)
-    visual.boostDraftPhase =
-      (visual.boostDraftPhase + safeDelta * constants.boostDraftPulseSpeed) % (Math.PI * 2)
-    const targetIntensity = active ? 1 : 0
-    visual.boostDraftIntensity = smoothValue(
-      visual.boostDraftIntensity,
-      targetIntensity,
-      safeDelta,
-      constants.boostDraftFadeInRate,
-      constants.boostDraftFadeOutRate,
-    )
-    const intensity = clamp(visual.boostDraftIntensity, 0, 1)
-    if (intensity <= constants.boostDraftMinActiveOpacity) {
-      hideBoostDraft(visual)
-      return
-    }
-
-    const radius = constants.boostDraftBaseRadius * (headRadius / baseHeadRadius)
-    visual.boostDraft.position
-      .copy(headPosition)
-      .addScaledVector(forward, constants.boostDraftFrontOffset + radius * 0.58)
-      .addScaledVector(headNormal, constants.boostDraftLift)
-    visual.boostDraft.scale.setScalar(radius)
-    tempQuat.setFromUnitVectors(constants.boostDraftLocalForwardAxis, forward)
-    visual.boostDraft.quaternion.copy(tempQuat)
-    visual.boostDraft.visible = true
-
-    const colorT =
-      0.5 +
-      0.5 *
-        Math.sin(
-          visual.boostDraftPhase *
-            (constants.boostDraftColorShiftSpeed / constants.boostDraftPulseSpeed),
-        )
-    visual.boostDraftMaterial.color
-      .copy(constants.boostDraftColorA)
-      .lerp(constants.boostDraftColorB, colorT)
-    const opacity = constants.boostDraftOpacity * snakeOpacity * intensity
-    visual.boostDraftMaterial.opacity = opacity
-    const userData = visual.boostDraftMaterial.userData as BoostDraftMaterialUserData
-    if (userData.timeUniform) {
-      userData.timeUniform.value = visual.boostDraftPhase
-    }
-    if (userData.opacityUniform) {
-      userData.opacityUniform.value = opacity
-    }
   }
 
   const createBoostBodyGlowSprite = () => {
@@ -688,10 +526,8 @@ diffuseColor.a *= boostDraftOpacity * boostEdgeFade;`,
   }
 
   return {
-    createBoostDraftMaterial,
     createSnakeVisual,
     updateIntakeCone,
-    updateBoostDraft,
     updateBoostBodyGlow,
   }
 }

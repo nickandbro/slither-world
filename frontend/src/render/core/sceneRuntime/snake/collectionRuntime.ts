@@ -82,7 +82,6 @@ export const createSnakeCollectionRuntime = (
     visual.eyeRight.material.dispose()
     visual.pupilLeft.material.dispose()
     visual.pupilRight.material.dispose()
-    visual.boostDraftMaterial.dispose()
     for (const sprite of visual.boostBodyGlowSprites) {
       sprite.material.dispose()
     }

@@ -205,8 +205,6 @@ export const createBoostTrailWarmupManager = ({
   scene,
   camera,
   renderer,
-  createBoostDraftMaterial,
-  boostDraftGeometry,
   createBoostTrailMaterial,
   webglShaderHooksEnabled,
 }: {
@@ -214,30 +212,18 @@ export const createBoostTrailWarmupManager = ({
   scene: THREE.Scene
   camera: THREE.PerspectiveCamera
   renderer: { render: (scene: THREE.Scene, camera: THREE.PerspectiveCamera) => unknown }
-  createBoostDraftMaterial: () => THREE.MeshBasicMaterial
-  boostDraftGeometry: THREE.SphereGeometry
   createBoostTrailMaterial: () => THREE.MeshBasicMaterial
   webglShaderHooksEnabled: boolean
 }): BoostTrailWarmupManager => {
   let boostWarmupGroup: THREE.Group | null = null
   let boostWarmupTrailGeometry: THREE.BufferGeometry | null = null
   let boostWarmupTrailMaterial: THREE.MeshBasicMaterial | null = null
-  let boostWarmupDraftMaterial: THREE.MeshBasicMaterial | null = null
 
   const warmOnce = () => {
     if (boostWarmupGroup) return
     boostWarmupGroup = new THREE.Group()
     boostWarmupGroup.visible = true
     world.add(boostWarmupGroup)
-
-    boostWarmupDraftMaterial = createBoostDraftMaterial()
-    boostWarmupDraftMaterial.opacity = 0
-    boostWarmupDraftMaterial.transparent = true
-    const boostWarmupDraftMesh = new THREE.Mesh(boostDraftGeometry, boostWarmupDraftMaterial)
-    boostWarmupDraftMesh.renderOrder = 2
-    boostWarmupDraftMesh.scale.setScalar(0.01)
-    boostWarmupDraftMesh.position.set(0, 0, 0)
-    boostWarmupGroup.add(boostWarmupDraftMesh)
 
     boostWarmupTrailMaterial = createBoostTrailMaterial()
     boostWarmupTrailMaterial.opacity = 0
@@ -284,10 +270,6 @@ export const createBoostTrailWarmupManager = ({
     if (boostWarmupTrailMaterial) {
       boostWarmupTrailMaterial.dispose()
       boostWarmupTrailMaterial = null
-    }
-    if (boostWarmupDraftMaterial) {
-      boostWarmupDraftMaterial.dispose()
-      boostWarmupDraftMaterial = null
     }
   }
 

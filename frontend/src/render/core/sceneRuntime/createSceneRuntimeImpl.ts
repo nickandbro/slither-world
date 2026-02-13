@@ -74,7 +74,6 @@ import {
   smoothstep,
 } from './utils/math'
 import {
-  createBoostDraftTexture,
   createIntakeConeTexture,
   createNameplateTexture,
   createPelletCoreTexture,
@@ -178,8 +177,6 @@ export const createScene = async (
   const pupilGeometry = new THREE.SphereGeometry(SCENE_CONSTANTS.PUPIL_RADIUS, 10, 10)
   const eyeMaterial = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.2 })
   const pupilMaterial = new THREE.MeshStandardMaterial({ color: '#1b1b1b', roughness: 0.4 })
-  const boostDraftGeometry = new THREE.SphereGeometry(1, 24, 16, 0, Math.PI * 2, 0, Math.PI * 0.5)
-  const boostDraftTexture = createBoostDraftTexture()
   const boostBodyGlowTexture = createSnakeBoostGlowSpriteTexture()
   const intakeConeGeometry = new THREE.PlaneGeometry(1, 1, 1, 1)
   intakeConeGeometry.translate(0, 0.5, 0)
@@ -345,7 +342,6 @@ export const createScene = async (
           }
         : null,
     getDayNightInfo,
-    boostDraftMinActiveOpacity: SCENE_CONSTANTS.BOOST_DRAFT_MIN_ACTIVE_OPACITY,
     boostBodyGlowMinActiveOpacity: SCENE_CONSTANTS.BOOST_BODY_GLOW_MIN_ACTIVE_OPACITY,
   })
   const resetSnakeTransientState = (id: string) => {
@@ -384,10 +380,8 @@ export const createScene = async (
   })
   buildEnvironment(null)
   const {
-    createBoostDraftMaterial,
     createSnakeVisual,
     updateIntakeCone,
-    updateBoostDraft,
     updateBoostBodyGlow,
   } = createSnakePlayerVisualRuntime({
     webglShaderHooksEnabled,
@@ -400,8 +394,6 @@ export const createScene = async (
     pupilGeometry,
     eyeMaterial,
     pupilMaterial,
-    boostDraftGeometry,
-    boostDraftTexture,
     boostBodyGlowTexture,
     intakeConeGeometry,
     intakeConeTexture,
@@ -410,20 +402,6 @@ export const createScene = async (
     nameplateWorldAspect: SCENE_CONSTANTS.NAMEPLATE_WORLD_ASPECT,
     headRadius: SCENE_CONSTANTS.HEAD_RADIUS,
     constants: {
-      boostDraftEdgeFadeStart: SCENE_CONSTANTS.BOOST_DRAFT_EDGE_FADE_START,
-      boostDraftEdgeFadeEnd: SCENE_CONSTANTS.BOOST_DRAFT_EDGE_FADE_END,
-      boostDraftColorA: SCENE_CONSTANTS.BOOST_DRAFT_COLOR_A,
-      boostDraftColorB: SCENE_CONSTANTS.BOOST_DRAFT_COLOR_B,
-      boostDraftColorShiftSpeed: SCENE_CONSTANTS.BOOST_DRAFT_COLOR_SHIFT_SPEED,
-      boostDraftPulseSpeed: SCENE_CONSTANTS.BOOST_DRAFT_PULSE_SPEED,
-      boostDraftOpacity: SCENE_CONSTANTS.BOOST_DRAFT_OPACITY,
-      boostDraftFadeInRate: SCENE_CONSTANTS.BOOST_DRAFT_FADE_IN_RATE,
-      boostDraftFadeOutRate: SCENE_CONSTANTS.BOOST_DRAFT_FADE_OUT_RATE,
-      boostDraftMinActiveOpacity: SCENE_CONSTANTS.BOOST_DRAFT_MIN_ACTIVE_OPACITY,
-      boostDraftBaseRadius: SCENE_CONSTANTS.BOOST_DRAFT_BASE_RADIUS,
-      boostDraftFrontOffset: SCENE_CONSTANTS.BOOST_DRAFT_FRONT_OFFSET,
-      boostDraftLift: SCENE_CONSTANTS.BOOST_DRAFT_LIFT,
-      boostDraftLocalForwardAxis: SCENE_CONSTANTS.BOOST_DRAFT_LOCAL_FORWARD_AXIS,
       boostBodyGlowFadeInRate: SCENE_CONSTANTS.BOOST_BODY_GLOW_FADE_IN_RATE,
       boostBodyGlowFadeOutRate: SCENE_CONSTANTS.BOOST_BODY_GLOW_FADE_OUT_RATE,
       boostBodyGlowMinActiveOpacity: SCENE_CONSTANTS.BOOST_BODY_GLOW_MIN_ACTIVE_OPACITY,
@@ -493,8 +471,6 @@ export const createScene = async (
     scene,
     camera,
     renderer,
-    createBoostDraftMaterial,
-    boostDraftGeometry,
     createBoostTrailMaterial: createBoostTrailMaterialInstance,
     webglShaderHooksEnabled,
   })
@@ -707,7 +683,6 @@ export const createScene = async (
     buildTangentBasis,
     storeTailFrameStateForPlayer,
     updateSnakeTailCap,
-    updateBoostDraft,
     updateBoostBodyGlow,
     updateIntakeCone,
   })
@@ -925,8 +900,6 @@ export const createScene = async (
     pupilGeometry.dispose()
     eyeMaterial.dispose()
     pupilMaterial.dispose()
-	    boostDraftGeometry.dispose()
-	    boostDraftTexture?.dispose()
     boostBodyGlowTexture?.dispose()
     intakeConeGeometry.dispose()
     intakeConeTexture?.dispose()

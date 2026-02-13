@@ -7,7 +7,6 @@ import { resolveWebSocketUrl } from '@services/backend'
 import { requestMatchmake } from '@services/matchmake'
 import { MAX_EXTRAPOLATION_MS, MENU_CAMERA_DISTANCE, MENU_CAMERA_VERTICAL_OFFSET, resolveNetTuning } from '@app/core/constants'
 import { MENU_CAMERA, MENU_CAMERA_TARGET } from '@app/core/menuCamera'
-import { resetScoreRadialState } from '@app/core/scoreRadial'
 import { applyPelletsToSnapshotBuffer, rebuildPelletsArray } from '@app/orchestration/connectionHandlers'
 
 export function useSocketConnectionRuntime(options: any): void {
@@ -50,7 +49,6 @@ export function useSocketConnectionRuntime(options: any): void {
     playerIdByNetIdRef,
     pelletMapRef,
     pelletsArrayRef,
-    scoreRadialStateRef,
     netDebugInfoRef,
     netTuningRevisionRef,
     motionDebugInfoRef,
@@ -138,7 +136,6 @@ export function useSocketConnectionRuntime(options: any): void {
       resetDeltaDecoderState()
       pelletMapRef.current = new Map()
       pelletsArrayRef.current = []
-      resetScoreRadialState(scoreRadialStateRef.current)
       netDebugInfoRef.current = {
         lagSpikeActive: false,
         lagSpikeCause: 'none',

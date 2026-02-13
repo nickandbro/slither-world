@@ -9,7 +9,6 @@ import type { DeathState, SnakeVisual } from '../runtimeTypes'
 import type { TailFrameState } from './tailShape'
 import {
   hideBoostBodyGlow,
-  hideBoostDraft,
   hideIntakeCone,
   hideNameplate,
   updateNameplateText,
@@ -142,16 +141,6 @@ type SnakePlayerRuntimeDeps = {
     tubeGeometry: THREE.BufferGeometry,
     tailDirection: THREE.Vector3,
   ) => void
-  updateBoostDraft: (args: {
-    visual: SnakeVisual
-    player: PlayerSnapshot
-    headPosition: THREE.Vector3
-    headNormal: THREE.Vector3
-    forward: THREE.Vector3
-    headRadius: number
-    snakeOpacity: number
-    deltaSeconds: number
-  }) => void
   updateBoostBodyGlow: (args: {
     visual: SnakeVisual
     player: PlayerSnapshot
@@ -214,7 +203,6 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
     buildTangentBasis,
     storeTailFrameStateForPlayer,
     updateSnakeTailCap,
-    updateBoostDraft,
     updateBoostBodyGlow,
     updateIntakeCone,
   } = deps
@@ -310,7 +298,6 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
       visual.pupilLeft.visible = false
       visual.pupilRight.visible = false
       visual.bowl.visible = false
-      hideBoostDraft(visual)
       hideBoostBodyGlow(visual)
       hideIntakeCone(visual)
       hideNameplate(visual)
@@ -543,7 +530,6 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
       visual.pupilLeft.visible = false
       visual.pupilRight.visible = false
       visual.bowl.visible = false
-      hideBoostDraft(visual)
       hideBoostBodyGlow(visual)
       hideIntakeCone(visual)
       hideNameplate(visual)
@@ -569,7 +555,6 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
       visual.pupilLeft.visible = false
       visual.pupilRight.visible = false
       visual.bowl.visible = false
-      hideBoostDraft(visual)
       hideIntakeCone(visual)
       hideNameplate(visual)
       lastHeadPositions.delete(player.id)
@@ -694,16 +679,6 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
         right.set(1, 0, 0)
       }
       right.normalize()
-      updateBoostDraft({
-        visual,
-        player,
-        headPosition,
-        headNormal,
-        forward,
-        headRadius,
-        snakeOpacity: opacity,
-        deltaSeconds,
-      })
       if (player.alive && visual.group.visible) {
         const mouthTarget = pelletMouthTargets.get(player.id) ?? new THREE.Vector3()
         mouthTarget
