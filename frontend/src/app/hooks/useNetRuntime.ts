@@ -7,6 +7,7 @@ import type {
   PredictionDisabledReason,
   PredictionEvent,
   PredictionInfo,
+  PredictionPresentationInfo,
   PredictionReport,
 } from '@game/prediction/types'
 import {
@@ -52,6 +53,15 @@ const NET_EVENT_LOG_LIMIT = 240
 const ARRIVAL_GAP_REENTRY_COOLDOWN_MS = 480
 const PREDICTION_EVENT_LOG_LIMIT = 320
 const PREDICTION_ERROR_WINDOW_SIZE = 240
+const PREDICTION_PRESENTATION_WINDOW_SIZE = 240
+const PREDICTION_DRIFT_HEAD_THRESHOLD_DEG = 3.5
+const PREDICTION_DRIFT_BODY_P95_THRESHOLD_DEG = 5.5
+const PREDICTION_DRIFT_CONSECUTIVE_FRAMES = 3
+const PREDICTION_DRIFT_ALPHA_FLOOR = 0.72
+const PREDICTION_DRIFT_ALPHA_FLOOR_MS = 60
+const PREDICTION_MICRO_REVERSAL_MIN_DEG = 0.35
+const PREDICTION_MICRO_REVERSAL_MAX_DEG = 1.2
+const PREDICTION_MICRO_DEADBAND_DEG = 0.11
 
 const EMPTY_PREDICTION_ERROR = {
   lastDeg: 0,
@@ -70,6 +80,83 @@ const EMPTY_PREDICTION_INFO: PredictionInfo = {
   correctionHardCount: 0,
   lastCorrectionMagnitudeDeg: 0,
   predictionDisabledReason: 'not-ready',
+}
+
+const EMPTY_PREDICTION_PRESENTATION_INFO: PredictionPresentationInfo = {
+  headLagDeg: { ...EMPTY_PREDICTION_ERROR },
+  bodyLagDeg: { ...EMPTY_PREDICTION_ERROR },
+  bodyMicroReversalRate: 0,
+  sampleCount: 0,
+  microSampleCount: 0,
+  reversalCount: 0,
+}
+
+const dotPoint = (a: Point, b: Point): number => a.x * b.x + a.y * b.y + a.z * b.z
+
+const crossPoint = (a: Point, b: Point): Point => ({
+  x: a.y * b.z - a.z * b.y,
+  y: a.z * b.x - a.x * b.z,
+  z: a.x * b.y - a.y * b.x,
+})
+
+const angularDeltaDeg = (a: Point | null, b: Point | null): number => {
+  if (!a || !b) return 0
+  const an = normalize(a)
+  const bn = normalize(b)
+  const dotValue = clamp(dotPoint(an, bn), -1, 1)
+  const radians = Math.acos(dotValue)
+  return Number.isFinite(radians) ? radians * (180 / Math.PI) : 0
+}
+
+const pushWindowSample = (window: number[], value: number, maxSize: number): void => {
+  if (!Number.isFinite(value)) return
+  window.push(Math.max(0, value))
+  if (window.length > maxSize) {
+    window.splice(0, window.length - maxSize)
+  }
+}
+
+const computeBodyLagP95Deg = (displaySnake: Point[] | null, replaySnake: Point[] | null): number => {
+  if (!displaySnake || !replaySnake) return 0
+  const count = Math.min(displaySnake.length, replaySnake.length)
+  if (count <= 1) return 0
+  const lags: number[] = []
+  for (let index = 1; index < count; index += 1) {
+    const lag = angularDeltaDeg(displaySnake[index] ?? null, replaySnake[index] ?? null)
+    if (Number.isFinite(lag)) {
+      lags.push(Math.max(0, lag))
+    }
+  }
+  return lags.length > 0 ? computeP95(lags) : 0
+}
+
+const computeMidBodyForward = (
+  snake: Point[] | null,
+): { forward: Point; normal: Point } | null => {
+  if (!snake || snake.length < 4) return null
+  const tailIndex = snake.length - 1
+  const midIndex = Math.max(1, Math.min(tailIndex - 1, Math.floor(tailIndex / 2)))
+  const prev = normalize(snake[Math.max(0, midIndex - 1)] ?? snake[midIndex]!)
+  const mid = normalize(snake[midIndex]!)
+  const next = normalize(snake[Math.min(tailIndex, midIndex + 1)] ?? snake[midIndex]!)
+  const raw = normalize({
+    x: prev.x - next.x,
+    y: prev.y - next.y,
+    z: prev.z - next.z,
+  })
+  const radial = dotPoint(raw, mid)
+  const tangent = normalize({
+    x: raw.x - mid.x * radial,
+    y: raw.y - mid.y * radial,
+    z: raw.z - mid.z * radial,
+  })
+  const tangentMag = Math.hypot(tangent.x, tangent.y, tangent.z)
+  const normalMag = Math.hypot(mid.x, mid.y, mid.z)
+  if (!(tangentMag > 1e-6) || !(normalMag > 1e-6)) return null
+  return {
+    forward: tangent,
+    normal: mid,
+  }
 }
 
 export type UseNetRuntimeOptions = {
@@ -224,6 +311,20 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
   const predictionLastAliveRef = useRef<boolean>(false)
   const predictionNeedsReconcileCheckRef = useRef<boolean>(false)
   const predictionForceHardNextReconcileRef = useRef<boolean>(false)
+  const predictionPresentationInfoRef = useRef<PredictionPresentationInfo>({
+    ...EMPTY_PREDICTION_PRESENTATION_INFO,
+    headLagDeg: { ...EMPTY_PREDICTION_PRESENTATION_INFO.headLagDeg },
+    bodyLagDeg: { ...EMPTY_PREDICTION_PRESENTATION_INFO.bodyLagDeg },
+  })
+  const predictionHeadLagSamplesRef = useRef<number[]>([])
+  const predictionBodyLagSamplesRef = useRef<number[]>([])
+  const predictionMicroStepCountRef = useRef<number>(0)
+  const predictionMicroReversalCountRef = useRef<number>(0)
+  const predictionLastMidForwardRef = useRef<Point | null>(null)
+  const predictionLastMicroTurnSignRef = useRef<number>(0)
+  const predictionLastMicroStepDegRef = useRef<number>(0)
+  const predictionDriftConsecutiveFramesRef = useRef<number>(0)
+  const predictionAlphaFloorUntilMsRef = useRef<number | null>(null)
 
   const appendNetLagEvent = useCallback(
     (
@@ -388,6 +489,23 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
     predictionEventIdRef.current = 1
   }, [])
 
+  const clearPredictionPresentationMetrics = useCallback(() => {
+    predictionHeadLagSamplesRef.current = []
+    predictionBodyLagSamplesRef.current = []
+    predictionMicroStepCountRef.current = 0
+    predictionMicroReversalCountRef.current = 0
+    predictionLastMidForwardRef.current = null
+    predictionLastMicroTurnSignRef.current = 0
+    predictionLastMicroStepDegRef.current = 0
+    predictionDriftConsecutiveFramesRef.current = 0
+    predictionAlphaFloorUntilMsRef.current = null
+    predictionPresentationInfoRef.current = {
+      ...EMPTY_PREDICTION_PRESENTATION_INFO,
+      headLagDeg: { ...EMPTY_PREDICTION_PRESENTATION_INFO.headLagDeg },
+      bodyLagDeg: { ...EMPTY_PREDICTION_PRESENTATION_INFO.bodyLagDeg },
+    }
+  }, [])
+
   const resetPredictionState = useCallback(() => {
     predictionCommandBufferRef.current.clear()
     predictionLatestInputSeqRef.current = null
@@ -411,7 +529,8 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
       predictionDisabledReason: 'not-ready',
     }
     clearPredictionEvents()
-  }, [clearPredictionEvents])
+    clearPredictionPresentationMetrics()
+  }, [clearPredictionEvents, clearPredictionPresentationMetrics])
 
   useEffect(() => {
     resetPredictionState()
@@ -480,6 +599,85 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
       recentEvents: predictionEventsRef.current.slice(-120).map((event) => ({ ...event })),
     }
   }, [])
+
+  const updatePredictionPresentationMetrics = useCallback(
+    (displaySnake: Point[] | null, replaySnake: Point[] | null) => {
+      const headLagDeg = angularDeltaDeg(displaySnake?.[0] ?? null, replaySnake?.[0] ?? null)
+      const bodyLagDeg = computeBodyLagP95Deg(displaySnake, replaySnake)
+
+      pushWindowSample(
+        predictionHeadLagSamplesRef.current,
+        headLagDeg,
+        PREDICTION_PRESENTATION_WINDOW_SIZE,
+      )
+      pushWindowSample(
+        predictionBodyLagSamplesRef.current,
+        bodyLagDeg,
+        PREDICTION_PRESENTATION_WINDOW_SIZE,
+      )
+
+      const headSamples = predictionHeadLagSamplesRef.current
+      const bodySamples = predictionBodyLagSamplesRef.current
+      const headP95 = computeP95(headSamples)
+      const bodyP95 = computeP95(bodySamples)
+      const headMax = headSamples.reduce((acc, value) => Math.max(acc, value), 0)
+      const bodyMax = bodySamples.reduce((acc, value) => Math.max(acc, value), 0)
+
+      const midBodySample = computeMidBodyForward(displaySnake)
+      const previousMidForward = predictionLastMidForwardRef.current
+      if (midBodySample && previousMidForward) {
+        const stepDeg = angularDeltaDeg(previousMidForward, midBodySample.forward)
+        if (
+          stepDeg >= PREDICTION_MICRO_REVERSAL_MIN_DEG &&
+          stepDeg <= PREDICTION_MICRO_REVERSAL_MAX_DEG
+        ) {
+          predictionMicroStepCountRef.current += 1
+          const turnCross = crossPoint(previousMidForward, midBodySample.forward)
+          const signedTurn = dotPoint(turnCross, midBodySample.normal)
+          const sign = signedTurn > 1e-8 ? 1 : signedTurn < -1e-8 ? -1 : 0
+          const previousSign = predictionLastMicroTurnSignRef.current
+          const previousStepDeg = predictionLastMicroStepDegRef.current
+          const meaningfulCurrentStep = stepDeg >= 0.55
+          const meaningfulPreviousStep = previousStepDeg >= 0.55
+          if (
+            sign !== 0 &&
+            previousSign !== 0 &&
+            sign !== previousSign &&
+            meaningfulCurrentStep &&
+            meaningfulPreviousStep
+          ) {
+            predictionMicroReversalCountRef.current += 1
+          }
+          if (sign !== 0) {
+            predictionLastMicroTurnSignRef.current = sign
+          }
+          predictionLastMicroStepDegRef.current = stepDeg
+        }
+      }
+      predictionLastMidForwardRef.current = midBodySample?.forward ?? null
+
+      const microSampleCount = predictionMicroStepCountRef.current
+      const reversalCount = predictionMicroReversalCountRef.current
+      const bodyMicroReversalRate = reversalCount / Math.max(1, microSampleCount)
+      predictionPresentationInfoRef.current = {
+        headLagDeg: {
+          lastDeg: headLagDeg,
+          p95Deg: headP95,
+          maxDeg: headMax,
+        },
+        bodyLagDeg: {
+          lastDeg: bodyLagDeg,
+          p95Deg: bodyP95,
+          maxDeg: bodyMax,
+        },
+        bodyMicroReversalRate,
+        sampleCount: headSamples.length,
+        microSampleCount,
+        reversalCount,
+      }
+    },
+    [],
+  )
 
   const enqueuePredictedInputCommand = useCallback(
     (axis: Point | null, boost: boolean, sentAtMs: number) => {
@@ -587,9 +785,11 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
       getRafPerfInfo,
       clearRafPerf,
       predictionInfoRef,
+      predictionPresentationInfoRef,
       predictionEventsRef,
       getPredictionReport,
       clearPredictionEvents,
+      clearPredictionPresentationMetrics,
       getLocalPlayerId: () => playerIdRef.current,
       getLocalHeadNormal: () => {
         const snake = localSnakeDisplayRef.current
@@ -640,8 +840,10 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
     netRxWindowBytesRef,
     netTuningOverridesRef,
     netTuningRef,
+    clearPredictionPresentationMetrics,
     predictionEventsRef,
     predictionInfoRef,
+    predictionPresentationInfoRef,
     playerIdRef,
     localSnakeDisplayRef,
     tailGrowthEventsRef,
@@ -1251,6 +1453,11 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
         predictionPhysicsSnakeRef.current = cloneSnake(incomingSnake)
         predictionDisplaySnakeRef.current = cloneSnake(incomingSnake)
         predictionAxisRef.current = deriveLocalAxis(incomingSnake, predictionAxisRef.current)
+        predictionDriftConsecutiveFramesRef.current = 0
+        predictionAlphaFloorUntilMsRef.current = null
+        predictionLastMidForwardRef.current = null
+        predictionLastMicroTurnSignRef.current = 0
+        predictionLastMicroStepDegRef.current = 0
         predictionInfoRef.current = {
           ...predictionInfoRef.current,
           enabled: true,
@@ -1303,7 +1510,7 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
             decision.kind === 'soft' &&
             !forceHard &&
             activeSteering &&
-            decision.magnitudeDeg < 4.5
+            decision.magnitudeDeg < 5.5
           ) {
             decision = {
               kind: 'none',
@@ -1336,7 +1543,7 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
               magnitudeDeg: decision.magnitudeDeg,
             })
           } else if (decision.kind === 'hard') {
-            predictionHardDampenUntilMsRef.current = nowMs + 120
+            predictionHardDampenUntilMsRef.current = nowMs + 80
             predictionSoftStartAtMsRef.current = null
             predictionSoftUntilMsRef.current = null
             predictionSoftDurationMsRef.current = 0
@@ -1357,12 +1564,16 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
       predictionPhysicsSnakeRef.current = cloneSnake(replayed.snake)
 
       const dt = clamp(frameDeltaSeconds, 0, 0.1)
-      // Keep a small baseline presentation blend to smooth tick-boundary micro-jitter while
-      // preserving near-immediate local steering response.
-      let alpha = clamp(1 - Math.exp(-16 * dt), 0.14, 0.5)
+      const tuning = netTuningRef.current
+      const activeSteering = activePredictionInput || pointerRef.current.active
+      let rate = tuning.localSnakeStabilizerRateNormal * (activeSteering ? 2.4 : 1.35)
+      let alphaMin = activeSteering ? 0.48 : 0.28
+      let alphaMax = activeSteering ? 0.86 : 0.68
       const hardUntilMs = predictionHardDampenUntilMsRef.current
       if (hardUntilMs !== null && nowMs < hardUntilMs) {
-        alpha = clamp(1 - Math.exp(-7 * dt), 0.12, 0.4)
+        rate = tuning.localSnakeStabilizerRateSpike * 1.9
+        alphaMin = 0.22
+        alphaMax = 0.62
       } else {
         predictionHardDampenUntilMsRef.current = null
         const softUntilMs = predictionSoftUntilMsRef.current
@@ -1370,7 +1581,11 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
           const remainingMs = softUntilMs - nowMs
           const durationMs = Math.max(1, predictionSoftDurationMsRef.current)
           const progress = clamp(1 - remainingMs / durationMs, 0, 1)
-          alpha = clamp(0.08 + progress * 0.5, 0.08, 0.65)
+          const minRate = tuning.localSnakeStabilizerRateNormal * 1.1
+          const maxRate = tuning.localSnakeStabilizerRateNormal * 2.1
+          rate = minRate + (maxRate - minRate) * progress
+          alphaMin = 0.24
+          alphaMax = 0.78
         } else {
           predictionSoftStartAtMsRef.current = null
           predictionSoftUntilMsRef.current = null
@@ -1378,7 +1593,45 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
         }
       }
 
-      const blendedSnake = blendPredictedSnake(predictionDisplaySnakeRef.current, replayed.snake, alpha)
+      let alpha = clamp(1 - Math.exp(-Math.max(0, rate) * dt), alphaMin, alphaMax)
+
+      const displayBeforeBlend = predictionDisplaySnakeRef.current
+      const headLagBeforeBlend = angularDeltaDeg(displayBeforeBlend?.[0] ?? null, replayed.snake[0] ?? null)
+      const bodyLagBeforeBlend = computeBodyLagP95Deg(displayBeforeBlend, replayed.snake)
+      if (
+        headLagBeforeBlend > PREDICTION_DRIFT_HEAD_THRESHOLD_DEG ||
+        bodyLagBeforeBlend > PREDICTION_DRIFT_BODY_P95_THRESHOLD_DEG
+      ) {
+        predictionDriftConsecutiveFramesRef.current += 1
+      } else {
+        predictionDriftConsecutiveFramesRef.current = 0
+      }
+      if (
+        predictionDriftConsecutiveFramesRef.current >= PREDICTION_DRIFT_CONSECUTIVE_FRAMES
+      ) {
+        predictionAlphaFloorUntilMsRef.current = nowMs + PREDICTION_DRIFT_ALPHA_FLOOR_MS
+        predictionDriftConsecutiveFramesRef.current = 0
+      }
+
+      const alphaFloorUntil = predictionAlphaFloorUntilMsRef.current
+      if (alphaFloorUntil !== null && nowMs < alphaFloorUntil) {
+        alpha = Math.max(alpha, PREDICTION_DRIFT_ALPHA_FLOOR)
+      } else if (alphaFloorUntil !== null) {
+        predictionAlphaFloorUntilMsRef.current = null
+      }
+
+      const blendedSnake = blendPredictedSnake(
+        predictionDisplaySnakeRef.current,
+        replayed.snake,
+        alpha,
+        {
+          baseAlpha: alpha,
+          headResponseBoost: activeSteering ? 0.24 : 0.14,
+          tailDamping: activeSteering ? 0.28 : 0.24,
+          microDeadbandDeg: PREDICTION_MICRO_DEADBAND_DEG,
+        },
+      )
+      updatePredictionPresentationMetrics(blendedSnake, replayed.snake)
       predictionDisplaySnakeRef.current = cloneSnake(blendedSnake)
       predictionAxisRef.current = replayed.axis
       localSnakeDisplayRef.current = cloneSnake(blendedSnake)
@@ -1408,10 +1661,12 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
       lagSpikeCauseRef,
       localSnakeDisplayRef,
       netDebugInfoRef,
+      netTuningRef,
       predictionDebugPerturbation,
       pointerRef,
       pushPredictionErrorSample,
       serverTickMsRef,
+      updatePredictionPresentationMetrics,
     ],
   )
 

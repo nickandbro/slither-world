@@ -1,6 +1,11 @@
 import type { NetTuningOverrides } from '@app/core/constants'
 import type { MenuFlowDebugInfo, MenuPhase } from '@app/core/menuCamera'
-import type { PredictionEvent, PredictionInfo, PredictionReport } from '@game/prediction/types'
+import type {
+  PredictionEvent,
+  PredictionInfo,
+  PredictionPresentationInfo,
+  PredictionReport,
+} from '@game/prediction/types'
 import type { MutableRefObject } from 'react'
 
 export type LagSpikeCause = 'none' | 'stale' | 'seq-gap' | 'arrival-gap'
@@ -209,9 +214,11 @@ export type RegisterAppDebugApiOptions = {
   getRafPerfInfo: () => RafPerfInfo
   clearRafPerf: () => void
   predictionInfoRef: MutableRefObject<PredictionInfo>
+  predictionPresentationInfoRef: MutableRefObject<PredictionPresentationInfo>
   predictionEventsRef: MutableRefObject<PredictionEvent[]>
   getPredictionReport: () => PredictionReport
   clearPredictionEvents: () => void
+  clearPredictionPresentationMetrics: () => void
   getLocalPlayerId: () => string | null
   getLocalHeadNormal: () => { x: number; y: number; z: number } | null
   getLocalHeadForward: () => { x: number; y: number; z: number } | null
@@ -250,7 +257,9 @@ export type AppDebugApi = {
   getRafPerfInfo?: () => RafPerfInfo
   clearRafPerf?: () => void
   getPredictionInfo?: () => PredictionInfo
+  getPredictionPresentationInfo?: () => PredictionPresentationInfo
   getPredictionEvents?: () => PredictionEvent[]
   getPredictionReport?: () => PredictionReport
   clearPredictionEvents?: () => void
+  clearPredictionPresentationMetrics?: () => void
 }

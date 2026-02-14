@@ -43,9 +43,17 @@ export function registerAppDebugApi(options: RegisterAppDebugApiOptions): void {
     options.clearRafPerf()
   }
   rootDebugApi.getPredictionInfo = () => ({ ...options.predictionInfoRef.current })
+  rootDebugApi.getPredictionPresentationInfo = () => ({
+    ...options.predictionPresentationInfoRef.current,
+    headLagDeg: { ...options.predictionPresentationInfoRef.current.headLagDeg },
+    bodyLagDeg: { ...options.predictionPresentationInfoRef.current.bodyLagDeg },
+  })
   rootDebugApi.getPredictionEvents = () => options.predictionEventsRef.current.slice()
   rootDebugApi.getPredictionReport = () => options.getPredictionReport()
   rootDebugApi.clearPredictionEvents = () => {
     options.clearPredictionEvents()
+  }
+  rootDebugApi.clearPredictionPresentationMetrics = () => {
+    options.clearPredictionPresentationMetrics()
   }
 }

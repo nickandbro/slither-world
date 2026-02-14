@@ -35,6 +35,21 @@ export type PredictionErrorStats = {
   maxDeg: number
 }
 
+export type PredictionLagStats = {
+  lastDeg: number
+  p95Deg: number
+  maxDeg: number
+}
+
+export type PredictionPresentationInfo = {
+  headLagDeg: PredictionLagStats
+  bodyLagDeg: PredictionLagStats
+  bodyMicroReversalRate: number
+  sampleCount: number
+  microSampleCount: number
+  reversalCount: number
+}
+
 export type PredictionInfo = {
   enabled: boolean
   latestInputSeq: number | null

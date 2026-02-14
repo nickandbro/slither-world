@@ -14,6 +14,13 @@ export type ReconcileDecision = {
   durationMs: number
 }
 
+export type PredictionBlendContext = {
+  baseAlpha: number
+  headResponseBoost: number
+  tailDamping: number
+  microDeadbandDeg: number
+}
+
 export function decideReconcile(errorDeg: number, forceHard = false): ReconcileDecision {
   const magnitude = Number.isFinite(errorDeg) ? Math.max(0, errorDeg) : 0
   if (forceHard || magnitude > HARD_ERROR_MIN_DEG) {
@@ -31,11 +38,23 @@ export function blendPredictedSnake(
   fromSnake: Point[] | null,
   targetSnake: Point[],
   alpha: number,
+  context?: Partial<PredictionBlendContext>,
 ): Point[] {
-  if (!fromSnake || fromSnake.length === 0 || alpha >= 0.999) {
+  if (!fromSnake || fromSnake.length === 0) {
     return targetSnake.map((node) => normalize({ ...node }))
   }
-  const clampedAlpha = clamp(alpha, 0, 1)
+  const baseAlpha = clamp(context?.baseAlpha ?? alpha, 0, 1)
+  const headResponseBoost = clamp(context?.headResponseBoost ?? 0, -1, 1)
+  const tailDamping = clamp(context?.tailDamping ?? 0, -1, 1)
+  const microDeadbandDeg = Math.max(0, context?.microDeadbandDeg ?? 0)
+  if (
+    baseAlpha >= 0.999 &&
+    Math.abs(headResponseBoost) <= 1e-6 &&
+    Math.abs(tailDamping) <= 1e-6 &&
+    microDeadbandDeg <= 1e-6
+  ) {
+    return targetSnake.map((node) => normalize({ ...node }))
+  }
   const blended: Point[] = []
   const targetLen = targetSnake.length
   const fromLen = fromSnake.length
@@ -43,8 +62,24 @@ export function blendPredictedSnake(
   for (let index = 0; index < targetLen; index += 1) {
     const target = targetSnake[index]!
     const from = index < fromLen ? fromSnake[index]! : target
-    const tailBias = (index / tailIndex) ** 2
-    const nodeAlpha = clamp(clampedAlpha + (1 - clampedAlpha) * tailBias, 0, 1)
+    const fromNorm = normalize(from)
+    const targetNorm = normalize(target)
+    const progress = index / tailIndex
+    const dotValue = clamp(
+      fromNorm.x * targetNorm.x + fromNorm.y * targetNorm.y + fromNorm.z * targetNorm.z,
+      -1,
+      1,
+    )
+    const deltaDeg = Math.acos(dotValue) * (180 / Math.PI)
+    if (Number.isFinite(deltaDeg) && deltaDeg < microDeadbandDeg) {
+      blended.push(normalize({ ...from }))
+      continue
+    }
+    const nodeAlpha = clamp(
+      baseAlpha + headResponseBoost * (1 - progress) - tailDamping * progress * progress,
+      0.18,
+      0.96,
+    )
     blended.push(normalize(lerpPoint(from, target, nodeAlpha)))
   }
   return blended
