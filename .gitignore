@@ -37,3 +37,4 @@ designs/
 designs/
 output/
 .playwright-cli/
+frontend/test-results/
