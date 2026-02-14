@@ -12,6 +12,18 @@ pub const OXYGEN_DRAIN_PER_SEC: f64 = 0.1;
 pub const MIN_SURVIVAL_LENGTH: usize = 3;
 pub const DIGESTION_TRAVEL_SPEED_MULT: f64 = 3.0;
 pub const TURN_RATE: f64 = 0.45 / WORLD_SCALE;
+// Slither-inspired turn envelope:
+// - `scang` falls with body size (longer snake -> lower angular responsiveness).
+// - `spang` rises with movement speed and is capped.
+// We normalize against baseline (spawn length, non-boost speed) so TURN_RATE remains the default
+// feel while boost/length apply relative scaling.
+pub const TURN_SCANG_BASE: f64 = 0.13;
+pub const TURN_SCANG_RANGE: f64 = 0.87;
+pub const TURN_SC_LENGTH_DIVISOR: f64 = 106.0;
+pub const TURN_SC_MAX: f64 = 6.0;
+pub const TURN_SPEED_SPANGDV: f64 = BOOST_MULTIPLIER;
+pub const TURN_RATE_MIN_MULTIPLIER: f64 = 0.72;
+pub const TURN_RATE_MAX_MULTIPLIER: f64 = 2.35;
 pub const COLLISION_DISTANCE: f64 = 0.10467191248588766 / WORLD_SCALE;
 #[cfg(not(test))]
 pub const BASE_PELLET_COUNT: usize = 2400;

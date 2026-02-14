@@ -6,9 +6,17 @@ const WORLD_SCALE = 3
 const NODE_ANGLE = Math.PI / 60 / WORLD_SCALE
 const NODE_QUEUE_SIZE = 9
 const MOVE_SPEED_MULTIPLIER = 1.35
-const BASE_SPEED = ((NODE_ANGLE * 2) / (NODE_QUEUE_SIZE + 1)) * MOVE_SPEED_MULTIPLIER
+cnst BASE_SPEED = ((NODE_ANGLE * 2) / (NODE_QUEUE_SIZE + 1)) * MOVE_SPEED_MULTIPLIER
 const BOOST_MULTIPLIER = 3
 const TURN_RATE = 0.45 / WORLD_SCALE
+const STARTING_LENGTH = 8
+const TURN_SCANG_BASE = 0.13
+const TURN_SCANG_RANGE = 0.87
+const TURN_SC_LENGTH_DIVISOR = 106
+const TURN_SC_MAX = 6
+const TURN_SPEED_SPANGDV = BOOST_MULTIPLIER
+const TURN_RATE_MIN_MULTIPLIER = 0.72
+const TURN_RATE_MAX_MULTIPLIER = 2.35
 const TICK_MS = 50
 const REPLAY_MAX_TICKS = 4
 const REPLAY_SUBSTEP_TARGET_MS = 8
@@ -110,6 +118,34 @@ function rotateToward(current: Point, target: Point, maxAngle: number): Point {
   return rotateAroundAxis(currentNorm, axis, maxAngle)
 }
 
+function slitherScangForLen(snakeLen: number): number {
+  const clampedLen = Math.max(2, snakeLen)
+  const sc = Math.min(TURN_SC_MAX, 1 + (clampedLen - 2) / TURN_SC_LENGTH_DIVISOR)
+  const lengthRatio = Math.max(0, (7 - sc) / 6)
+  return TURN_SCANG_BASE + TURN_SCANG_RANGE * lengthRatio * lengthRatio
+}
+
+function slitherSpangForSpeed(speedFactor: number): number {
+  const safeSpeedFactor = Number.isFinite(speedFactor) ? Math.max(0, speedFactor) : 0
+  const safeDivisor = Math.max(1e-6, TURN_SPEED_SPANGDV)
+  return clamp(safeSpeedFactor / safeDivisor, 1 / safeDivisor, 1)
+}
+
+function resolveTurnRate(snakeLen: number, speedFactor: number): number {
+  const scang = slitherScangForLen(snakeLen)
+  const spang = slitherSpangForSpeed(speedFactor)
+  const baselineScang = slitherScangForLen(STARTING_LENGTH)
+  const baselineSpang = slitherSpangForSpeed(1)
+  const baseline = Math.max(1e-6, baselineScang * baselineSpang)
+  const normalized = (scang * spang) / baseline
+  const rawTurnRate = TURN_RATE * normalized
+  return clamp(
+    rawTurnRate,
+    TURN_RATE * TURN_RATE_MIN_MULTIPLIER,
+    TURN_RATE * TURN_RATE_MAX_MULTIPLIER,
+  )
+}
+
 function applySnakeRotationStep(snake: Point[], axis: Point, velocity: number): Point[] {
   return snake.map((node) => rotateAroundAxis(node, axis, velocity))
 }
@@ -172,7 +208,6 @@ export function replayPredictedSnake(options: ReplayPredictionOptions): ReplayPr
     REPLAY_MAX_SUBSTEPS,
   )
   const stepMs = durationMs / substepCount
-  const turnPerStep = TURN_RATE * (stepMs / TICK_MS)
   const speedPerStep = BASE_SPEED * (stepMs / TICK_MS)
 
   for (let step = 0; step < substepCount; step += 1) {
@@ -180,8 +215,9 @@ export function replayPredictedSnake(options: ReplayPredictionOptions): ReplayPr
     consumeCommandsUntil(stepEndMs)
 
     const targetAxis = activeAxis ? normalize(activeAxis) : axis
-    axis = rotateToward(axis, targetAxis, Math.max(0, turnPerStep))
     const speedFactor = activeBoost && boostAllowed ? BOOST_MULTIPLIER : 1
+    const turnPerStep = resolveTurnRate(outputSnake.length, speedFactor) * (stepMs / TICK_MS)
+    axis = rotateToward(axis, targetAxis, Math.max(0, turnPerStep))
     const velocity = speedPerStep * speedFactor
     const nextSnake = applySnakeRotationStep(outputSnake, axis, velocity)
     outputSnake.splice(0, outputSnake.length, ...nextSnake)

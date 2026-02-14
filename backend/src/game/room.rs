@@ -23,7 +23,9 @@ use super::constants::{
     SMALL_PELLET_VIEW_MARGIN_MIN, SMALL_PELLET_VISIBLE_MAX, SMALL_PELLET_VISIBLE_MIN,
     SMALL_PELLET_ZOOM_MAX_CAMERA_DISTANCE, SMALL_PELLET_ZOOM_MIN_CAMERA_DISTANCE,
     SNAKE_GIRTH_MAX_SCALE, SNAKE_GIRTH_NODES_PER_STEP, SNAKE_GIRTH_STEP_PERCENT, SPAWN_CONE_ANGLE,
-    SPAWN_PLAYER_MIN_DISTANCE, STARTING_LENGTH, TICK_MS, TURN_RATE,
+    SPAWN_PLAYER_MIN_DISTANCE, STARTING_LENGTH, TICK_MS, TURN_RATE, TURN_RATE_MAX_MULTIPLIER,
+    TURN_RATE_MIN_MULTIPLIER, TURN_SCANG_BASE, TURN_SCANG_RANGE, TURN_SC_LENGTH_DIVISOR,
+    TURN_SC_MAX, TURN_SPEED_SPANGDV,
 };
 use super::digestion::{
     add_digestion_with_strength, advance_digestions_with_boost, get_digestion_progress,
@@ -2046,6 +2048,38 @@ impl RoomState {
         player.is_boosting || player.score >= Self::min_boost_start_score(player)
     }
 
+    fn slither_scang_for_len(snake_len: usize) -> f64 {
+        let sc =
+            (1.0 + (snake_len.saturating_sub(2) as f64) / TURN_SC_LENGTH_DIVISOR).min(TURN_SC_MAX);
+        let length_ratio = ((7.0 - sc) / 6.0).max(0.0);
+        TURN_SCANG_BASE + TURN_SCANG_RANGE * length_ratio * length_ratio
+    }
+
+    fn slither_spang_for_speed(speed_factor: f64) -> f64 {
+        let speed = if speed_factor.is_finite() {
+            speed_factor.max(0.0)
+        } else {
+            0.0
+        };
+        let speed_divisor = TURN_SPEED_SPANGDV.max(1e-6);
+        clamp(speed / speed_divisor, 1.0 / speed_divisor, 1.0)
+    }
+
+    fn turn_rate_for(snake_len: usize, speed_factor: f64) -> f64 {
+        let scang = Self::slither_scang_for_len(snake_len);
+        let spang = Self::slither_spang_for_speed(speed_factor);
+        let baseline_scang = Self::slither_scang_for_len(STARTING_LENGTH);
+        let baseline_spang = Self::slither_spang_for_speed(1.0);
+        let baseline = (baseline_scang * baseline_spang).max(1e-6);
+        let normalized = (scang * spang) / baseline;
+        let raw_turn_rate = TURN_RATE * normalized;
+        clamp(
+            raw_turn_rate,
+            TURN_RATE * TURN_RATE_MIN_MULTIPLIER,
+            TURN_RATE * TURN_RATE_MAX_MULTIPLIER,
+        )
+    }
+
     fn player_score_fraction(player: &Player) -> f64 {
         clamp(player.pellet_growth_fraction, 0.0, 0.999_999)
     }
@@ -2122,24 +2156,29 @@ impl RoomState {
             if !player.alive {
                 continue;
             }
-            player.axis = rotate_toward(player.axis, player.target_axis, TURN_RATE);
             let wants_boost = player.boost;
             let is_boosting = wants_boost && Self::can_player_boost(player);
             player.is_boosting = is_boosting;
             let speed_factor = if is_boosting { BOOST_MULTIPLIER } else { 1.0 };
-            let step_count = (speed_factor.round() as i32).max(1);
+            let step_count = (speed_factor.round() as usize).max(1);
             let step_velocity = (BASE_SPEED * speed_factor) / step_count as f64;
+            let turn_per_tick = Self::turn_rate_for(player.snake.len(), speed_factor);
+            let turn_per_substep = turn_per_tick / step_count as f64;
             let snake_angular_radius =
                 Self::snake_contact_angular_radius_for_len(player.snake.len());
-            apply_snake_with_collisions(
-                &mut player.snake,
-                &mut player.axis,
-                snake_angular_radius,
-                step_velocity,
-                step_count,
-                &self.environment,
-            );
-            move_steps.insert(player.id.clone(), step_count);
+            for _ in 0..step_count {
+                player.axis =
+                    rotate_toward(player.axis, player.target_axis, turn_per_substep.max(0.0));
+                apply_snake_with_collisions(
+                    &mut player.snake,
+                    &mut player.axis,
+                    snake_angular_radius,
+                    step_velocity,
+                    1,
+                    &self.environment,
+                );
+            }
+            move_steps.insert(player.id.clone(), step_count as i32);
         }
 
         let mut death_reasons: HashMap<String, &'static str> = HashMap::new();
