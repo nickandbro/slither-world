@@ -438,11 +438,11 @@ fn boost_can_start_at_floor_when_pending_growth_exists() {
 }
 
 #[test]
-fn turn_rate_scales_up_with_boost_speed() {
+fn turn_rate_scales_down_with_boost_speed() {
     let normal = RoomState::turn_rate_for(STARTING_LENGTH, 1.0);
     let boost = RoomState::turn_rate_for(STARTING_LENGTH, BOOST_MULTIPLIER);
-    assert!(boost > normal);
-    assert!(boost <= TURN_RATE * TURN_RATE_MAX_MULTIPLIER + 1e-9);
+    assert!(boost < normal);
+    assert!(boost >= TURN_RATE * TURN_RATE_MIN_MULTIPLIER - 1e-9);
 }
 
 #[test]
@@ -451,6 +451,58 @@ fn turn_rate_scales_down_for_longer_snakes() {
     let long = RoomState::turn_rate_for(STARTING_LENGTH + 220, 1.0);
     assert!(long < short);
     assert!(long >= TURN_RATE * TURN_RATE_MIN_MULTIPLIER - 1e-9);
+}
+
+#[test]
+fn steering_gain_scales_down_with_boost_speed() {
+    let normal_gain = RoomState::steering_gain_for_speed(1.0);
+    let boost_gain = RoomState::steering_gain_for_speed(BOOST_MULTIPLIER);
+    assert!((normal_gain - TURN_RESPONSE_GAIN_NORMAL_PER_SEC).abs() < 1e-9);
+    assert!((boost_gain - TURN_RESPONSE_GAIN_BOOST_PER_SEC).abs() < 1e-9);
+    assert!(boost_gain < normal_gain);
+}
+
+#[test]
+fn steering_turn_step_is_proportional_until_turn_cap() {
+    let turn_cap = RoomState::turn_rate_for(STARTING_LENGTH, 1.0);
+    let dt_seconds = TICK_MS as f64 / 1000.0;
+    let steering_gain = RoomState::steering_gain_for_speed(1.0);
+    let current_axis = Point {
+        x: 1.0,
+        y: 0.0,
+        z: 0.0,
+    };
+
+    let small_error: f64 = 0.1;
+    let small_target = Point {
+        x: small_error.cos(),
+        y: small_error.sin(),
+        z: 0.0,
+    };
+    let small_turn = RoomState::steering_turn_step(
+        current_axis,
+        small_target,
+        turn_cap,
+        steering_gain,
+        dt_seconds,
+    );
+    let expected_small = small_error * steering_gain * dt_seconds;
+    assert!((small_turn - expected_small).abs() < 1e-6);
+    assert!(small_turn < turn_cap);
+
+    let large_target = Point {
+        x: 0.0,
+        y: 1.0,
+        z: 0.0,
+    };
+    let large_turn = RoomState::steering_turn_step(
+        current_axis,
+        large_target,
+        turn_cap,
+        steering_gain,
+        dt_seconds,
+    );
+    assert!((large_turn - turn_cap).abs() < 1e-9);
 }
 
 fn insert_session_with_view(

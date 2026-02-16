@@ -3,27 +3,30 @@ pub const NODE_ANGLE: f64 = std::f64::consts::PI / 60.0 / WORLD_SCALE;
 pub const NODE_QUEUE_SIZE: usize = 9;
 pub const STARTING_LENGTH: usize = 8;
 // Gameplay feel tuning. Keep these as multipliers so the base math remains stable.
-pub const MOVE_SPEED_MULTIPLIER: f64 = 1.35;
+pub const MOVE_SPEED_MULTIPLIER: f64 = 1.75;
 pub const BASE_SPEED: f64 =
     ((NODE_ANGLE * 2.0) / ((NODE_QUEUE_SIZE + 1) as f64)) * MOVE_SPEED_MULTIPLIER;
-pub const BOOST_MULTIPLIER: f64 = 3.0;
+pub const BOOST_MULTIPLIER: f64 = 2.16;
 pub const OXYGEN_MAX: f64 = 1.0;
 pub const OXYGEN_DRAIN_PER_SEC: f64 = 0.1;
 pub const MIN_SURVIVAL_LENGTH: usize = 3;
 pub const DIGESTION_TRAVEL_SPEED_MULT: f64 = 3.0;
-pub const TURN_RATE: f64 = 0.45 / WORLD_SCALE;
+pub const TURN_RATE: f64 = 0.13;
 // Slither-inspired turn envelope:
 // - `scang` falls with body size (longer snake -> lower angular responsiveness).
-// - `spang` rises with movement speed and is capped.
-// We normalize against baseline (spawn length, non-boost speed) so TURN_RATE remains the default
-// feel while boost/length apply relative scaling.
+// - `spang` falls with boost speed so boost steering has a wider turning radius.
+// We normalize against baseline (spawn length, non-boost speed) so TURN_RATE remains the
+// default non-boost feel while boost/length apply relative scaling.
 pub const TURN_SCANG_BASE: f64 = 0.13;
 pub const TURN_SCANG_RANGE: f64 = 0.87;
 pub const TURN_SC_LENGTH_DIVISOR: f64 = 106.0;
 pub const TURN_SC_MAX: f64 = 6.0;
-pub const TURN_SPEED_SPANGDV: f64 = BOOST_MULTIPLIER;
-pub const TURN_RATE_MIN_MULTIPLIER: f64 = 0.72;
-pub const TURN_RATE_MAX_MULTIPLIER: f64 = 2.35;
+pub const TURN_SPEED_BOOST_TURN_PENALTY: f64 = 1.25;
+pub const TURN_SPEED_MIN_MULTIPLIER: f64 = 0.2;
+pub const TURN_RESPONSE_GAIN_NORMAL_PER_SEC: f64 = 9.5;
+pub const TURN_RESPONSE_GAIN_BOOST_PER_SEC: f64 = 3.2;
+pub const TURN_RATE_MIN_MULTIPLIER: f64 = 0.22;
+pub const TURN_RATE_MAX_MULTIPLIER: f64 = 1.35;
 pub const COLLISION_DISTANCE: f64 = 0.10467191248588766 / WORLD_SCALE;
 #[cfg(not(test))]
 pub const BASE_PELLET_COUNT: usize = 2400;

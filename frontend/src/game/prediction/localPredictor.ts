@@ -5,18 +5,21 @@ import type { PredictionCommand } from './types'
 const WORLD_SCALE = 3
 const NODE_ANGLE = Math.PI / 60 / WORLD_SCALE
 const NODE_QUEUE_SIZE = 9
-const MOVE_SPEED_MULTIPLIER = 1.35
+const MOVE_SPEED_MULTIPLIER = 1.75
 const BASE_SPEED = ((NODE_ANGLE * 2) / (NODE_QUEUE_SIZE + 1)) * MOVE_SPEED_MULTIPLIER
-const BOOST_MULTIPLIER = 3
-const TURN_RATE = 0.45 / WORLD_SCALE
+const BOOST_MULTIPLIER = 2.16
+const TURN_RATE = 0.13
 const STARTING_LENGTH = 8
 const TURN_SCANG_BASE = 0.13
 const TURN_SCANG_RANGE = 0.87
 const TURN_SC_LENGTH_DIVISOR = 106
 const TURN_SC_MAX = 6
-const TURN_SPEED_SPANGDV = BOOST_MULTIPLIER
-const TURN_RATE_MIN_MULTIPLIER = 0.72
-const TURN_RATE_MAX_MULTIPLIER = 2.35
+const TURN_SPEED_BOOST_TURN_PENALTY = 1.25
+const TURN_SPEED_MIN_MULTIPLIER = 0.2
+const TURN_RESPONSE_GAIN_NORMAL_PER_SEC = 9.5
+const TURN_RESPONSE_GAIN_BOOST_PER_SEC = 3.2
+const TURN_RATE_MIN_MULTIPLIER = 0.22
+const TURN_RATE_MAX_MULTIPLIER = 1.35
 const TICK_MS = 50
 const REPLAY_MAX_TICKS = 4
 const REPLAY_SUBSTEP_TARGET_MS = 8
@@ -127,8 +130,10 @@ function slitherScangForLen(snakeLen: number): number {
 
 function slitherSpangForSpeed(speedFactor: number): number {
   const safeSpeedFactor = Number.isFinite(speedFactor) ? Math.max(0, speedFactor) : 0
-  const safeDivisor = Math.max(1e-6, TURN_SPEED_SPANGDV)
-  return clamp(safeSpeedFactor / safeDivisor, 1 / safeDivisor, 1)
+  const boostExcess = Math.max(0, safeSpeedFactor - 1)
+  const penalty = 1 + Math.max(0, TURN_SPEED_BOOST_TURN_PENALTY) * boostExcess
+  const damped = 1 / Math.max(1e-6, penalty)
+  return clamp(damped, TURN_SPEED_MIN_MULTIPLIER, 1)
 }
 
 function resolveTurnRate(snakeLen: number, speedFactor: number): number {
@@ -144,6 +149,34 @@ function resolveTurnRate(snakeLen: number, speedFactor: number): number {
     TURN_RATE * TURN_RATE_MIN_MULTIPLIER,
     TURN_RATE * TURN_RATE_MAX_MULTIPLIER,
   )
+}
+
+function steeringGainForSpeed(speedFactor: number): number {
+  const safeSpeedFactor = Number.isFinite(speedFactor) ? Math.max(0, speedFactor) : 0
+  const boostWindow = Math.max(1e-6, BOOST_MULTIPLIER - 1)
+  const blend = clamp((safeSpeedFactor - 1) / boostWindow, 0, 1)
+  return (
+    TURN_RESPONSE_GAIN_NORMAL_PER_SEC +
+    (TURN_RESPONSE_GAIN_BOOST_PER_SEC - TURN_RESPONSE_GAIN_NORMAL_PER_SEC) * blend
+  )
+}
+
+function resolveTurnStep(
+  currentAxis: Point,
+  targetAxis: Point,
+  snakeLen: number,
+  speedFactor: number,
+  stepMs: number,
+): number {
+  const turnCap = Math.max(0, resolveTurnRate(snakeLen, speedFactor) * (stepMs / TICK_MS))
+  if (turnCap <= 0) return 0
+  const current = normalize(currentAxis)
+  const target = normalize(targetAxis)
+  const angleError = Math.acos(clamp(dot(current, target), -1, 1))
+  if (!Number.isFinite(angleError)) return turnCap
+  const dtSec = Math.max(0, stepMs) / 1000
+  const proportionalStep = angleError * Math.max(0, steeringGainForSpeed(speedFactor)) * dtSec
+  return clamp(proportionalStep, 0, turnCap)
 }
 
 function applySnakeRotationStep(snake: Point[], axis: Point, velocity: number): Point[] {
@@ -216,7 +249,7 @@ export function replayPredictedSnake(options: ReplayPredictionOptions): ReplayPr
 
     const targetAxis = activeAxis ? normalize(activeAxis) : axis
     const speedFactor = activeBoost && boostAllowed ? BOOST_MULTIPLIER : 1
-    const turnPerStep = resolveTurnRate(outputSnake.length, speedFactor) * (stepMs / TICK_MS)
+    const turnPerStep = resolveTurnStep(axis, targetAxis, outputSnake.length, speedFactor, stepMs)
     axis = rotateToward(axis, targetAxis, Math.max(0, turnPerStep))
     const velocity = speedPerStep * speedFactor
     const nextSnake = applySnakeRotationStep(outputSnake, axis, velocity)
