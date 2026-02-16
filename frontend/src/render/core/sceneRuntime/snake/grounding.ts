@@ -86,6 +86,7 @@ export const createSnakeCurveBuilder = ({
 
   // Allocation-light snake curve generation scratch. Reused across all snakes each frame.
   const snakeCurvePointsScratch: THREE.Vector3[] = []
+  const snakeCurvePointsSmoothScratch: THREE.Vector3[] = []
   const snakeNodeNormalsScratch: THREE.Vector3[] = []
   const snakeNodeTangentsScratch: THREE.Vector3[] = []
   let snakeNodeRadiiScratch = new Float32Array(0)
@@ -202,6 +203,24 @@ export const createSnakeCurveBuilder = ({
     }
   }
 
+  const writeChaikinPoint = (
+    out: THREE.Vector3,
+    a: THREE.Vector3,
+    b: THREE.Vector3,
+    t: number,
+  ) => {
+    out.copy(a).lerp(b, t)
+    const radiusA = a.length()
+    const radiusB = b.length()
+    const targetRadius = radiusA + (radiusB - radiusA) * t
+    if (out.lengthSq() <= 1e-10) {
+      out.copy(a)
+    }
+    if (targetRadius > 1e-8) {
+      out.normalize().multiplyScalar(targetRadius)
+    }
+  }
+
   const buildSnakeCurvePoints = (
     nodes: Point[],
     radiusOffset: number,
@@ -285,13 +304,13 @@ export const createSnakeCurveBuilder = ({
         i < nodes.length - 1 &&
         Math.abs(nodeRadius - prevRadius) >= snakeSlopeInsertRadiusDelta
       ) {
-        snakeMidpointNormalTemp.copy(prevNormal).add(normal)
+        snakeMidpointNormalTemp.copy(prevNormal!).add(normal)
         if (snakeMidpointNormalTemp.lengthSq() > 1e-8) {
           snakeMidpointNormalTemp.normalize()
         } else {
           snakeMidpointNormalTemp.copy(normal)
         }
-        snakeMidpointTangentTemp.copy(prevTangent).add(tangent)
+        snakeMidpointTangentTemp.copy(prevTangent!).add(tangent)
         snakeMidpointTangentTemp.addScaledVector(
           snakeMidpointNormalTemp,
           -snakeMidpointTangentTemp.dot(snakeMidpointNormalTemp),
@@ -327,7 +346,29 @@ export const createSnakeCurveBuilder = ({
     }
 
     snakeCurvePointsScratch.length = writeIndex
-    return snakeCurvePointsScratch
+    if (writeIndex < 4) {
+      return snakeCurvePointsScratch
+    }
+
+    // Smooth sharp turns by corner-cutting the rendered centerline.
+    // This keeps gameplay/collision nodes authoritative while making visual loops rounder.
+    ensureVectorScratchCapacity(snakeCurvePointsSmoothScratch, writeIndex * 2 + 2)
+    let smoothWriteIndex = 0
+    snakeCurvePointsSmoothScratch[smoothWriteIndex]!.copy(snakeCurvePointsScratch[0]!)
+    smoothWriteIndex += 1
+    for (let i = 0; i < writeIndex - 1; i += 1) {
+      const p0 = snakeCurvePointsScratch[i]!
+      const p1 = snakeCurvePointsScratch[i + 1]!
+      writeChaikinPoint(snakeCurvePointsSmoothScratch[smoothWriteIndex]!, p0, p1, 0.25)
+      smoothWriteIndex += 1
+      writeChaikinPoint(snakeCurvePointsSmoothScratch[smoothWriteIndex]!, p0, p1, 0.75)
+      smoothWriteIndex += 1
+    }
+    snakeCurvePointsSmoothScratch[smoothWriteIndex]!
+      .copy(snakeCurvePointsScratch[writeIndex - 1]!)
+    smoothWriteIndex += 1
+    snakeCurvePointsSmoothScratch.length = smoothWriteIndex
+    return snakeCurvePointsSmoothScratch
   }
 
   return {

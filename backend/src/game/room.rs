@@ -24,9 +24,10 @@ use super::constants::{
     SMALL_PELLET_ZOOM_MAX_CAMERA_DISTANCE, SMALL_PELLET_ZOOM_MIN_CAMERA_DISTANCE,
     SNAKE_GIRTH_MAX_SCALE, SNAKE_GIRTH_NODES_PER_STEP, SNAKE_GIRTH_STEP_PERCENT, SPAWN_CONE_ANGLE,
     SPAWN_PLAYER_MIN_DISTANCE, STARTING_LENGTH, TICK_MS, TURN_RATE, TURN_RATE_MAX_MULTIPLIER,
-    TURN_RATE_MIN_MULTIPLIER, TURN_RESPONSE_GAIN_BOOST_PER_SEC, TURN_RESPONSE_GAIN_NORMAL_PER_SEC,
-    TURN_SCANG_BASE, TURN_SCANG_RANGE, TURN_SC_LENGTH_DIVISOR, TURN_SC_MAX,
-    TURN_SPEED_BOOST_TURN_PENALTY, TURN_SPEED_MIN_MULTIPLIER,
+    TURN_BOOST_TURN_RATE_MULTIPLIER, TURN_RATE_MIN_MULTIPLIER, TURN_RESPONSE_GAIN_BOOST_PER_SEC,
+    TURN_RESPONSE_GAIN_NORMAL_PER_SEC, TURN_SCANG_BASE, TURN_SCANG_RANGE,
+    TURN_SC_LENGTH_DIVISOR, TURN_SC_MAX, TURN_SPEED_BOOST_TURN_PENALTY,
+    TURN_SPEED_MIN_MULTIPLIER,
 };
 use super::digestion::{
     add_digestion_with_strength, advance_digestions_with_boost, get_digestion_progress,
@@ -2105,13 +2106,22 @@ impl RoomState {
     }
 
     fn turn_rate_for(snake_len: usize, speed_factor: f64) -> f64 {
+        let speed = if speed_factor.is_finite() {
+            speed_factor.max(0.0)
+        } else {
+            0.0
+        };
         let scang = Self::slither_scang_for_len(snake_len);
-        let spang = Self::slither_spang_for_speed(speed_factor);
+        let spang = Self::slither_spang_for_speed(speed);
         let baseline_scang = Self::slither_scang_for_len(STARTING_LENGTH);
         let baseline_spang = Self::slither_spang_for_speed(1.0);
         let baseline = (baseline_scang * baseline_spang).max(1e-6);
+        let boost_window = (BOOST_MULTIPLIER - 1.0).max(1e-6);
+        let boost_blend = clamp((speed - 1.0) / boost_window, 0.0, 1.0);
+        let boost_turn_mult =
+            1.0 + (TURN_BOOST_TURN_RATE_MULTIPLIER - 1.0).max(0.0) * boost_blend;
         let normalized = (scang * spang) / baseline;
-        let raw_turn_rate = TURN_RATE * normalized;
+        let raw_turn_rate = TURN_RATE * normalized * boost_turn_mult;
         clamp(
             raw_turn_rate,
             TURN_RATE * TURN_RATE_MIN_MULTIPLIER,

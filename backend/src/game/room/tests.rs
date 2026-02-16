@@ -438,11 +438,11 @@ fn boost_can_start_at_floor_when_pending_growth_exists() {
 }
 
 #[test]
-fn turn_rate_scales_down_with_boost_speed() {
+fn turn_rate_scales_up_with_boost_speed() {
     let normal = RoomState::turn_rate_for(STARTING_LENGTH, 1.0);
     let boost = RoomState::turn_rate_for(STARTING_LENGTH, BOOST_MULTIPLIER);
-    assert!(boost < normal);
-    assert!(boost >= TURN_RATE * TURN_RATE_MIN_MULTIPLIER - 1e-9);
+    assert!(boost > normal);
+    assert!(boost <= TURN_RATE * TURN_RATE_MAX_MULTIPLIER + 1e-9);
 }
 
 #[test]

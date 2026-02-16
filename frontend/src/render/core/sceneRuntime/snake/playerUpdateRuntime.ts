@@ -100,12 +100,17 @@ type SnakePlayerRuntimeDeps = {
     headStartOffset: number,
     snakeTotalLen: number,
   ) => void
-  computeDigestionStartOffset: (curvePoints: THREE.Vector3[], digestionStartNodeIndex: number) => number
+  computeDigestionStartOffset: (
+    curvePoints: THREE.Vector3[],
+    digestionStartNodeIndex: number,
+    sourceNodeCount?: number,
+  ) => number
   applyDigestionBulges: (
     geometry: THREE.BufferGeometry,
     digestionVisuals: ReturnType<typeof buildDigestionVisuals>,
     digestionStartOffset: number,
     digestionBulgeScale: number,
+    sourceNodeCount?: number,
   ) => void
   computeSnakeSelfOverlapPointIntensities: (
     curvePoints: THREE.Vector3[],
@@ -487,6 +492,7 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
       const digestionStartOffset = computeDigestionStartOffset(
         curvePoints,
         constants.digestionStartNodeIndex,
+        nodes.length,
       )
       if (digestionVisuals.length) {
         applyDigestionBulges(
@@ -494,6 +500,7 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
           digestionVisuals,
           digestionStartOffset,
           digestionBulgeScale,
+          nodes.length,
         )
       }
       let overlapMax = 0

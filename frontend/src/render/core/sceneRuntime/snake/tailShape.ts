@@ -176,11 +176,18 @@ export const buildTailCapGeometry = (
 export const computeDigestionStartOffset = (
   curvePoints: THREE.Vector3[],
   digestionStartNodeIndex: number,
+  sourceNodeCount?: number,
 ) => {
   if (curvePoints.length < 2) return 0
-  const segmentCount = Math.max(1, curvePoints.length - 1)
-  const startNode = Math.round(clamp(digestionStartNodeIndex, 0, segmentCount))
-  return clamp(startNode / segmentCount, 0, 0.95)
+  const hasSourceNodeCount =
+    typeof sourceNodeCount === 'number' &&
+    Number.isFinite(sourceNodeCount) &&
+    sourceNodeCount > 1
+  const sourceSegmentCount = hasSourceNodeCount
+    ? Math.max(1, Math.round(sourceNodeCount) - 1)
+    : Math.max(1, curvePoints.length - 1)
+  const startNode = Math.round(clamp(digestionStartNodeIndex, 0, sourceSegmentCount))
+  return clamp(startNode / sourceSegmentCount, 0, 0.95)
 }
 
 export const createDigestionBulgeApplicator = ({
@@ -200,6 +207,7 @@ export const createDigestionBulgeApplicator = ({
     digestions: DigestionVisual[],
     headStartOffset: number,
     bulgeScale: number,
+    sourceNodeCount?: number,
   ) => {
     if (!digestions.length) return 0
     const params = getTubeParams(tubeGeometry)
@@ -208,6 +216,16 @@ export const createDigestionBulgeApplicator = ({
     const tubularSegments = params.tubularSegments
     const ringVertexCount = radialSegments + 1
     const ringCount = tubularSegments + 1
+    const hasSourceNodeCount =
+      typeof sourceNodeCount === 'number' &&
+      Number.isFinite(sourceNodeCount) &&
+      sourceNodeCount > 1
+    const sourceSegmentCount = hasSourceNodeCount
+      ? Math.max(1, Math.round(sourceNodeCount) - 1)
+      : Math.max(1, ringCount - 1)
+    const ringsPerSourceSegment = (ringCount - 1) / sourceSegmentCount
+    const baselineRingsPerSourceSegment = 4
+    const widthScale = clamp(ringsPerSourceSegment / baselineRingsPerSourceSegment, 1, 8)
     const positionsAttr = tubeGeometry.getAttribute('position')
     if (!(positionsAttr instanceof THREE.BufferAttribute)) return 0
     const positions = positionsAttr.array as Float32Array
@@ -224,7 +242,8 @@ export const createDigestionBulgeApplicator = ({
     for (const digestion of digestions) {
       const strength = clamp(digestion.strength, 0, 1)
       if (strength <= 0) continue
-      const influenceRadius = THREE.MathUtils.lerp(digestionWidthMin, digestionWidthMax, strength)
+      const influenceRadius =
+        THREE.MathUtils.lerp(digestionWidthMin, digestionWidthMax, strength) * widthScale
       const bulgeStrength =
         THREE.MathUtils.lerp(digestionBulgeMin, digestionBulgeMax, strength) * bulgeScale
       const t = clamp(digestion.t, 0, 1)

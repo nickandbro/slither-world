@@ -14,12 +14,13 @@ const TURN_SCANG_BASE = 0.13
 const TURN_SCANG_RANGE = 0.87
 const TURN_SC_LENGTH_DIVISOR = 106
 const TURN_SC_MAX = 6
-const TURN_SPEED_BOOST_TURN_PENALTY = 1.25
+const TURN_SPEED_BOOST_TURN_PENALTY = 0.55
 const TURN_SPEED_MIN_MULTIPLIER = 0.2
+const TURN_BOOST_TURN_RATE_MULTIPLIER = 4
 const TURN_RESPONSE_GAIN_NORMAL_PER_SEC = 9.5
-const TURN_RESPONSE_GAIN_BOOST_PER_SEC = 3.2
+const TURN_RESPONSE_GAIN_BOOST_PER_SEC = 5.8
 const TURN_RATE_MIN_MULTIPLIER = 0.22
-const TURN_RATE_MAX_MULTIPLIER = 1.35
+const TURN_RATE_MAX_MULTIPLIER = 4
 const TICK_MS = 50
 const REPLAY_MAX_TICKS = 4
 const REPLAY_SUBSTEP_TARGET_MS = 8
@@ -137,13 +138,17 @@ function slitherSpangForSpeed(speedFactor: number): number {
 }
 
 function resolveTurnRate(snakeLen: number, speedFactor: number): number {
+  const safeSpeedFactor = Number.isFinite(speedFactor) ? Math.max(0, speedFactor) : 0
   const scang = slitherScangForLen(snakeLen)
-  const spang = slitherSpangForSpeed(speedFactor)
+  const spang = slitherSpangForSpeed(safeSpeedFactor)
   const baselineScang = slitherScangForLen(STARTING_LENGTH)
   const baselineSpang = slitherSpangForSpeed(1)
   const baseline = Math.max(1e-6, baselineScang * baselineSpang)
+  const boostWindow = Math.max(1e-6, BOOST_MULTIPLIER - 1)
+  const boostBlend = clamp((safeSpeedFactor - 1) / boostWindow, 0, 1)
+  const boostTurnMult = 1 + Math.max(0, TURN_BOOST_TURN_RATE_MULTIPLIER - 1) * boostBlend
   const normalized = (scang * spang) / baseline
-  const rawTurnRate = TURN_RATE * normalized
+  const rawTurnRate = TURN_RATE * normalized * boostTurnMult
   return clamp(
     rawTurnRate,
     TURN_RATE * TURN_RATE_MIN_MULTIPLIER,
