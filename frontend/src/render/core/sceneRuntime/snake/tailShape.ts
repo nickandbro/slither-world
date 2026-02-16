@@ -186,7 +186,7 @@ export const computeDigestionStartOffset = (
   const sourceSegmentCount = hasSourceNodeCount
     ? Math.max(1, Math.round(sourceNodeCount) - 1)
     : Math.max(1, curvePoints.length - 1)
-  const startNode = Math.round(clamp(digestionStartNodeIndex, 0, sourceSegmentCount))
+  const startNode = clamp(digestionStartNodeIndex, 0, sourceSegmentCount)
   return clamp(startNode / sourceSegmentCount, 0, 0.95)
 }
 
@@ -244,6 +244,7 @@ export const createDigestionBulgeApplicator = ({
       if (strength <= 0) continue
       const influenceRadius =
         THREE.MathUtils.lerp(digestionWidthMin, digestionWidthMax, strength) * widthScale
+      const headBuildUpRings = clamp(influenceRadius * 0.9, 1.5, 9)
       const bulgeStrength =
         THREE.MathUtils.lerp(digestionBulgeMin, digestionBulgeMax, strength) * bulgeScale
       const t = clamp(digestion.t, 0, 1)
@@ -252,15 +253,21 @@ export const createDigestionBulgeApplicator = ({
       const start = Math.max(0, Math.floor(center - influenceRadius))
       const end = Math.min(ringCount - 1, Math.ceil(center + influenceRadius))
       const sigma = Math.max(0.5, influenceRadius * 0.7)
+      const sigmaHead = Math.max(0.35, sigma * 0.44)
+      const sigmaTail = sigma
       const tailFade = smoothstep(0, 0.016, 1 - mapped)
       const travelFade = tailFade
       if (travelFade <= 0) continue
       for (let ring = start; ring <= end; ring += 1) {
         if (ring < headStartRing) continue
+        const fromHeadStart = ring - headStartRing
+        const headBuild = smoothstep(0, headBuildUpRings, fromHeadStart)
+        const headBuildShaped = Math.pow(headBuild, 1.2)
+        if (headBuildShaped <= 1e-6) continue
         const dist = ring - center
-        const normalized = dist / sigma
+        const normalized = dist / (dist < 0 ? sigmaHead : sigmaTail)
         const weight = Math.exp(-0.5 * normalized * normalized)
-        bulgeByRing[ring] += weight * bulgeStrength * travelFade
+        bulgeByRing[ring] += weight * bulgeStrength * travelFade * headBuildShaped
       }
     }
     for (let pass = 0; pass < 2; pass += 1) {
