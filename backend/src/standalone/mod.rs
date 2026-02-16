@@ -188,7 +188,11 @@ impl AppState {
         match self.rooms.entry(name) {
             dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
             dashmap::mapref::entry::Entry::Vacant(entry) => {
-                let room = Arc::new(Room::new());
+                let room = if entry.key() == "main" {
+                    Arc::new(Room::new())
+                } else {
+                    Arc::new(Room::with_room_id(entry.key().clone()))
+                };
                 entry.insert(room.clone());
                 room
             }

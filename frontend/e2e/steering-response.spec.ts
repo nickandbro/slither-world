@@ -19,6 +19,10 @@ type PredictionInfo = {
   enabled: boolean
   pendingInputCount: number
   correctionHardCount: number
+  replayedInputCountLastFrame: number
+  replayedTickCountLastFrame: number
+  commandsDroppedByCoalescingLastFrame: number
+  commandsCoalescedPerTickP95LastFrame: number
 }
 
 type PredictionPresentationInfo = {
@@ -36,6 +40,24 @@ type MotionInfo = {
   sampleCount: number
 }
 
+type CameraRotationStats = {
+  sampleCount: number
+  stepP95Deg: number
+  stepMaxDeg: number
+  reversalCount: number
+  reversalRate: number
+}
+
+type SegmentParityStats = {
+  sampleCount: number
+  frontWindowP95Deg: number
+  frontWindowMaxDeg: number
+  fullBodyP95Deg: number
+  fullBodyMaxDeg: number
+  frontMismatchMs: number
+  frontMismatchActive: boolean
+}
+
 type PredictionEvent = {
   type: string
   message: string
@@ -45,6 +67,8 @@ type SteeringResponseDiagnostics = {
   prediction: PredictionInfo | null
   predictionPresentation: PredictionPresentationInfo | null
   motion: MotionInfo | null
+  cameraRotation: CameraRotationStats | null
+  segmentParity: SegmentParityStats | null
   predictionEvents: PredictionEvent[]
 }
 
@@ -56,6 +80,8 @@ async function collectDiagnostics(page: Page): Promise<SteeringResponseDiagnosti
           getPredictionInfo?: () => PredictionInfo
           getPredictionPresentationInfo?: () => PredictionPresentationInfo
           getMotionStabilityInfo?: () => MotionInfo
+          getCameraRotationStats?: () => CameraRotationStats
+          getSegmentParityStats?: () => SegmentParityStats
           getPredictionEvents?: () => PredictionEvent[]
         }
       }
@@ -64,6 +90,8 @@ async function collectDiagnostics(page: Page): Promise<SteeringResponseDiagnosti
       prediction: debugApi?.getPredictionInfo?.() ?? null,
       predictionPresentation: debugApi?.getPredictionPresentationInfo?.() ?? null,
       motion: debugApi?.getMotionStabilityInfo?.() ?? null,
+      cameraRotation: debugApi?.getCameraRotationStats?.() ?? null,
+      segmentParity: debugApi?.getSegmentParityStats?.() ?? null,
       predictionEvents: debugApi?.getPredictionEvents?.() ?? [],
     }
   })
@@ -102,6 +130,8 @@ function assertWithFailureDump(
     console.error('prediction info', diagnostics.prediction ?? null)
     console.error('prediction presentation info', diagnostics.predictionPresentation ?? null)
     console.error('motion info', diagnostics.motion ?? null)
+    console.error('camera rotation info', diagnostics.cameraRotation ?? null)
+    console.error('segment parity info', diagnostics.segmentParity ?? null)
     console.error('last prediction events', diagnostics.predictionEvents.slice(-20))
     throw error
   }
@@ -151,14 +181,20 @@ test.describe('@steering-response local steering response', () => {
       const prediction = diagnostics.prediction
       const presentation = diagnostics.predictionPresentation
       const motion = diagnostics.motion
+      const segmentParity = diagnostics.segmentParity
       expect(prediction).not.toBeNull()
       expect(presentation).not.toBeNull()
       expect(motion).not.toBeNull()
+      expect(segmentParity).not.toBeNull()
       expect(presentation?.sampleCount ?? 0).toBeGreaterThanOrEqual(20)
       expect(presentation?.headLagDeg.p95Deg ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(2.8)
       expect(presentation?.bodyMicroReversalRate ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(0.09)
       expect(presentation?.bodyLagDeg.p95Deg ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(4.8)
       expect(motion?.minHeadDot ?? 0).toBeGreaterThanOrEqual(0.992)
+      expect(segmentParity?.frontWindowP95Deg ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(0.8)
+      expect(segmentParity?.frontWindowMaxDeg ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(3)
+      expect(segmentParity?.fullBodyP95Deg ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(2)
+      expect(segmentParity?.frontMismatchMs ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(150)
       expect(prediction?.correctionHardCount ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(6)
       expect(prediction?.pendingInputCount ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(45)
     })
@@ -195,12 +231,18 @@ test.describe('@steering-response local steering response', () => {
     assertWithFailureDump(diagnostics, () => {
       const prediction = diagnostics.prediction
       const presentation = diagnostics.predictionPresentation
+      const segmentParity = diagnostics.segmentParity
       expect(prediction).not.toBeNull()
       expect(presentation).not.toBeNull()
+      expect(segmentParity).not.toBeNull()
       expect(presentation?.sampleCount ?? 0).toBeGreaterThanOrEqual(24)
       expect(presentation?.headLagDeg.p95Deg ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(4.2)
       expect(presentation?.bodyMicroReversalRate ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(0.16)
       expect(presentation?.bodyLagDeg.p95Deg ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(6.5)
+      expect(segmentParity?.frontWindowP95Deg ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(1.2)
+      expect(segmentParity?.frontWindowMaxDeg ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(3)
+      expect(segmentParity?.fullBodyP95Deg ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(3)
+      expect(segmentParity?.frontMismatchMs ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(150)
       expect(prediction?.correctionHardCount ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(14)
       expect(prediction?.pendingInputCount ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(70)
       const overflowEvents = diagnostics.predictionEvents.filter(

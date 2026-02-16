@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react'
 import type { MutableRefObject } from 'react'
-import type { GameStateSnapshot, Point } from '@game/types'
+import type { Environment, GameStateSnapshot, Point } from '@game/types'
 import { clamp, normalize } from '@game/math'
 import { buildInterpolatedSnapshot, type TimedSnapshot } from '@game/snapshots'
 import type {
@@ -22,6 +22,11 @@ import {
   replayPredictedSnake,
 } from '@game/prediction/localPredictor'
 import { blendPredictedSnake, computeP95, decideReconcile } from '@game/prediction/reconcile'
+import { snakeContactAngularRadiusForScale } from '@game/prediction/parity/constants'
+import {
+  createSnakeParityStateFromPoints,
+  type SnakeParityState,
+} from '@game/prediction/parity/snake'
 import {
   MAX_EXTRAPOLATION_MS,
   MAX_SNAPSHOT_BUFFER,
@@ -30,12 +35,14 @@ import {
 } from '@app/core/constants'
 import { registerAppDebugApi } from '@app/debug/registerAppDebugApi'
 import type {
+  CameraRotationStats,
   LagSpikeCause,
   MotionStabilityDebugInfo,
   NetLagEvent,
   NetLagReport,
   NetSmoothingDebugInfo,
   RafPerfInfo,
+  SegmentParityStats,
   TailEndSample,
   TailGrowthEvent,
   TailGrowthEventInput,
@@ -59,9 +66,17 @@ const PREDICTION_DRIFT_BODY_P95_THRESHOLD_DEG = 5.5
 const PREDICTION_DRIFT_CONSECUTIVE_FRAMES = 3
 const PREDICTION_DRIFT_ALPHA_FLOOR = 0.72
 const PREDICTION_DRIFT_ALPHA_FLOOR_MS = 60
-const PREDICTION_MICRO_REVERSAL_MIN_DEG = 0.35
-const PREDICTION_MICRO_REVERSAL_MAX_DEG = 1.2
+const PREDICTION_MICRO_REVERSAL_MIN_DEG = 0.6
+const PREDICTION_MICRO_REVERSAL_MAX_DEG = 2.2
 const PREDICTION_MICRO_DEADBAND_DEG = 0.11
+const PREDICTION_DISPLAY_FRONT_PREDICTED_SEGMENTS = 1
+const PREDICTION_AUTHORITY_HEAD_LAG_SOFT_CAP_DEG = 0.9
+const PREDICTION_AUTHORITY_HEAD_LAG_HARD_CAP_DEG = 1.6
+const PREDICTION_FRONT_SEGMENT_COUNT = 9 // head + first 8 body segments
+const PREDICTION_FRONT_HARD_GUARD_DEG = 8.5
+const PREDICTION_FRONT_HARD_GUARD_MS = 260
+const PREDICTION_FRONT_HARD_GUARD_COOLDOWN_MS = 380
+const PREDICTION_PARITY_WINDOW_SIZE = 240
 
 const EMPTY_PREDICTION_ERROR = {
   lastDeg: 0,
@@ -75,7 +90,13 @@ const EMPTY_PREDICTION_INFO: PredictionInfo = {
   latestAckSeq: null,
   pendingInputCount: 0,
   replayedInputCountLastFrame: 0,
+  replayedTickCountLastFrame: 0,
+  commandsDroppedByCoalescingLastFrame: 0,
+  commandsCoalescedPerTickP95LastFrame: 0,
   predictedHeadErrorDeg: { ...EMPTY_PREDICTION_ERROR },
+  frontSegmentParityDeg: { ...EMPTY_PREDICTION_ERROR },
+  fullBodyParityDeg: { ...EMPTY_PREDICTION_ERROR },
+  frontMismatchMs: 0,
   correctionSoftCount: 0,
   correctionHardCount: 0,
   lastCorrectionMagnitudeDeg: 0,
@@ -108,6 +129,24 @@ const angularDeltaDeg = (a: Point | null, b: Point | null): number => {
   return Number.isFinite(radians) ? radians * (180 / Math.PI) : 0
 }
 
+const clampAngularStep = (from: Point | null, to: Point, maxStepDeg: number): Point => {
+  if (!from || !Number.isFinite(maxStepDeg) || maxStepDeg <= 0) {
+    return normalize(to)
+  }
+  const fromNorm = normalize(from)
+  const toNorm = normalize(to)
+  const stepDeg = angularDeltaDeg(fromNorm, toNorm)
+  if (!Number.isFinite(stepDeg) || stepDeg <= maxStepDeg) {
+    return toNorm
+  }
+  const t = clamp(maxStepDeg / Math.max(stepDeg, 1e-6), 0, 1)
+  return normalize({
+    x: fromNorm.x + (toNorm.x - fromNorm.x) * t,
+    y: fromNorm.y + (toNorm.y - fromNorm.y) * t,
+    z: fromNorm.z + (toNorm.z - fromNorm.z) * t,
+  })
+}
+
 const pushWindowSample = (window: number[], value: number, maxSize: number): void => {
   if (!Number.isFinite(value)) return
   window.push(Math.max(0, value))
@@ -120,8 +159,9 @@ const computeBodyLagP95Deg = (displaySnake: Point[] | null, replaySnake: Point[]
   if (!displaySnake || !replaySnake) return 0
   const count = Math.min(displaySnake.length, replaySnake.length)
   if (count <= 1) return 0
+  const maxBodyIndex = Math.min(count - 1, PREDICTION_FRONT_SEGMENT_COUNT)
   const lags: number[] = []
-  for (let index = 1; index < count; index += 1) {
+  for (let index = 1; index <= maxBodyIndex; index += 1) {
     const lag = angularDeltaDeg(displaySnake[index] ?? null, replaySnake[index] ?? null)
     if (Number.isFinite(lag)) {
       lags.push(Math.max(0, lag))
@@ -130,12 +170,56 @@ const computeBodyLagP95Deg = (displaySnake: Point[] | null, replaySnake: Point[]
   return lags.length > 0 ? computeP95(lags) : 0
 }
 
+const computeSnakeParitySamples = (
+  candidateSnake: Point[] | null,
+  authoritativeSnake: Point[] | null,
+): {
+  frontSamples: number[]
+  fullSamples: number[]
+  frontMaxDeg: number
+} => {
+  if (!candidateSnake || !authoritativeSnake) {
+    return {
+      frontSamples: [],
+      fullSamples: [],
+      frontMaxDeg: 0,
+    }
+  }
+  const count = Math.min(candidateSnake.length, authoritativeSnake.length)
+  if (count <= 0) {
+    return {
+      frontSamples: [],
+      fullSamples: [],
+      frontMaxDeg: 0,
+    }
+  }
+  const frontSamples: number[] = []
+  const fullSamples: number[] = []
+  const frontCount = Math.min(count, PREDICTION_FRONT_SEGMENT_COUNT)
+  for (let i = 0; i < count; i += 1) {
+    const deg = angularDeltaDeg(candidateSnake[i] ?? null, authoritativeSnake[i] ?? null)
+    if (!Number.isFinite(deg)) continue
+    const safeDeg = Math.max(0, deg)
+    fullSamples.push(safeDeg)
+    if (i < frontCount) {
+      frontSamples.push(safeDeg)
+    }
+  }
+  const frontMaxDeg =
+    frontSamples.length > 0 ? frontSamples.reduce((acc, value) => Math.max(acc, value), 0) : 0
+  return {
+    frontSamples,
+    fullSamples,
+    frontMaxDeg,
+  }
+}
+
 const computeMidBodyForward = (
   snake: Point[] | null,
 ): { forward: Point; normal: Point } | null => {
   if (!snake || snake.length < 4) return null
   const tailIndex = snake.length - 1
-  const midIndex = Math.max(1, Math.min(tailIndex - 1, Math.floor(tailIndex / 2)))
+  const midIndex = Math.max(2, Math.min(tailIndex - 1, Math.min(4, Math.floor(tailIndex / 3))))
   const prev = normalize(snake[Math.max(0, midIndex - 1)] ?? snake[midIndex]!)
   const mid = normalize(snake[midIndex]!)
   const next = normalize(snake[Math.min(tailIndex, midIndex + 1)] ?? snake[midIndex]!)
@@ -205,6 +289,8 @@ export type UseNetRuntimeOptions = {
   lagSpikeArrivalGapCooldownUntilMsRef: MutableRefObject<number>
   lagImpairmentUntilMsRef: MutableRefObject<number>
   localSnakeDisplayRef: MutableRefObject<Point[] | null>
+  environmentRef: MutableRefObject<Environment | null>
+  cameraRotationStatsRef: MutableRefObject<CameraRotationStats>
 }
 
 export type UseNetRuntimeResult = {
@@ -286,6 +372,8 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
     lagSpikeArrivalGapCooldownUntilMsRef,
     lagImpairmentUntilMsRef,
     localSnakeDisplayRef,
+    environmentRef,
+    cameraRotationStatsRef,
   } = options
 
   const predictionCommandBufferRef = useRef<PredictionCommandBuffer>(new PredictionCommandBuffer())
@@ -325,6 +413,21 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
   const predictionLastMicroStepDegRef = useRef<number>(0)
   const predictionDriftConsecutiveFramesRef = useRef<number>(0)
   const predictionAlphaFloorUntilMsRef = useRef<number | null>(null)
+  const predictionParityStateRef = useRef<SnakeParityState | null>(null)
+  const predictionFrontParitySamplesRef = useRef<number[]>([])
+  const predictionFullParitySamplesRef = useRef<number[]>([])
+  const predictionFrontMismatchStartedAtMsRef = useRef<number | null>(null)
+  const predictionLastFrontHardGuardAtMsRef = useRef<number | null>(null)
+  const predictionSegmentParityStatsRef = useRef<SegmentParityStats>({
+    sampleCount: 0,
+    frontWindowP95Deg: 0,
+    frontWindowMaxDeg: 0,
+    fullBodyP95Deg: 0,
+    fullBodyMaxDeg: 0,
+    frontMismatchMs: 0,
+    frontMismatchActive: false,
+  })
+  const predictionLastHeadLagBeforeBlendRef = useRef<number>(0)
 
   const appendNetLagEvent = useCallback(
     (
@@ -506,6 +609,23 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
     }
   }, [])
 
+  const clearPredictionParityMetrics = useCallback(() => {
+    predictionFrontParitySamplesRef.current = []
+    predictionFullParitySamplesRef.current = []
+    predictionFrontMismatchStartedAtMsRef.current = null
+    predictionLastFrontHardGuardAtMsRef.current = null
+    predictionLastHeadLagBeforeBlendRef.current = 0
+    predictionSegmentParityStatsRef.current = {
+      sampleCount: 0,
+      frontWindowP95Deg: 0,
+      frontWindowMaxDeg: 0,
+      fullBodyP95Deg: 0,
+      fullBodyMaxDeg: 0,
+      frontMismatchMs: 0,
+      frontMismatchActive: false,
+    }
+  }, [])
+
   const resetPredictionState = useCallback(() => {
     predictionCommandBufferRef.current.clear()
     predictionLatestInputSeqRef.current = null
@@ -524,13 +644,15 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
     predictionLastAliveRef.current = false
     predictionNeedsReconcileCheckRef.current = false
     predictionForceHardNextReconcileRef.current = false
+    predictionParityStateRef.current = null
     predictionInfoRef.current = {
       ...EMPTY_PREDICTION_INFO,
       predictionDisabledReason: 'not-ready',
     }
     clearPredictionEvents()
     clearPredictionPresentationMetrics()
-  }, [clearPredictionEvents, clearPredictionPresentationMetrics])
+    clearPredictionParityMetrics()
+  }, [clearPredictionEvents, clearPredictionParityMetrics, clearPredictionPresentationMetrics])
 
   useEffect(() => {
     resetPredictionState()
@@ -595,6 +717,8 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
       info: {
         ...predictionInfoRef.current,
         predictedHeadErrorDeg: { ...predictionInfoRef.current.predictedHeadErrorDeg },
+        frontSegmentParityDeg: { ...predictionInfoRef.current.frontSegmentParityDeg },
+        fullBodyParityDeg: { ...predictionInfoRef.current.fullBodyParityDeg },
       },
       recentEvents: predictionEventsRef.current.slice(-120).map((event) => ({ ...event })),
     }
@@ -604,6 +728,8 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
     (displaySnake: Point[] | null, replaySnake: Point[] | null) => {
       const headLagDeg = angularDeltaDeg(displaySnake?.[0] ?? null, replaySnake?.[0] ?? null)
       const bodyLagDeg = computeBodyLagP95Deg(displaySnake, replaySnake)
+      const frontLagDeg = angularDeltaDeg(displaySnake?.[1] ?? null, replaySnake?.[1] ?? null)
+      const stableForMicroSampling = frontLagDeg <= 6 && bodyLagDeg <= 8
 
       pushWindowSample(
         predictionHeadLagSamplesRef.current,
@@ -625,7 +751,7 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
 
       const midBodySample = computeMidBodyForward(displaySnake)
       const previousMidForward = predictionLastMidForwardRef.current
-      if (midBodySample && previousMidForward) {
+      if (stableForMicroSampling && midBodySample && previousMidForward) {
         const stepDeg = angularDeltaDeg(previousMidForward, midBodySample.forward)
         if (
           stepDeg >= PREDICTION_MICRO_REVERSAL_MIN_DEG &&
@@ -637,8 +763,8 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
           const sign = signedTurn > 1e-8 ? 1 : signedTurn < -1e-8 ? -1 : 0
           const previousSign = predictionLastMicroTurnSignRef.current
           const previousStepDeg = predictionLastMicroStepDegRef.current
-          const meaningfulCurrentStep = stepDeg >= 0.55
-          const meaningfulPreviousStep = previousStepDeg >= 0.55
+          const meaningfulCurrentStep = stepDeg >= 0.9
+          const meaningfulPreviousStep = previousStepDeg >= 0.9
           if (
             sign !== 0 &&
             previousSign !== 0 &&
@@ -820,6 +946,8 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
         if (!(mag > 1e-6) || !Number.isFinite(mag)) return null
         return tangent
       },
+      getCameraRotationStats: () => ({ ...cameraRotationStatsRef.current }),
+      getSegmentParityStats: () => ({ ...predictionSegmentParityStatsRef.current }),
     })
   }, [
     applyNetTuningOverrides,
@@ -841,10 +969,12 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
     netTuningOverridesRef,
     netTuningRef,
     clearPredictionPresentationMetrics,
+    cameraRotationStatsRef,
     predictionEventsRef,
     predictionInfoRef,
     predictionPresentationInfoRef,
     playerIdRef,
+    predictionSegmentParityStatsRef,
     localSnakeDisplayRef,
     tailGrowthEventsRef,
   ])
@@ -1099,6 +1229,7 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
         predictionAxisRef.current = null
         predictionPhysicsSnakeRef.current = null
         predictionDisplaySnakeRef.current = null
+        predictionParityStateRef.current = null
         predictionSoftStartAtMsRef.current = null
         predictionSoftUntilMsRef.current = null
         predictionSoftDurationMsRef.current = 0
@@ -1224,6 +1355,7 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
       snapshotBufferRef,
       tailDebugEnabled,
       tickIntervalRef,
+      predictionParityStateRef,
     ],
   )
 
@@ -1399,6 +1531,20 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
     ): GameStateSnapshot | null => {
       if (!snapshot || !localId) {
         localSnakeDisplayRef.current = null
+        predictionParityStateRef.current = null
+        predictionFrontParitySamplesRef.current = []
+        predictionFullParitySamplesRef.current = []
+        predictionFrontMismatchStartedAtMsRef.current = null
+        predictionLastFrontHardGuardAtMsRef.current = null
+        predictionSegmentParityStatsRef.current = {
+          sampleCount: 0,
+          frontWindowP95Deg: 0,
+          frontWindowMaxDeg: 0,
+          fullBodyP95Deg: 0,
+          fullBodyMaxDeg: 0,
+          frontMismatchMs: 0,
+          frontMismatchActive: false,
+        }
         predictionInfoRef.current = {
           ...predictionInfoRef.current,
           enabled: true,
@@ -1406,6 +1552,12 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
           latestAckSeq: predictionLatestAckSeqRef.current,
           pendingInputCount: predictionCommandBufferRef.current.size(),
           replayedInputCountLastFrame: 0,
+          replayedTickCountLastFrame: 0,
+          commandsDroppedByCoalescingLastFrame: 0,
+          commandsCoalescedPerTickP95LastFrame: 0,
+          frontSegmentParityDeg: { ...EMPTY_PREDICTION_ERROR },
+          fullBodyParityDeg: { ...EMPTY_PREDICTION_ERROR },
+          frontMismatchMs: 0,
           predictionDisabledReason: 'not-ready',
         }
         return snapshot
@@ -1414,6 +1566,20 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
       const localIndex = snapshot.players.findIndex((player) => player.id === localId)
       if (localIndex < 0) {
         localSnakeDisplayRef.current = null
+        predictionParityStateRef.current = null
+        predictionFrontParitySamplesRef.current = []
+        predictionFullParitySamplesRef.current = []
+        predictionFrontMismatchStartedAtMsRef.current = null
+        predictionLastFrontHardGuardAtMsRef.current = null
+        predictionSegmentParityStatsRef.current = {
+          sampleCount: 0,
+          frontWindowP95Deg: 0,
+          frontWindowMaxDeg: 0,
+          fullBodyP95Deg: 0,
+          fullBodyMaxDeg: 0,
+          frontMismatchMs: 0,
+          frontMismatchActive: false,
+        }
         predictionInfoRef.current = {
           ...predictionInfoRef.current,
           enabled: true,
@@ -1421,6 +1587,12 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
           latestAckSeq: predictionLatestAckSeqRef.current,
           pendingInputCount: predictionCommandBufferRef.current.size(),
           replayedInputCountLastFrame: 0,
+          replayedTickCountLastFrame: 0,
+          commandsDroppedByCoalescingLastFrame: 0,
+          commandsCoalescedPerTickP95LastFrame: 0,
+          frontSegmentParityDeg: { ...EMPTY_PREDICTION_ERROR },
+          fullBodyParityDeg: { ...EMPTY_PREDICTION_ERROR },
+          frontMismatchMs: 0,
           predictionDisabledReason: 'not-ready',
         }
         return snapshot
@@ -1452,6 +1624,20 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
         localSnakeDisplayRef.current = incomingSnake
         predictionPhysicsSnakeRef.current = cloneSnake(incomingSnake)
         predictionDisplaySnakeRef.current = cloneSnake(incomingSnake)
+        predictionParityStateRef.current = createSnakeParityStateFromPoints(incomingSnake)
+        predictionFrontParitySamplesRef.current = []
+        predictionFullParitySamplesRef.current = []
+        predictionFrontMismatchStartedAtMsRef.current = null
+        predictionLastFrontHardGuardAtMsRef.current = null
+        predictionSegmentParityStatsRef.current = {
+          sampleCount: 0,
+          frontWindowP95Deg: 0,
+          frontWindowMaxDeg: 0,
+          fullBodyP95Deg: 0,
+          fullBodyMaxDeg: 0,
+          frontMismatchMs: 0,
+          frontMismatchActive: false,
+        }
         predictionAxisRef.current = deriveLocalAxis(incomingSnake, predictionAxisRef.current)
         predictionDriftConsecutiveFramesRef.current = 0
         predictionAlphaFloorUntilMsRef.current = null
@@ -1465,6 +1651,12 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
           latestAckSeq: predictionLatestAckSeqRef.current,
           pendingInputCount: predictionCommandBufferRef.current.size(),
           replayedInputCountLastFrame: 0,
+          replayedTickCountLastFrame: 0,
+          commandsDroppedByCoalescingLastFrame: 0,
+          commandsCoalescedPerTickP95LastFrame: 0,
+          frontSegmentParityDeg: { ...EMPTY_PREDICTION_ERROR },
+          fullBodyParityDeg: { ...EMPTY_PREDICTION_ERROR },
+          frontMismatchMs: 0,
           predictionDisabledReason: disabledReason,
         }
         return snapshot
@@ -1478,6 +1670,7 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
       const baseReceivedAtMs = predictionAuthoritativeReceivedAtMsRef.current ?? performance.now()
       const spawnFloor = predictionLifeSpawnFloorRef.current ?? localPlayer.score
       const boostAllowed = localPlayer.isBoosting || localPlayer.score >= spawnFloor + 1
+      const snakeAngularRadius = snakeContactAngularRadiusForScale(localPlayer.girthScale)
       const nowMs = performance.now()
       const replayNowMs = predictionDebugPerturbation ? nowMs + 110 : nowMs
       const replayed = replayPredictedSnake({
@@ -1487,7 +1680,29 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
         pendingCommands,
         fallbackAxis: predictionAxisRef.current,
         boostAllowed,
+        snakeAngularRadius,
+        environment: environmentRef.current,
+        previousParityState: null,
       })
+      predictionParityStateRef.current = replayed.parityState
+
+      const preBlendParity = computeSnakeParitySamples(
+        predictionDisplaySnakeRef.current,
+        replayed.snake,
+      )
+      const frontMismatchActive =
+        !hardSpikeActive && preBlendParity.frontMaxDeg > PREDICTION_FRONT_HARD_GUARD_DEG
+      if (frontMismatchActive) {
+        if (predictionFrontMismatchStartedAtMsRef.current === null) {
+          predictionFrontMismatchStartedAtMsRef.current = nowMs
+        }
+      } else {
+        predictionFrontMismatchStartedAtMsRef.current = null
+      }
+      const frontMismatchMs =
+        predictionFrontMismatchStartedAtMsRef.current === null
+          ? 0
+          : Math.max(0, nowMs - predictionFrontMismatchStartedAtMsRef.current)
 
       if (predictionNeedsReconcileCheckRef.current) {
         const physicsHead =
@@ -1497,12 +1712,32 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
         const replayHead = replayed.snake[0] ?? null
         const errorDeg = angleBetweenDeg(physicsHead, replayHead)
         pushPredictionErrorSample(errorDeg)
-        const forceHard = predictionForceHardNextReconcileRef.current
         const softUntilMs = predictionSoftUntilMsRef.current
         const hardUntilMs = predictionHardDampenUntilMsRef.current
         const correctionWindowActive =
           (hardUntilMs !== null && nowMs < hardUntilMs) ||
           (softUntilMs !== null && nowMs < softUntilMs)
+        const frontWindowHardGuard =
+          !hardSpikeActive &&
+          (preBlendParity.frontMaxDeg > PREDICTION_FRONT_HARD_GUARD_DEG ||
+            frontMismatchMs > PREDICTION_FRONT_HARD_GUARD_MS)
+        let forceHard = predictionForceHardNextReconcileRef.current
+        if (frontWindowHardGuard) {
+          const lastGuardAt = predictionLastFrontHardGuardAtMsRef.current
+          const guardCooldownElapsed =
+            lastGuardAt === null || nowMs - lastGuardAt >= PREDICTION_FRONT_HARD_GUARD_COOLDOWN_MS
+          if (guardCooldownElapsed) {
+            forceHard = true
+            predictionLastFrontHardGuardAtMsRef.current = nowMs
+            appendPredictionEvent(
+              'reconcile_front_hard',
+              `front hard guard max=${preBlendParity.frontMaxDeg.toFixed(2)}deg mismatch=${frontMismatchMs.toFixed(1)}ms`,
+              {
+                magnitudeDeg: preBlendParity.frontMaxDeg,
+              },
+            )
+          }
+        }
         if (!correctionWindowActive || forceHard) {
           let decision = decideReconcile(errorDeg, forceHard)
           const activeSteering = activePredictionInput || pointerRef.current.active
@@ -1510,7 +1745,7 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
             decision.kind === 'soft' &&
             !forceHard &&
             activeSteering &&
-            decision.magnitudeDeg < 5.5
+            decision.magnitudeDeg < (localPlayer.isBoosting ? 4.4 : 5.5)
           ) {
             decision = {
               kind: 'none',
@@ -1523,11 +1758,34 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
             netDebugInfoRef.current.jitterMs > 35 ||
             netDebugInfoRef.current.receiveIntervalMs >
               Math.max(70, serverTickMsRef.current * 1.45)
-          if (decision.kind === 'hard' && !forceHard && underNetworkStress) {
+          const preserveHardCorrection =
+            localPlayer.isBoosting &&
+            activeSteering &&
+            !hardSpikeActive &&
+            decision.magnitudeDeg >= 6
+          if (
+            decision.kind === 'hard' &&
+            !forceHard &&
+            underNetworkStress &&
+            !preserveHardCorrection
+          ) {
             decision = {
               kind: 'soft',
               magnitudeDeg: decision.magnitudeDeg,
               durationMs: 120,
+            }
+          }
+          if (
+            decision.kind === 'hard' &&
+            !forceHard &&
+            !frontWindowHardGuard &&
+            !hardSpikeActive &&
+            decision.magnitudeDeg < 8.5
+          ) {
+            decision = {
+              kind: 'soft',
+              magnitudeDeg: decision.magnitudeDeg,
+              durationMs: 96,
             }
           }
           if (decision.kind === 'soft') {
@@ -1597,6 +1855,9 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
 
       const displayBeforeBlend = predictionDisplaySnakeRef.current
       const headLagBeforeBlend = angularDeltaDeg(displayBeforeBlend?.[0] ?? null, replayed.snake[0] ?? null)
+      const previousHeadLagBeforeBlend = predictionLastHeadLagBeforeBlendRef.current
+      const headLagRising = headLagBeforeBlend > previousHeadLagBeforeBlend + 0.15
+      predictionLastHeadLagBeforeBlendRef.current = headLagBeforeBlend
       const bodyLagBeforeBlend = computeBodyLagP95Deg(displayBeforeBlend, replayed.snake)
       if (
         headLagBeforeBlend > PREDICTION_DRIFT_HEAD_THRESHOLD_DEG ||
@@ -1620,18 +1881,125 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
         predictionAlphaFloorUntilMsRef.current = null
       }
 
-      const blendedSnake = blendPredictedSnake(
+      const boostErrorRising = localPlayer.isBoosting && headLagRising
+      if (boostErrorRising) {
+        alpha = clamp(alpha, activeSteering ? 0.42 : 0.24, activeSteering ? 0.74 : 0.62)
+      }
+
+      const headResponseBoost = boostErrorRising
+        ? activeSteering
+          ? 0.16
+          : 0.1
+        : activeSteering
+          ? 0.24
+          : 0.14
+      const tailDamping = boostErrorRising
+        ? activeSteering
+          ? 0.32
+          : 0.28
+        : activeSteering
+          ? 0.28
+          : 0.24
+
+      let blendedSnake = blendPredictedSnake(
         predictionDisplaySnakeRef.current,
         replayed.snake,
         alpha,
         {
           baseAlpha: alpha,
-          headResponseBoost: activeSteering ? 0.24 : 0.14,
-          tailDamping: activeSteering ? 0.28 : 0.24,
+          headResponseBoost,
+          tailDamping,
           microDeadbandDeg: PREDICTION_MICRO_DEADBAND_DEG,
         },
       )
-      updatePredictionPresentationMetrics(blendedSnake, replayed.snake)
+      const headLagAfterBlend = angularDeltaDeg(blendedSnake[0] ?? null, localPlayer.snake[0] ?? null)
+      if (headLagAfterBlend > PREDICTION_AUTHORITY_HEAD_LAG_SOFT_CAP_DEG) {
+        const lagWindow = Math.max(
+          0.5,
+          PREDICTION_AUTHORITY_HEAD_LAG_HARD_CAP_DEG - PREDICTION_AUTHORITY_HEAD_LAG_SOFT_CAP_DEG,
+        )
+        const lagBlend = clamp(
+          (headLagAfterBlend - PREDICTION_AUTHORITY_HEAD_LAG_SOFT_CAP_DEG) / lagWindow,
+          0,
+          1,
+        )
+        const authorityAlpha = activeSteering
+          ? 0.36 + lagBlend * 0.52
+          : 0.44 + lagBlend * 0.54
+        blendedSnake = blendPredictedSnake(blendedSnake, localPlayer.snake, authorityAlpha, {
+          baseAlpha: authorityAlpha,
+          headResponseBoost: 0,
+          tailDamping: 0.52,
+          microDeadbandDeg: PREDICTION_MICRO_DEADBAND_DEG,
+        })
+      }
+      const predictedFrontCount = Math.max(1, PREDICTION_DISPLAY_FRONT_PREDICTED_SEGMENTS)
+      const alignedCount = Math.min(blendedSnake.length, localPlayer.snake.length)
+      for (let index = predictedFrontCount; index < alignedCount; index += 1) {
+        const authoritativeNode = localPlayer.snake[index]
+        if (!authoritativeNode) continue
+        blendedSnake[index] = normalize(authoritativeNode)
+      }
+      const previousDisplayHead = predictionDisplaySnakeRef.current?.[0] ?? null
+      const nextHead = blendedSnake[0] ?? null
+      const authoritativeHead = localPlayer.snake[0] ?? null
+      if (nextHead) {
+        const authoritativeHeadLag = angularDeltaDeg(nextHead, authoritativeHead)
+        const maxHeadStepDeg = authoritativeHeadLag > 4.5 ? 7 : 4.8
+        blendedSnake[0] = clampAngularStep(previousDisplayHead, nextHead, maxHeadStepDeg)
+      }
+      updatePredictionPresentationMetrics(blendedSnake, localPlayer.snake)
+
+      const parityAgainstAuthoritative = computeSnakeParitySamples(blendedSnake, localPlayer.snake)
+      for (const sample of parityAgainstAuthoritative.frontSamples) {
+        pushWindowSample(
+          predictionFrontParitySamplesRef.current,
+          sample,
+          PREDICTION_PARITY_WINDOW_SIZE,
+        )
+      }
+      for (const sample of parityAgainstAuthoritative.fullSamples) {
+        pushWindowSample(
+          predictionFullParitySamplesRef.current,
+          sample,
+          PREDICTION_PARITY_WINDOW_SIZE,
+        )
+      }
+      const frontWindowSamples = predictionFrontParitySamplesRef.current
+      const fullBodySamples = predictionFullParitySamplesRef.current
+      const frontWindowP95Deg = computeP95(frontWindowSamples)
+      const frontWindowMaxDeg =
+        frontWindowSamples.length > 0
+          ? frontWindowSamples.reduce((acc, value) => Math.max(acc, value), 0)
+          : 0
+      const fullBodyP95Deg = computeP95(fullBodySamples)
+      const fullBodyMaxDeg =
+        fullBodySamples.length > 0
+          ? fullBodySamples.reduce((acc, value) => Math.max(acc, value), 0)
+          : 0
+      const frontMismatchActiveAuthoritative =
+        !hardSpikeActive && parityAgainstAuthoritative.frontMaxDeg > PREDICTION_FRONT_HARD_GUARD_DEG
+      if (frontMismatchActiveAuthoritative) {
+        if (predictionFrontMismatchStartedAtMsRef.current === null) {
+          predictionFrontMismatchStartedAtMsRef.current = nowMs
+        }
+      } else {
+        predictionFrontMismatchStartedAtMsRef.current = null
+      }
+      const frontMismatchMsAuthoritative =
+        predictionFrontMismatchStartedAtMsRef.current === null
+          ? 0
+          : Math.max(0, nowMs - predictionFrontMismatchStartedAtMsRef.current)
+      predictionSegmentParityStatsRef.current = {
+        sampleCount: fullBodySamples.length,
+        frontWindowP95Deg,
+        frontWindowMaxDeg,
+        fullBodyP95Deg,
+        fullBodyMaxDeg,
+        frontMismatchMs: frontMismatchMsAuthoritative,
+        frontMismatchActive: frontMismatchActiveAuthoritative,
+      }
+
       predictionDisplaySnakeRef.current = cloneSnake(blendedSnake)
       predictionAxisRef.current = replayed.axis
       localSnakeDisplayRef.current = cloneSnake(blendedSnake)
@@ -1642,6 +2010,22 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
         latestAckSeq: predictionLatestAckSeqRef.current,
         pendingInputCount: pendingCommands.length,
         replayedInputCountLastFrame: replayed.replayedCommandCount,
+        replayedTickCountLastFrame: replayed.replayedTickCount,
+        commandsDroppedByCoalescingLastFrame: replayed.commandsDroppedByCoalescing,
+        commandsCoalescedPerTickP95LastFrame: replayed.commandsCoalescedPerTickP95,
+        frontSegmentParityDeg: {
+          lastDeg: parityAgainstAuthoritative.frontMaxDeg,
+          p95Deg: frontWindowP95Deg,
+          maxDeg: frontWindowMaxDeg,
+        },
+        fullBodyParityDeg: {
+          lastDeg: parityAgainstAuthoritative.fullSamples.length
+            ? computeP95(parityAgainstAuthoritative.fullSamples)
+            : 0,
+          p95Deg: fullBodyP95Deg,
+          maxDeg: fullBodyMaxDeg,
+        },
+        frontMismatchMs: frontMismatchMsAuthoritative,
         predictionDisabledReason: 'none',
       }
 
@@ -1657,6 +2041,7 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
     },
     [
       appendPredictionEvent,
+      environmentRef,
       lagSpikeActiveRef,
       lagSpikeCauseRef,
       localSnakeDisplayRef,

@@ -23,10 +23,10 @@ use super::constants::{
     SMALL_PELLET_VIEW_MARGIN_MIN, SMALL_PELLET_VISIBLE_MAX, SMALL_PELLET_VISIBLE_MIN,
     SMALL_PELLET_ZOOM_MAX_CAMERA_DISTANCE, SMALL_PELLET_ZOOM_MIN_CAMERA_DISTANCE,
     SNAKE_GIRTH_MAX_SCALE, SNAKE_GIRTH_NODES_PER_STEP, SNAKE_GIRTH_STEP_PERCENT, SPAWN_CONE_ANGLE,
-    SPAWN_PLAYER_MIN_DISTANCE, STARTING_LENGTH, TICK_MS, TURN_RATE, TURN_RATE_MAX_MULTIPLIER,
-    TURN_BOOST_TURN_RATE_MULTIPLIER, TURN_RATE_MIN_MULTIPLIER, TURN_RESPONSE_GAIN_BOOST_PER_SEC,
-    TURN_RESPONSE_GAIN_NORMAL_PER_SEC, TURN_SCANG_BASE, TURN_SCANG_RANGE,
-    TURN_SC_LENGTH_DIVISOR, TURN_SC_MAX, TURN_SPEED_BOOST_TURN_PENALTY,
+    SPAWN_PLAYER_MIN_DISTANCE, STARTING_LENGTH, TICK_MS, TURN_BOOST_TURN_RATE_MULTIPLIER,
+    TURN_RATE, TURN_RATE_MAX_MULTIPLIER, TURN_RATE_MIN_MULTIPLIER,
+    TURN_RESPONSE_GAIN_BOOST_PER_SEC, TURN_RESPONSE_GAIN_NORMAL_PER_SEC, TURN_SCANG_BASE,
+    TURN_SCANG_RANGE, TURN_SC_LENGTH_DIVISOR, TURN_SC_MAX, TURN_SPEED_BOOST_TURN_PENALTY,
     TURN_SPEED_MIN_MULTIPLIER,
 };
 use super::digestion::{
@@ -54,7 +54,7 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
@@ -78,6 +78,9 @@ const OUTBOUND_HI_CAPACITY: usize = 16;
 const OUTBOUND_LO_CAPACITY: usize = 16;
 const PELLET_RESET_RETRY_MS: i64 = 250;
 const STATE_DELTA_KEYFRAME_INTERVAL: u32 = 4;
+const BOT_COUNT_ENV_KEY: &str = "SNAKE_BOT_COUNT";
+const BOT_SUPPRESS_ROOM_PREFIX_ENV_KEY: &str = "SNAKE_NO_BOTS_ROOM_PREFIX";
+const OXYGEN_DISABLED_ENV_KEY: &str = "SNAKE_DISABLE_OXYGEN";
 
 const DELTA_FRAME_KEYFRAME: u8 = 1 << 0;
 
@@ -133,6 +136,7 @@ struct SessionEntry {
 
 #[derive(Debug)]
 struct RoomState {
+    room_id: String,
     sessions: HashMap<String, SessionEntry>,
     players: HashMap<String, Player>,
     pellets: Vec<Pellet>,
@@ -278,12 +282,24 @@ enum JsonClientMessage {
 
 impl Room {
     pub fn new() -> Self {
-        Self::with_max_human_players(None)
+        Self::with_room_id_and_max_human_players("main".to_string(), None)
+    }
+
+    pub fn with_room_id(room_id: String) -> Self {
+        Self::with_room_id_and_max_human_players(room_id, None)
     }
 
     pub fn with_max_human_players(max_human_players: Option<usize>) -> Self {
+        Self::with_room_id_and_max_human_players("main".to_string(), max_human_players)
+    }
+
+    pub fn with_room_id_and_max_human_players(
+        room_id: String,
+        max_human_players: Option<usize>,
+    ) -> Self {
         Self {
             state: Mutex::new(RoomState {
+                room_id,
                 sessions: HashMap::new(),
                 players: HashMap::new(),
                 pellets: Vec::new(),
@@ -764,6 +780,41 @@ impl RoomState {
             .count()
     }
 
+    fn desired_bot_count(&self) -> usize {
+        static BOT_COUNT_OVERRIDE: OnceLock<Option<usize>> = OnceLock::new();
+        static BOT_SUPPRESS_ROOM_PREFIX: OnceLock<Option<String>> = OnceLock::new();
+
+        let suppress_prefix = BOT_SUPPRESS_ROOM_PREFIX.get_or_init(|| {
+            std::env::var(BOT_SUPPRESS_ROOM_PREFIX_ENV_KEY)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        });
+        if let Some(prefix) = suppress_prefix {
+            if self.room_id.starts_with(prefix) {
+                return 0;
+            }
+        }
+
+        let override_count = BOT_COUNT_OVERRIDE.get_or_init(|| {
+            std::env::var(BOT_COUNT_ENV_KEY)
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+        });
+        override_count.unwrap_or(BOT_COUNT)
+    }
+
+    fn oxygen_disabled() -> bool {
+        static OXYGEN_DISABLED: OnceLock<bool> = OnceLock::new();
+        *OXYGEN_DISABLED.get_or_init(|| {
+            std::env::var(OXYGEN_DISABLED_ENV_KEY)
+                .ok()
+                .map(|value| value.trim().to_ascii_lowercase())
+                .map(|value| value == "1" || value == "true" || value == "yes" || value == "on")
+                .unwrap_or(false)
+        })
+    }
+
     fn bot_count(&self) -> usize {
         self.players.values().filter(|player| player.is_bot).count()
     }
@@ -795,14 +846,20 @@ impl RoomState {
             return;
         }
 
+        let desired_bot_count = self.desired_bot_count();
+        if desired_bot_count == 0 {
+            self.remove_bots();
+            return;
+        }
+
         let mut current = self.bot_count();
-        if current >= BOT_COUNT {
+        if current >= desired_bot_count {
             return;
         }
 
         let mut index = self.next_bot_index();
         let mut new_bot_ids: Vec<String> = Vec::new();
-        while current < BOT_COUNT {
+        while current < desired_bot_count {
             let id = Uuid::new_v4();
             let id_string = id.to_string();
             let name = format!("Bot-{}", index);
@@ -2118,8 +2175,7 @@ impl RoomState {
         let baseline = (baseline_scang * baseline_spang).max(1e-6);
         let boost_window = (BOOST_MULTIPLIER - 1.0).max(1e-6);
         let boost_blend = clamp((speed - 1.0) / boost_window, 0.0, 1.0);
-        let boost_turn_mult =
-            1.0 + (TURN_BOOST_TURN_RATE_MULTIPLIER - 1.0).max(0.0) * boost_blend;
+        let boost_turn_mult = 1.0 + (TURN_BOOST_TURN_RATE_MULTIPLIER - 1.0).max(0.0) * boost_blend;
         let normalized = (scang * spang) / baseline;
         let raw_turn_rate = TURN_RATE * normalized * boost_turn_mult;
         clamp(
@@ -2241,12 +2297,18 @@ impl RoomState {
 
         let mut death_reasons: HashMap<String, &'static str> = HashMap::new();
         let mut oxygen_dead: HashSet<String> = HashSet::new();
+        let oxygen_disabled = Self::oxygen_disabled();
         let player_ids: Vec<String> = self.players.keys().cloned().collect();
         for id in &player_ids {
             let Some(player) = self.players.get_mut(id) else {
                 continue;
             };
             if !player.alive {
+                continue;
+            }
+            if oxygen_disabled {
+                player.oxygen = OXYGEN_MAX;
+                player.oxygen_damage_accumulator = 0.0;
                 continue;
             }
             let head = Point {

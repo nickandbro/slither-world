@@ -1,4 +1,4 @@
-import { useEffect, type Dispatch, type MutableRefObject, type SetStateAction } from 'react'
+import { useEffect, useRef, type Dispatch, type MutableRefObject, type SetStateAction } from 'react'
 import type { Camera, Environment, GameStateSnapshot, Point } from '@game/types'
 import type { RenderConfig } from '@game/hud'
 import {
@@ -9,7 +9,7 @@ import {
   type RendererPreference,
 } from '@render/webglScene'
 import { updateCamera } from '@game/camera'
-import { clamp, normalize } from '@game/math'
+import { clamp, normalize, rotateVectorByQuat } from '@game/math'
 import { drawHud } from '@game/hud'
 import {
   DEATH_TO_MENU_DELAY_MS,
@@ -40,6 +40,7 @@ import {
   digestionMaxProgress,
 } from '@app/orchestration/tailGrowthDebug'
 import type {
+  CameraRotationStats,
   LagSpikeCause,
   MotionStabilityDebugInfo,
   NetLagEvent,
@@ -127,6 +128,7 @@ type UseRendererSceneRuntimeOptions = {
   cameraBlendRef: MutableRefObject<number>
   cameraBlendStartMsRef: MutableRefObject<number | null>
   cameraRef: MutableRefObject<Camera>
+  controlsCameraRef: MutableRefObject<Camera>
   localHeadRef: MutableRefObject<Point | null>
   inputEnabledRef: MutableRefObject<boolean>
   menuUiModeRef: MutableRefObject<MenuUiMode>
@@ -154,6 +156,7 @@ type UseRendererSceneRuntimeOptions = {
     overrides: NetTuningOverrides
     resolved: NetTuning
   }
+  cameraRotationStatsRef: MutableRefObject<CameraRotationStats>
 }
 
 export function useRendererSceneRuntime(options: UseRendererSceneRuntimeOptions) {
@@ -216,6 +219,7 @@ export function useRendererSceneRuntime(options: UseRendererSceneRuntimeOptions)
     cameraBlendRef,
     cameraBlendStartMsRef,
     cameraRef,
+    controlsCameraRef,
     localHeadRef,
     inputEnabledRef,
     menuUiModeRef,
@@ -232,9 +236,29 @@ export function useRendererSceneRuntime(options: UseRendererSceneRuntimeOptions)
     netRxTotalBytesRef,
     buildNetLagReport,
     applyNetTuningOverrides,
+    cameraRotationStatsRef,
   } = options
 
   const RAF_SLOW_FRAMES_MAX = 24
+  const CAMERA_ROTATION_WINDOW_SIZE = 320
+  const CAMERA_REVERSAL_MIN_STEP_DEG = 0.45
+  const CONTROLS_CAMERA_FOLLOW_RATE = 72
+  const cameraStepSamplesRef = useRef<number[]>([])
+  const cameraReversalCountRef = useRef(0)
+  const cameraLastForwardRef = useRef<Point | null>(null)
+  const cameraLastTurnSignRef = useRef(0)
+  const cameraLastStepDegRef = useRef(0)
+
+  const computeP95 = (values: number[]): number => {
+    if (values.length === 0) return 0
+    const sorted = values
+      .filter((value) => Number.isFinite(value))
+      .slice()
+      .sort((a, b) => a - b)
+    if (sorted.length === 0) return 0
+    const index = Math.max(0, Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1))
+    return sorted[index] ?? 0
+  }
 
   const resetBoostFxVisual = () => {
     resetBoostFx(boostFxRef.current, boostFxStateRef.current)
@@ -356,9 +380,11 @@ export function useRendererSceneRuntime(options: UseRendererSceneRuntimeOptions)
 		            const rawSnapshotPlayer =
 		              rawSnapshot?.players.find((player) => player.id === localId) ?? null
             const localHead = localSnapshotPlayer?.snake[0] ?? null
+            const authoritativeHead = rawSnapshotPlayer?.snake[0] ?? null
             const hasSpawnedSnake =
               !!localSnapshotPlayer && localSnapshotPlayer.alive && localSnapshotPlayer.snake.length > 0
             const rawGameplayCamera = updateCamera(localHead, cameraUpRef)
+            const authoritativeGameplayCamera = updateCamera(authoritativeHead, cameraUpRef)
             const phase = menuPhaseRef.current
 
 	            if (tailDebugEnabled) {
@@ -689,6 +715,103 @@ export function useRendererSceneRuntime(options: UseRendererSceneRuntimeOptions)
               }
             }
 
+            let controlsSourceCamera = renderCamera
+            if (phase === 'playing' && hasSpawnedSnake && authoritativeGameplayCamera.active) {
+              if (renderCamera.active) {
+                controlsSourceCamera = {
+                  active: true,
+                  q: slerpQuaternion(authoritativeGameplayCamera.q, renderCamera.q, 0.35),
+                }
+              } else {
+                controlsSourceCamera = authoritativeGameplayCamera
+              }
+            }
+
+            if (controlsSourceCamera.active) {
+              const controlsCamera = controlsCameraRef.current
+              if (!controlsCamera.active) {
+                controlsCameraRef.current = {
+                  active: true,
+                  q: { ...controlsSourceCamera.q },
+                }
+              } else {
+                const controlsAlpha = clamp(
+                  1 - Math.exp(-CONTROLS_CAMERA_FOLLOW_RATE * Math.max(0, frameDeltaSeconds)),
+                  0,
+                  1,
+                )
+                controlsCameraRef.current = {
+                  active: true,
+                  q: slerpQuaternion(controlsCamera.q, controlsSourceCamera.q, controlsAlpha),
+                }
+              }
+            } else {
+              controlsCameraRef.current = controlsSourceCamera
+            }
+
+            if (renderCamera.active) {
+              const forward = normalize(rotateVectorByQuat({ x: 0, y: 0, z: 1 }, renderCamera.q))
+              const previousForward = cameraLastForwardRef.current
+              if (previousForward) {
+                const dotValue = clamp(
+                  previousForward.x * forward.x +
+                    previousForward.y * forward.y +
+                    previousForward.z * forward.z,
+                  -1,
+                  1,
+                )
+                const stepDeg = (Math.acos(dotValue) * 180) / Math.PI
+                if (Number.isFinite(stepDeg)) {
+                  const stepSamples = cameraStepSamplesRef.current
+                  stepSamples.push(Math.max(0, stepDeg))
+                  if (stepSamples.length > CAMERA_ROTATION_WINDOW_SIZE) {
+                    stepSamples.splice(0, stepSamples.length - CAMERA_ROTATION_WINDOW_SIZE)
+                  }
+                  if (stepDeg >= CAMERA_REVERSAL_MIN_STEP_DEG) {
+                    const normalSource = localHead ? normalize(localHead) : { x: 0, y: 1, z: 0 }
+                    const crossX = previousForward.y * forward.z - previousForward.z * forward.y
+                    const crossY = previousForward.z * forward.x - previousForward.x * forward.z
+                    const crossZ = previousForward.x * forward.y - previousForward.y * forward.x
+                    const signedTurn =
+                      crossX * normalSource.x + crossY * normalSource.y + crossZ * normalSource.z
+                    const sign = signedTurn > 1e-8 ? 1 : signedTurn < -1e-8 ? -1 : 0
+                    const previousSign = cameraLastTurnSignRef.current
+                    const previousStepDeg = cameraLastStepDegRef.current
+                    if (
+                      sign !== 0 &&
+                      previousSign !== 0 &&
+                      sign !== previousSign &&
+                      previousStepDeg >= CAMERA_REVERSAL_MIN_STEP_DEG
+                    ) {
+                      cameraReversalCountRef.current += 1
+                    }
+                    if (sign !== 0) {
+                      cameraLastTurnSignRef.current = sign
+                    }
+                    cameraLastStepDegRef.current = stepDeg
+                  }
+                  const stepP95Deg = computeP95(stepSamples)
+                  const stepMaxDeg =
+                    stepSamples.length > 0
+                      ? stepSamples.reduce((acc, value) => Math.max(acc, value), 0)
+                      : 0
+                  const reversalCount = cameraReversalCountRef.current
+                  cameraRotationStatsRef.current = {
+                    sampleCount: stepSamples.length,
+                    stepP95Deg,
+                    stepMaxDeg,
+                    reversalCount,
+                    reversalRate: reversalCount / Math.max(1, stepSamples.length),
+                  }
+                }
+              }
+              cameraLastForwardRef.current = forward
+            } else {
+              cameraLastForwardRef.current = null
+              cameraLastTurnSignRef.current = 0
+              cameraLastStepDegRef.current = 0
+            }
+
             cameraRef.current = renderCamera
             renderCameraDistanceRef.current = renderDistance
             renderCameraVerticalOffsetRef.current = renderVerticalOffset
@@ -926,6 +1049,7 @@ export function useRendererSceneRuntime(options: UseRendererSceneRuntimeOptions)
       headScreenRef.current = null
       localSnakeDisplayRef.current = null
       lastRenderFrameMsRef.current = null
+      controlsCameraRef.current = { q: { ...MENU_CAMERA.q }, active: true }
       resetBoostFxVisual()
     }
     // Renderer swaps are intentionally triggered by explicit backend preference only.

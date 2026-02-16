@@ -129,7 +129,7 @@ export function usePointerCanvasControls(
   }, [glCanvasRef, inputEnabledRef, sendInputSnapshot, setPointerScreen])
 
   const isPointerBoostButtonPressed = useCallback((event: ReactPointerEvent<HTMLCanvasElement>) => {
-    return (event.buttons & (1 | 2)) !== 0
+    return (event.buttons & 2) !== 0
   }, [])
 
   const getJoystickRadiusPx = useCallback(() => {

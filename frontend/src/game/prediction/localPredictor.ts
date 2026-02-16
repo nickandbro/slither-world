@@ -1,30 +1,29 @@
 import { clamp, cross, dot, normalize } from '../math'
-import type { Point } from '../types'
+import type { Environment, Point } from '../types'
 import type { PredictionCommand } from './types'
+import {
+  BASE_SPEED,
+  BOOST_MULTIPLIER,
+  TICK_MS,
+  steeringGainForSpeed,
+  turnRateFor,
+} from './parity/constants'
+import { applySnakeWithCollisions } from './parity/collision'
+import {
+  createSnakeParityStateFromPoints,
+  pointsFromSnakeParityState,
+  rebaseSnakeParityState,
+  rotateAroundAxis,
+  type SnakeParityState,
+} from './parity/snake'
 
-const WORLD_SCALE = 3
-const NODE_ANGLE = Math.PI / 60 / WORLD_SCALE
-const NODE_QUEUE_SIZE = 9
-const MOVE_SPEED_MULTIPLIER = 1.75
-const BASE_SPEED = ((NODE_ANGLE * 2) / (NODE_QUEUE_SIZE + 1)) * MOVE_SPEED_MULTIPLIER
-const BOOST_MULTIPLIER = 2.16
-const TURN_RATE = 0.13
-const STARTING_LENGTH = 8
-const TURN_SCANG_BASE = 0.13
-const TURN_SCANG_RANGE = 0.87
-const TURN_SC_LENGTH_DIVISOR = 106
-const TURN_SC_MAX = 6
-const TURN_SPEED_BOOST_TURN_PENALTY = 0.55
-const TURN_SPEED_MIN_MULTIPLIER = 0.2
-const TURN_BOOST_TURN_RATE_MULTIPLIER = 4
-const TURN_RESPONSE_GAIN_NORMAL_PER_SEC = 9.5
-const TURN_RESPONSE_GAIN_BOOST_PER_SEC = 5.8
-const TURN_RATE_MIN_MULTIPLIER = 0.22
-const TURN_RATE_MAX_MULTIPLIER = 4
-const TICK_MS = 50
 const REPLAY_MAX_TICKS = 4
-const REPLAY_SUBSTEP_TARGET_MS = 8
-const REPLAY_MAX_SUBSTEPS = 24
+
+type CoalescedTickInput = {
+  axis: Point | null
+  boost: boolean
+  sourceCount: number
+}
 
 export type ReplayPredictionOptions = {
   snake: Point[]
@@ -33,12 +32,19 @@ export type ReplayPredictionOptions = {
   pendingCommands: PredictionCommand[]
   fallbackAxis: Point | null
   boostAllowed: boolean
+  snakeAngularRadius: number
+  environment: Environment | null
+  previousParityState: SnakeParityState | null
 }
 
 export type ReplayPredictionResult = {
   snake: Point[]
   axis: Point
+  parityState: SnakeParityState
   replayedCommandCount: number
+  replayedTickCount: number
+  commandsDroppedByCoalescing: number
+  commandsCoalescedPerTickP95: number
 }
 
 export function cloneSnake(snake: Point[]): Point[] {
@@ -87,27 +93,6 @@ export function deriveLocalAxis(snake: Point[], fallbackAxis: Point | null): Poi
   return normalize(cross(head, worldUp))
 }
 
-function rotateAroundAxis(point: Point, axis: Point, angle: number): Point {
-  const u = normalize(axis)
-  const cosA = Math.cos(angle)
-  const sinA = Math.sin(angle)
-  const dotProd = u.x * point.x + u.y * point.y + u.z * point.z
-  return normalize({
-    x:
-      point.x * cosA +
-      (u.y * point.z - u.z * point.y) * sinA +
-      u.x * dotProd * (1 - cosA),
-    y:
-      point.y * cosA +
-      (u.z * point.x - u.x * point.z) * sinA +
-      u.y * dotProd * (1 - cosA),
-    z:
-      point.z * cosA +
-      (u.x * point.y - u.y * point.x) * sinA +
-      u.z * dotProd * (1 - cosA),
-  })
-}
-
 function rotateToward(current: Point, target: Point, maxAngle: number): Point {
   const currentNorm = normalize(current)
   const targetNorm = normalize(target)
@@ -122,70 +107,103 @@ function rotateToward(current: Point, target: Point, maxAngle: number): Point {
   return rotateAroundAxis(currentNorm, axis, maxAngle)
 }
 
-function slitherScangForLen(snakeLen: number): number {
-  const clampedLen = Math.max(2, snakeLen)
-  const sc = Math.min(TURN_SC_MAX, 1 + (clampedLen - 2) / TURN_SC_LENGTH_DIVISOR)
-  const lengthRatio = Math.max(0, (7 - sc) / 6)
-  return TURN_SCANG_BASE + TURN_SCANG_RANGE * lengthRatio * lengthRatio
-}
-
-function slitherSpangForSpeed(speedFactor: number): number {
-  const safeSpeedFactor = Number.isFinite(speedFactor) ? Math.max(0, speedFactor) : 0
-  const boostExcess = Math.max(0, safeSpeedFactor - 1)
-  const penalty = 1 + Math.max(0, TURN_SPEED_BOOST_TURN_PENALTY) * boostExcess
-  const damped = 1 / Math.max(1e-6, penalty)
-  return clamp(damped, TURN_SPEED_MIN_MULTIPLIER, 1)
-}
-
-function resolveTurnRate(snakeLen: number, speedFactor: number): number {
-  const safeSpeedFactor = Number.isFinite(speedFactor) ? Math.max(0, speedFactor) : 0
-  const scang = slitherScangForLen(snakeLen)
-  const spang = slitherSpangForSpeed(safeSpeedFactor)
-  const baselineScang = slitherScangForLen(STARTING_LENGTH)
-  const baselineSpang = slitherSpangForSpeed(1)
-  const baseline = Math.max(1e-6, baselineScang * baselineSpang)
-  const boostWindow = Math.max(1e-6, BOOST_MULTIPLIER - 1)
-  const boostBlend = clamp((safeSpeedFactor - 1) / boostWindow, 0, 1)
-  const boostTurnMult = 1 + Math.max(0, TURN_BOOST_TURN_RATE_MULTIPLIER - 1) * boostBlend
-  const normalized = (scang * spang) / baseline
-  const rawTurnRate = TURN_RATE * normalized * boostTurnMult
-  return clamp(
-    rawTurnRate,
-    TURN_RATE * TURN_RATE_MIN_MULTIPLIER,
-    TURN_RATE * TURN_RATE_MAX_MULTIPLIER,
-  )
-}
-
-function steeringGainForSpeed(speedFactor: number): number {
-  const safeSpeedFactor = Number.isFinite(speedFactor) ? Math.max(0, speedFactor) : 0
-  const boostWindow = Math.max(1e-6, BOOST_MULTIPLIER - 1)
-  const blend = clamp((safeSpeedFactor - 1) / boostWindow, 0, 1)
-  return (
-    TURN_RESPONSE_GAIN_NORMAL_PER_SEC +
-    (TURN_RESPONSE_GAIN_BOOST_PER_SEC - TURN_RESPONSE_GAIN_NORMAL_PER_SEC) * blend
-  )
-}
-
-function resolveTurnStep(
+function steeringTurnStep(
   currentAxis: Point,
   targetAxis: Point,
-  snakeLen: number,
-  speedFactor: number,
-  stepMs: number,
+  turnCap: number,
+  steeringGainPerSec: number,
+  dtSeconds: number,
 ): number {
-  const turnCap = Math.max(0, resolveTurnRate(snakeLen, speedFactor) * (stepMs / TICK_MS))
-  if (turnCap <= 0) return 0
+  const cappedTurn = Math.max(0, turnCap)
+  if (cappedTurn <= 0) return 0
   const current = normalize(currentAxis)
   const target = normalize(targetAxis)
   const angleError = Math.acos(clamp(dot(current, target), -1, 1))
-  if (!Number.isFinite(angleError)) return turnCap
-  const dtSec = Math.max(0, stepMs) / 1000
-  const proportionalStep = angleError * Math.max(0, steeringGainForSpeed(speedFactor)) * dtSec
-  return clamp(proportionalStep, 0, turnCap)
+  if (!Number.isFinite(angleError)) return cappedTurn
+  const proportionalStep = angleError * Math.max(0, steeringGainPerSec) * Math.max(0, dtSeconds)
+  return clamp(proportionalStep, 0, cappedTurn)
 }
 
-function applySnakeRotationStep(snake: Point[], axis: Point, velocity: number): Point[] {
-  return snake.map((node) => rotateAroundAxis(node, axis, velocity))
+function computeP95(values: number[]): number {
+  if (values.length === 0) return 0
+  const sorted = values
+    .filter((value) => Number.isFinite(value))
+    .slice()
+    .sort((a, b) => a - b)
+  if (sorted.length === 0) return 0
+  const index = Math.max(0, Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1))
+  return sorted[index] ?? 0
+}
+
+function coalesceCommandsByTick(
+  sortedCommands: PredictionCommand[],
+  startMs: number,
+  durationMs: number,
+): {
+  tickInputs: CoalescedTickInput[]
+  droppedByCoalescing: number
+  replayedCommandCount: number
+  coalescedPerTickP95: number
+} {
+  const tickCount = Math.max(1, Math.ceil(durationMs / TICK_MS))
+  const tickInputs: CoalescedTickInput[] = new Array(tickCount)
+  const consumedPerTick: number[] = []
+  let droppedByCoalescing = 0
+  let replayedCommandCount = 0
+
+  let commandIndex = 0
+  let activeAxis: Point | null = null
+  let activeBoost = false
+
+  while (
+    commandIndex < sortedCommands.length &&
+    Number.isFinite(sortedCommands[commandIndex]?.sentAtMs) &&
+    (sortedCommands[commandIndex]?.sentAtMs ?? 0) <= startMs
+  ) {
+    const command = sortedCommands[commandIndex]
+    if (!command) break
+    activeAxis = command.axis
+    activeBoost = command.boost
+    commandIndex += 1
+  }
+
+  for (let tickIndex = 0; tickIndex < tickCount; tickIndex += 1) {
+    const tickEndMs = startMs + Math.min(durationMs, (tickIndex + 1) * TICK_MS)
+    let latestInWindow: PredictionCommand | null = null
+    let consumedInWindow = 0
+    while (
+      commandIndex < sortedCommands.length &&
+      Number.isFinite(sortedCommands[commandIndex]?.sentAtMs) &&
+      (sortedCommands[commandIndex]?.sentAtMs ?? Number.POSITIVE_INFINITY) <= tickEndMs
+    ) {
+      const command = sortedCommands[commandIndex]
+      if (!command) break
+      latestInWindow = command
+      consumedInWindow += 1
+      commandIndex += 1
+    }
+    if (latestInWindow) {
+      activeAxis = latestInWindow.axis
+      activeBoost = latestInWindow.boost
+      replayedCommandCount += 1
+    }
+    if (consumedInWindow > 0) {
+      consumedPerTick.push(consumedInWindow)
+      droppedByCoalescing += Math.max(0, consumedInWindow - 1)
+    }
+    tickInputs[tickIndex] = {
+      axis: activeAxis,
+      boost: activeBoost,
+      sourceCount: consumedInWindow,
+    }
+  }
+
+  return {
+    tickInputs,
+    droppedByCoalescing,
+    replayedCommandCount,
+    coalescedPerTickP95: computeP95(consumedPerTick),
+  }
 }
 
 export function replayPredictedSnake(options: ReplayPredictionOptions): ReplayPredictionResult {
@@ -196,13 +214,22 @@ export function replayPredictedSnake(options: ReplayPredictionOptions): ReplayPr
     pendingCommands,
     fallbackAxis,
     boostAllowed,
+    snakeAngularRadius,
+    environment,
+    previousParityState,
   } = options
   const outputSnake = cloneSnake(snake)
-  if (outputSnake.length === 0) {
+  const baseState = rebaseSnakeParityState(outputSnake, previousParityState)
+  if (baseState.nodes.length === 0) {
+    const emptyState = createSnakeParityStateFromPoints([])
     return {
-      snake: outputSnake,
+      snake: [],
       axis: fallbackAxis ? normalize(fallbackAxis) : { x: 0, y: 1, z: 0 },
+      parityState: emptyState,
       replayedCommandCount: 0,
+      replayedTickCount: 0,
+      commandsDroppedByCoalescing: 0,
+      commandsCoalescedPerTickP95: 0,
     }
   }
 
@@ -210,10 +237,15 @@ export function replayPredictedSnake(options: ReplayPredictionOptions): ReplayPr
   const cappedNowMs = Math.max(startMs, nowMs)
   let durationMs = Math.max(0, cappedNowMs - startMs)
   if (durationMs <= 0.25) {
+    const basePoints = pointsFromSnakeParityState(baseState)
     return {
-      snake: outputSnake,
-      axis: deriveLocalAxis(outputSnake, fallbackAxis),
+      snake: basePoints,
+      axis: deriveLocalAxis(basePoints, fallbackAxis),
+      parityState: baseState,
       replayedCommandCount: 0,
+      replayedTickCount: 0,
+      commandsDroppedByCoalescing: 0,
+      commandsCoalescedPerTickP95: 0,
     }
   }
 
@@ -222,48 +254,54 @@ export function replayPredictedSnake(options: ReplayPredictionOptions): ReplayPr
     .sort((a, b) => a.sentAtMs - b.sentAtMs)
     .filter((command) => Number.isFinite(command.sentAtMs))
 
-  let axis = deriveLocalAxis(outputSnake, fallbackAxis)
-  let replayedCommandCount = 0
-  let activeAxis: Point | null = null
-  let activeBoost = false
-  let commandIndex = 0
-
-  const consumeCommandsUntil = (timeMs: number) => {
-    while (commandIndex < sortedCommands.length && sortedCommands[commandIndex]!.sentAtMs <= timeMs) {
-      activeAxis = sortedCommands[commandIndex]!.axis
-      activeBoost = sortedCommands[commandIndex]!.boost
-      commandIndex += 1
-      replayedCommandCount += 1
-    }
-  }
-  consumeCommandsUntil(startMs)
-
   const maxReplayMs = TICK_MS * REPLAY_MAX_TICKS
   durationMs = Math.min(durationMs, maxReplayMs)
-  const substepCount = clamp(
-    Math.ceil(durationMs / REPLAY_SUBSTEP_TARGET_MS),
-    1,
-    REPLAY_MAX_SUBSTEPS,
-  )
-  const stepMs = durationMs / substepCount
-  const speedPerStep = BASE_SPEED * (stepMs / TICK_MS)
+  const tickReplay = coalesceCommandsByTick(sortedCommands, startMs, durationMs)
+  let axis = deriveLocalAxis(pointsFromSnakeParityState(baseState), fallbackAxis)
 
-  for (let step = 0; step < substepCount; step += 1) {
-    const stepEndMs = startMs + (step + 1) * stepMs
-    consumeCommandsUntil(stepEndMs)
+  for (let tickIndex = 0; tickIndex < tickReplay.tickInputs.length; tickIndex += 1) {
+    const tickInput = tickReplay.tickInputs[tickIndex]
+    const tickStartMs = tickIndex * TICK_MS
+    const tickEndMs = Math.min(durationMs, tickStartMs + TICK_MS)
+    const tickDurationMs = Math.max(0, tickEndMs - tickStartMs)
+    if (tickDurationMs <= 0) continue
 
-    const targetAxis = activeAxis ? normalize(activeAxis) : axis
-    const speedFactor = activeBoost && boostAllowed ? BOOST_MULTIPLIER : 1
-    const turnPerStep = resolveTurnStep(axis, targetAxis, outputSnake.length, speedFactor, stepMs)
-    axis = rotateToward(axis, targetAxis, Math.max(0, turnPerStep))
-    const velocity = speedPerStep * speedFactor
-    const nextSnake = applySnakeRotationStep(outputSnake, axis, velocity)
-    outputSnake.splice(0, outputSnake.length, ...nextSnake)
+    const targetAxis = tickInput?.axis ? normalize(tickInput.axis) : axis
+    const speedFactor = tickInput?.boost && boostAllowed ? BOOST_MULTIPLIER : 1
+    const stepCount = Math.max(1, Math.round(speedFactor))
+    const stepVelocity = (BASE_SPEED * speedFactor) / stepCount
+    const turnPerTick = turnRateFor(baseState.nodes.length, speedFactor)
+    const turnPerSubstepCap = turnPerTick / stepCount
+    const steeringGain = steeringGainForSpeed(speedFactor)
+    const substepDtSeconds = (tickDurationMs / 1000) / stepCount
+    for (let substep = 0; substep < stepCount; substep += 1) {
+      const turnStep = steeringTurnStep(
+        axis,
+        targetAxis,
+        turnPerSubstepCap,
+        steeringGain,
+        substepDtSeconds,
+      )
+      axis = rotateToward(axis, targetAxis, turnStep)
+      axis = applySnakeWithCollisions(
+        baseState,
+        axis,
+        snakeAngularRadius,
+        stepVelocity,
+        1,
+        environment,
+      )
+    }
   }
 
+  const replayedSnake = pointsFromSnakeParityState(baseState)
   return {
-    snake: outputSnake,
+    snake: replayedSnake,
     axis,
-    replayedCommandCount,
+    parityState: baseState,
+    replayedCommandCount: tickReplay.replayedCommandCount,
+    replayedTickCount: tickReplay.tickInputs.length,
+    commandsDroppedByCoalescing: tickReplay.droppedByCoalescing,
+    commandsCoalescedPerTickP95: tickReplay.coalescedPerTickP95,
   }
 }

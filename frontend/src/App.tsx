@@ -67,6 +67,7 @@ import { SkinBuilderOverlay } from './app/components/SkinBuilderOverlay'
 import { SkinOverlay } from './app/components/SkinOverlay'
 import { RealtimeLeaderboard, type RealtimeLeaderboardEntry } from './app/components/RealtimeLeaderboard'
 import type {
+  CameraRotationStats,
   LagSpikeCause,
   MotionStabilityDebugInfo,
   NetLagEvent,
@@ -132,6 +133,7 @@ export default function App() {
   })
   const sendIntervalRef = useRef<number | null>(null)
   const lastInputSignatureRef = useRef<string>('')
+  const lastInputAxisRef = useRef<Point | null>(null)
   const lastInputSentAtMsRef = useRef(0)
   const lastViewSignatureRef = useRef<string>('')
   const lastViewSentAtMsRef = useRef(0)
@@ -164,6 +166,7 @@ export default function App() {
   const netTuningRef = useRef(resolveNetTuning(DEFAULT_NET_TUNING))
   const netTuningRevisionRef = useRef(0)
   const cameraRef = useRef<Camera>({ q: { ...IDENTITY_QUAT }, active: false })
+  const controlsCameraRef = useRef<Camera>({ q: { ...IDENTITY_QUAT }, active: false })
   const cameraUpRef = useRef<Point>({ x: 0, y: 1, z: 0 })
   const stableGameplayCameraRef = useRef<Camera>({ q: { ...MENU_CAMERA.q }, active: true })
   const lagCameraHoldActiveRef = useRef(false)
@@ -232,6 +235,13 @@ export default function App() {
     backwardCorrectionCount: 0,
     minHeadDot: 1,
     sampleCount: 0,
+  })
+  const cameraRotationStatsRef = useRef<CameraRotationStats>({
+    sampleCount: 0,
+    stepP95Deg: 0,
+    stepMaxDeg: 0,
+    reversalCount: 0,
+    reversalRate: 0,
   })
   const rafPerfRef = useRef<RafPerfInfo>({
     enabled: false,
@@ -409,6 +419,7 @@ export default function App() {
   }, [activeRenderer, rendererFallbackReason])
 
   function sendInputSnapshot(force = false) {
+    const INPUT_AXIS_DEADBAND_DEG = 0.05
     const socket = socketRef.current
     if (!socket || socket.readyState !== WebSocket.OPEN) return
 
@@ -428,16 +439,32 @@ export default function App() {
         const dy = pointerY - headScreen.y
         const distSq = dx * dx + dy * dy
         if (distSq >= 9) {
-          return axisFromPointer(Math.atan2(dy, dx), cameraRef.current)
+          return axisFromPointer(Math.atan2(dy, dx), controlsCameraRef.current)
         }
         return null
       }
       return webglRef.current?.getPointerAxis?.() ?? null
     }
 
-    const axis = inputEnabledRef.current
+    const rawAxis = inputEnabledRef.current
       ? joystickAxisRef.current ?? resolvePointerAxis()
       : null
+    const axis =
+      !force && rawAxis && lastInputAxisRef.current
+        ? (() => {
+            const previousAxis = lastInputAxisRef.current
+            if (!previousAxis) return rawAxis
+            const dotValue = clamp(
+              rawAxis.x * previousAxis.x + rawAxis.y * previousAxis.y + rawAxis.z * previousAxis.z,
+              -1,
+              1,
+            )
+            const deltaDeg = (Math.acos(dotValue) * 180) / Math.PI
+            return Number.isFinite(deltaDeg) && deltaDeg < INPUT_AXIS_DEADBAND_DEG
+              ? previousAxis
+              : rawAxis
+          })()
+        : rawAxis
     const nowMs = performance.now()
     const boost = inputEnabledRef.current && pointerRef.current.boost
     const axisSignature = axis
@@ -450,6 +477,7 @@ export default function App() {
       const inputSeq = enqueuePredictedInputCommand(axis, boost, nowMs)
       socket.send(encodeInputFast(axis, boost, inputSeq))
       lastInputSignatureRef.current = inputSignature
+      lastInputAxisRef.current = axis ? { ...axis } : null
       lastInputSentAtMsRef.current = nowMs
     }
 
@@ -567,6 +595,8 @@ export default function App() {
     lagSpikeArrivalGapCooldownUntilMsRef,
     lagImpairmentUntilMsRef,
     localSnakeDisplayRef,
+    environmentRef,
+    cameraRotationStatsRef,
   })
 
   useAppStateSync({
@@ -718,7 +748,7 @@ export default function App() {
     joystickAxisRef,
     joystickUiRef,
     joystickRootRef,
-    cameraRef,
+    cameraRef: controlsCameraRef,
     cameraDistanceRef,
     sendInputSnapshot,
     setPointerButtonBoostInput,
@@ -813,6 +843,7 @@ export default function App() {
     cameraBlendRef,
     cameraBlendStartMsRef,
     cameraRef,
+    controlsCameraRef,
     localHeadRef,
     inputEnabledRef,
     menuUiModeRef,
@@ -829,6 +860,7 @@ export default function App() {
     netRxTotalBytesRef,
     buildNetLagReport,
     applyNetTuningOverrides,
+    cameraRotationStatsRef,
   })
 
   const { handleJoinRoom, handlePlay, handleRendererModeChange } = useMenuGameplayActions({

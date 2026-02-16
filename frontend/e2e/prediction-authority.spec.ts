@@ -21,7 +21,13 @@ type PredictionInfo = {
   latestAckSeq: number | null
   pendingInputCount: number
   replayedInputCountLastFrame: number
+  replayedTickCountLastFrame: number
+  commandsDroppedByCoalescingLastFrame: number
+  commandsCoalescedPerTickP95LastFrame: number
   predictedHeadErrorDeg: { lastDeg: number; p95Deg: number; maxDeg: number }
+  frontSegmentParityDeg: { lastDeg: number; p95Deg: number; maxDeg: number }
+  fullBodyParityDeg: { lastDeg: number; p95Deg: number; maxDeg: number }
+  frontMismatchMs: number
   correctionSoftCount: number
   correctionHardCount: number
   lastCorrectionMagnitudeDeg: number
@@ -33,6 +39,7 @@ type PredictionEvent = {
   ackSeq: number | null
   seq: number | null
   message: string
+  magnitudeDeg?: number | null
 }
 
 type MotionInfo = {
@@ -58,6 +65,24 @@ type HeadRotationStats = {
   reversalRate: number
 }
 
+type CameraRotationStats = {
+  sampleCount: number
+  stepP95Deg: number
+  stepMaxDeg: number
+  reversalCount: number
+  reversalRate: number
+}
+
+type SegmentParityStats = {
+  sampleCount: number
+  frontWindowP95Deg: number
+  frontWindowMaxDeg: number
+  fullBodyP95Deg: number
+  fullBodyMaxDeg: number
+  frontMismatchMs: number
+  frontMismatchActive: boolean
+}
+
 type PredictionDiagnostics = {
   predictionInfo: PredictionInfo | null
   predictionReport: unknown
@@ -67,6 +92,8 @@ type PredictionDiagnostics = {
   rafInfo: RafInfo | null
   renderPerfInfo: unknown
   headRotationStats: HeadRotationStats | null
+  cameraRotationStats: CameraRotationStats | null
+  segmentParityStats: SegmentParityStats | null
 }
 
 async function collectDiagnostics(page: Page): Promise<PredictionDiagnostics> {
@@ -81,6 +108,8 @@ async function collectDiagnostics(page: Page): Promise<PredictionDiagnostics> {
           getNetSmoothingInfo?: () => NetInfo
           getRafPerfInfo?: () => RafInfo
           getRenderPerfInfo?: () => unknown
+          getCameraRotationStats?: () => CameraRotationStats
+          getSegmentParityStats?: () => SegmentParityStats
           setNetTuningOverrides?: (overrides: Record<string, number>) => unknown
         }
       }
@@ -94,6 +123,8 @@ async function collectDiagnostics(page: Page): Promise<PredictionDiagnostics> {
       rafInfo: debugApi?.getRafPerfInfo?.() ?? null,
       renderPerfInfo: debugApi?.getRenderPerfInfo?.() ?? null,
       headRotationStats: null,
+      cameraRotationStats: debugApi?.getCameraRotationStats?.() ?? null,
+      segmentParityStats: debugApi?.getSegmentParityStats?.() ?? null,
     }
   })
 }
@@ -275,6 +306,8 @@ function assertWithFailureDump(diagnostics: PredictionDiagnostics, assertions: (
       raf: diagnostics.rafInfo,
       render: diagnostics.renderPerfInfo,
     })
+    console.error('camera rotation stats', diagnostics.cameraRotationStats ?? null)
+    console.error('segment parity stats', diagnostics.segmentParityStats ?? null)
     console.error('last prediction events', events.slice(-20))
     throw error
   }
@@ -330,11 +363,17 @@ test.describe('@prediction prediction authority', () => {
       const motion = diagnostics.motionInfo
       const raf = diagnostics.rafInfo
       const headRotation = diagnostics.headRotationStats
+      const segmentParity = diagnostics.segmentParityStats
       const net = diagnostics.netInfo
       expect(info).not.toBeNull()
       expect(info?.enabled).toBeTruthy()
       expect(info?.predictedHeadErrorDeg.p95Deg ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(6)
       expect(info?.correctionHardCount ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(8)
+      expect(segmentParity).not.toBeNull()
+      expect(segmentParity?.frontWindowP95Deg ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(0.8)
+      expect(segmentParity?.frontWindowMaxDeg ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(3)
+      expect(segmentParity?.fullBodyP95Deg ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(2)
+      expect(segmentParity?.frontMismatchMs ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(150)
       expect(motion).not.toBeNull()
       const backwardRate =
         motion && motion.sampleCount > 0
@@ -391,6 +430,7 @@ test.describe('@prediction prediction authority', () => {
     assertWithFailureDump(diagnostics, () => {
       const info = diagnostics.predictionInfo
       const headRotation = diagnostics.headRotationStats
+      const segmentParity = diagnostics.segmentParityStats
       expect(info).not.toBeNull()
       const correctionCount = (info?.correctionSoftCount ?? 0) + (info?.correctionHardCount ?? 0)
       const p95Error = info?.predictedHeadErrorDeg.p95Deg ?? Number.POSITIVE_INFINITY
@@ -401,6 +441,15 @@ test.describe('@prediction prediction authority', () => {
       expect(headRotation).not.toBeNull()
       expect(headRotation?.reversalRate ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(0.2)
       expect(headRotation?.reversalCount ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(20)
+      expect(segmentParity).not.toBeNull()
+      expect(segmentParity?.frontWindowP95Deg ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(1.2)
+      expect(segmentParity?.frontWindowMaxDeg ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(3)
+      expect(segmentParity?.fullBodyP95Deg ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(3)
+      expect(segmentParity?.frontMismatchMs ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(150)
+      const softOver6Events = diagnostics.predictionEvents.filter(
+        (event) => event.type === 'reconcile_soft' && (event.magnitudeDeg ?? 0) > 6,
+      )
+      expect(softOver6Events.length).toBeLessThanOrEqual(1)
       if (correctionCount === 0) {
         // If no correction was needed, hold a tighter error budget so the run still proves stability.
         expect(p95Error).toBeLessThanOrEqual(2.5)

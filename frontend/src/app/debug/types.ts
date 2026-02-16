@@ -33,6 +33,24 @@ export type MotionStabilityDebugInfo = {
   sampleCount: number
 }
 
+export type CameraRotationStats = {
+  sampleCount: number
+  stepP95Deg: number
+  stepMaxDeg: number
+  reversalCount: number
+  reversalRate: number
+}
+
+export type SegmentParityStats = {
+  sampleCount: number
+  frontWindowP95Deg: number
+  frontWindowMaxDeg: number
+  fullBodyP95Deg: number
+  fullBodyMaxDeg: number
+  frontMismatchMs: number
+  frontMismatchActive: boolean
+}
+
 export type RafPerfFrame = {
   tMs: number
   totalMs: number
@@ -222,6 +240,8 @@ export type RegisterAppDebugApiOptions = {
   getLocalPlayerId: () => string | null
   getLocalHeadNormal: () => { x: number; y: number; z: number } | null
   getLocalHeadForward: () => { x: number; y: number; z: number } | null
+  getCameraRotationStats: () => CameraRotationStats
+  getSegmentParityStats: () => SegmentParityStats
 }
 
 export type AppDebugApi = {
@@ -236,6 +256,8 @@ export type AppDebugApi = {
     rxWindowBytes: number
   }
   getMotionStabilityInfo?: () => MotionStabilityDebugInfo
+  getCameraRotationStats?: () => CameraRotationStats
+  getSegmentParityStats?: () => SegmentParityStats
   getNetLagEvents?: () => NetLagEvent[]
   getNetLagReport?: () => NetLagReport
   clearNetLagEvents?: () => void

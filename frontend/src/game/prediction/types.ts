@@ -14,6 +14,7 @@ export type PredictionEventType =
   | 'ack_advanced'
   | 'reconcile_soft'
   | 'reconcile_hard'
+  | 'reconcile_front_hard'
   | 'queue_prune'
 
 export type PredictionEvent = {
@@ -56,7 +57,13 @@ export type PredictionInfo = {
   latestAckSeq: number | null
   pendingInputCount: number
   replayedInputCountLastFrame: number
+  replayedTickCountLastFrame: number
+  commandsDroppedByCoalescingLastFrame: number
+  commandsCoalescedPerTickP95LastFrame: number
   predictedHeadErrorDeg: PredictionErrorStats
+  frontSegmentParityDeg: PredictionErrorStats
+  fullBodyParityDeg: PredictionErrorStats
+  frontMismatchMs: number
   correctionSoftCount: number
   correctionHardCount: number
   lastCorrectionMagnitudeDeg: number

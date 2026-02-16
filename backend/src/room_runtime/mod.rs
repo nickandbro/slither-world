@@ -57,7 +57,14 @@ pub async fn run_room_mode() -> anyhow::Result<()> {
 
     let state = Arc::new(RoomModeState {
         room_id: room_id.clone(),
-        room: Arc::new(Room::with_max_human_players(max_human_players)),
+        room: if room_id == "main" {
+            Arc::new(Room::with_max_human_players(max_human_players))
+        } else {
+            Arc::new(Room::with_room_id_and_max_human_players(
+                room_id.clone(),
+                max_human_players,
+            ))
+        },
         proxy_secret,
     });
 
