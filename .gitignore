@@ -38,3 +38,5 @@ designs/
 output/
 .playwright-cli/
 frontend/test-results/
+
+slither-bot/
