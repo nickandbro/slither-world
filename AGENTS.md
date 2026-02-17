@@ -39,7 +39,7 @@ Spherical Snake is a multiplayer, slither-style snake game where players steer g
 
 ## Build, Test, and Development Commands
 Repo root (recommended for full stack):
-- `./run-e2e.sh` — start backend + frontend for Playwright E2E (ports 8790 + 5177 by default).
+- `./run-e2e.sh` — start backend + frontend for Playwright E2E (ports 8790 + 5177 by default). E2E harness defaults: `E2E_NO_BOTS_ROOM_PREFIX=e2e-` (suppress bots in deterministic e2e rooms), `E2E_DISABLE_OXYGEN=1` (avoid oxygen-death flake); optional `E2E_BOT_COUNT` forwards to backend `SNAKE_BOT_COUNT`.
 - `./run-local-dev-copy.sh` — local stack runner on ports 8788 + 8818 by default. `--worker` mode (default) is production-like (standalone backend + local Wrangler Worker) and defaults to watch mode (backend restarts via `cargo watch`; frontend rebuilds via `vite build --watch` with a browser refresh). Use `WATCH=0` or `--no-watch` for one-shot; use `--vite` for Vite dev server HMR (no rebuild, backend accessed directly).
 - `./scripts/simulate-lag-spikes.sh start|stop|status` — macOS-only PF/dummynet lag simulation helper. Defaults to backend-only shaping (`BACKEND_PORT`, default `8788`); use `PORTS=...` only when intentionally shaping additional ports.
 - `./scripts/run-lag-automation.sh` — single automated lag scenario run (bot drives movement/boost while lag shaping is active). Writes `report.json` under `output/lag-tests/<run-label>/`.
@@ -57,6 +57,7 @@ Repo root (recommended for full stack):
 - When running E2E specifically for local prediction/authority regressions, prefer the targeted prediction suite:
   - `cd frontend && npm run test:e2e -- e2e/prediction-authority.spec.ts --project=chromium --workers=1`
   - `cd frontend && npm run test:e2e -- --grep @prediction --project=chromium --workers=1`
+- `e2e/steering-response.spec.ts` and `e2e/prediction-authority.spec.ts` now assert segment-parity/correction guardrails directly (front-window/full-body parity budgets, front mismatch duration, and soft-reconcile-over-6deg limits in jitter runs). Treat those gates as the primary regression signal for local prediction jaggedness.
 - For lag-handling changes, prefer script-based validation over ad hoc manual checks:
   - Run at least one automated baseline pass (`./scripts/run-lag-automation.sh --profile harsh --duration-secs 45 --no-screenshot`).
   - For tuning work, run `./scripts/lag-autotune.sh` and compare `best-candidate.json` + per-run `report.json` outputs.
@@ -87,6 +88,10 @@ Repo root (recommended for full stack):
   - `POST /api/matchmake` (JSON, room token issuance for worker-mediated room joins).
   - `GET /api/leaderboard` and `POST /api/leaderboard` (JSON).
   - `GET /api/room/:room` WebSocket endpoint for multiplayer (binary frames).
+- Backend room runtime env toggles relevant to local/e2e determinism:
+  - `SNAKE_BOT_COUNT=<usize>` overrides desired bot count globally.
+  - `SNAKE_NO_BOTS_ROOM_PREFIX=<prefix>` suppresses bots in rooms whose `room_id` starts with that prefix (used by default in `run-e2e.sh` for `e2e-` rooms).
+  - `SNAKE_DISABLE_OXYGEN=1|0` disables/enables oxygen drain (default gameplay remains enabled; e2e harness defaults this to `1`).
 - Standalone backend mode also serves `POST /api/matchmake` and is configurable with `STANDALONE_MATCHMAKE_CAPACITY`, `STANDALONE_ROOM_TOKEN_TTL_SECS`, and `STANDALONE_ROOM_ORIGIN`.
 - For localhost worker testing, `STANDALONE_ROOM_ORIGIN` should use `http://localhost:<port>` (not raw IPv4) so worker room-origin normalization does not rewrite it to a Hetzner hostname.
 - Debug-only route (guarded by `ENABLE_DEBUG_COMMANDS=1`):
@@ -100,7 +105,8 @@ Repo root (recommended for full stack):
 - App styles are split under `frontend/src/app/styles/*.css` and imported via `frontend/src/app/styles/index.css`; keep `frontend/src/App.css` as the compatibility import entrypoint and preserve stable selectors used by runtime/tests.
 - Debug UI controls (renderer/collider/day-night/debug panel toggles) are enabled in `import.meta.env.DEV` or when `VITE_E2E_DEBUG=1`.
 - `window.__SNAKE_DEBUG__` runtime hooks are exposed during local runs (including `run-local-dev-copy.sh`). Network debug logging defaults on localhost and can be toggled via `?netDebug=1|0` or localStorage key `spherical_snake_net_debug`.
-- Local client-side prediction is core/default (always active for local presentation and reconciliation). Optional prediction stress perturbation remains available for local/E2E correction tests (`?predictionPerturb=1|0`, key `spherical_snake_prediction_perturb`).
+- Local client-side prediction is core/default (always active for local presentation and reconciliation). Replay semantics are authoritative-parity latest-input-wins per tick (pending commands are coalesced by tick window before replay), and predictor telemetry includes replay/coalescing counters. Optional prediction stress perturbation remains available for local/E2E correction tests (`?predictionPerturb=1|0`, key `spherical_snake_prediction_perturb`).
+- Local prediction replay uses parity helpers under `frontend/src/game/prediction/parity/*` (movement constants, queue-follow snake state, and collision deflection helpers) to reduce drift between displayed local snake and server-authoritative geometry during curved/boosted steering.
 - Menu snake-skin designs are stored in localStorage (`spherical_snake_skins_v1` for saved designs, `spherical_snake_selected_skin_v1` for the current selection).
 - Frontend renderer selection is controlled by URL query param `renderer=auto|webgpu|webgl` and persisted to localStorage key `spherical_snake_renderer`.
 - Default renderer mode is `auto`: it attempts WebGPU first and falls back to WebGL with a status note if WebGPU is unavailable or init fails.
@@ -132,6 +138,7 @@ Repo root (recommended for full stack):
 - Current default lag/prediction-tuning baseline (`frontend/src/app/core/constants.ts`): `netBaseDelayTicks=1.85`, `netMinDelayTicks=1.8`, `netMaxDelayTicks=4.6`, `netJitterDelayMultiplier=1.2`, `netJitterDelayMaxTicks=0.9`, `netSpikeDelayBoostTicks=1.35`, `netDelayBoostDecayPerSec=220`, `netSpikeImpairmentHoldMs=250`, `netSpikeImpairmentMaxHoldMs=850`, `localSnakeStabilizerRateNormal=18`, `localSnakeStabilizerRateSpike=7`.
 - Digestion bumps are identity-tracked across snapshots: each digestion item includes a stable `id` plus `progress`, and interpolation is ID-based to prevent bump jumps when older digestions complete during tail growth.
 - Boosting is length-backed on the server. While boosting, snakes drain tail length smoothly over time and auto-stop at a per-life boost floor set from the spawned snake length (never below `MIN_SURVIVAL_LENGTH`); on spawn/respawn, score initializes to the spawned snake length. Boost can also burn pending (in-flight) digestion growth as fuel when at the floor so boosting stays responsive even before the tail visibly grows. Boost start is gated by whole-score threshold (`spawn floor + 1`, so default spawn length `8` requires score `9` to begin boosting; fractional `8.x` cannot start). `PlayerSnapshot` includes `scoreFraction` for the radial score interval HUD. The in-game text HUD shows bottom-left `Your length` (integer score) and `Your rank` (`1-5` only when present in the realtime top-5 list, otherwise `-`, always rendered as `of <total players>`). The head-anchored radial gauge depletes the spendable reserve above that life's spawn floor (empty at spawn-length floor), uses whole-number center text, and applies a green->yellow->red fill ramp by remaining reserve. Gauge capacity is seeded from reserve at boost start, can grow mid-boost if reserve exceeds the current cap (pellet gains), and the displayed fill smoothly retargets to cap/reserve changes instead of snapping. The red crossed-circle lockout overlay is shown only when the player is actively trying to boost while below the start threshold, plus a brief post-depletion flash while boost input is still held; during lockout rendering, only the crossed-circle is drawn (no gauge ring/fill/text), and fade-out keeps the lockout visual held until opacity reaches zero to avoid gauge glimmer.
+- Desktop boost input supports keyboard `Space` and mouse-button hold (left or right) while gameplay input is enabled; touch boost remains joystick-radius driven.
 - Client boost visuals are split intentionally: the viewport speed-line overlay (`.boost-fx`) remains a local screen-space effect, while world-space boost visuals include ground skid marks, a front-of-head draft hemisphere, and a body outer-glow wave built from dense additive sprites. The body glow keeps sprite centers slightly inside the tube so snake geometry stays visually above the glow, and sprite tint follows the snake skin pattern at each sample position (including multi-slot skin colors/stripe darkening) instead of whitening the tube color.
 - Oxygen drains while underwater; `PlayerSnapshot` includes `oxygen` for the HUD and the client renders a fishbowl with crack shader as oxygen runs low. Reaching zero oxygen causes immediate death (no periodic body-shrink phase), and there is no separate red damage-blink effect.
 - Snake girth is server-authoritative and grows per added node (equivalent to `+10%` per 10 nodes), capped at `2.0x`. Girth scales snake/environment collider radii (including spawn safety checks and head-to-body snake collision radii). Self-collision is non-lethal (snakes may overlap themselves).
@@ -147,10 +154,13 @@ Repo root (recommended for full stack):
   - `window.__SNAKE_DEBUG__.getNetLagEvents()` / `getNetLagReport()` expose event timelines; `clearNetLagEvents()` resets them.
   - `window.__SNAKE_DEBUG__.setNetTuningOverrides(overrides)` / `resetNetTuningOverrides()` apply runtime net-tuning changes for local testing; `getNetTuningOverrides()` and `getResolvedNetTuning()` expose current tuning.
 - Prediction debug hooks:
-  - `window.__SNAKE_DEBUG__.getPredictionInfo()` returns `{ enabled, latestInputSeq, latestAckSeq, pendingInputCount, replayedInputCountLastFrame, predictedHeadErrorDeg{lastDeg,p95Deg,maxDeg}, correctionSoftCount, correctionHardCount, lastCorrectionMagnitudeDeg, predictionDisabledReason }`.
+  - `window.__SNAKE_DEBUG__.getPredictionInfo()` returns `{ enabled, latestInputSeq, latestAckSeq, pendingInputCount, replayedInputCountLastFrame, replayedTickCountLastFrame, commandsDroppedByCoalescingLastFrame, commandsCoalescedPerTickP95LastFrame, predictedHeadErrorDeg{lastDeg,p95Deg,maxDeg}, frontSegmentParityDeg{lastDeg,p95Deg,maxDeg}, fullBodyParityDeg{lastDeg,p95Deg,maxDeg}, frontMismatchMs, correctionSoftCount, correctionHardCount, lastCorrectionMagnitudeDeg, predictionDisabledReason }`.
   - `window.__SNAKE_DEBUG__.getPredictionPresentationInfo()` returns `{ headLagDeg{lastDeg,p95Deg,maxDeg}, bodyLagDeg{lastDeg,p95Deg,maxDeg}, bodyMicroReversalRate, sampleCount, microSampleCount, reversalCount }`.
   - `window.__SNAKE_DEBUG__.getPredictionEvents()` / `getPredictionReport()` expose prediction events and a summary report; `clearPredictionEvents()` resets the prediction event log.
   - `window.__SNAKE_DEBUG__.clearPredictionPresentationMetrics()` resets the rolling presentation-lag/reversal counters used by `getPredictionPresentationInfo()`.
+  - `window.__SNAKE_DEBUG__.getSegmentParityStats()` returns `{ sampleCount, frontWindowP95Deg, frontWindowMaxDeg, fullBodyP95Deg, fullBodyMaxDeg, frontMismatchMs, frontMismatchActive }`.
+- Camera motion debug hook:
+  - `window.__SNAKE_DEBUG__.getCameraRotationStats()` returns `{ sampleCount, stepP95Deg, stepMaxDeg, reversalCount, reversalRate }`.
 - Tail growth debug hooks (opt-in via `?tailDebug=1`):
   - `window.__SNAKE_DEBUG__.getTailGrowthEvents()` returns the recent tail-growth event log (rx + render samples).
   - `window.__SNAKE_DEBUG__.getTailGrowthReport()` returns a compact summary (including recent `shrink`/`stretch` events).

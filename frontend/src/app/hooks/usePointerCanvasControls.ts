@@ -129,7 +129,8 @@ export function usePointerCanvasControls(
   }, [glCanvasRef, inputEnabledRef, sendInputSnapshot, setPointerScreen])
 
   const isPointerBoostButtonPressed = useCallback((event: ReactPointerEvent<HTMLCanvasElement>) => {
-    return (event.buttons & 2) !== 0
+    // Desktop boost supports either mouse button; touch boost is handled via joystick radius.
+    return (event.buttons & (1 | 2)) !== 0
   }, [])
 
   const getJoystickRadiusPx = useCallback(() => {
