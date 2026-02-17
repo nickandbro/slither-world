@@ -541,6 +541,11 @@ export const createScene = async (
     snakeContactLiftEps: SCENE_CONSTANTS.SNAKE_CONTACT_LIFT_EPS,
     snakeContactClearance: SCENE_CONSTANTS.SNAKE_CONTACT_CLEARANCE,
     snakeSlopeInsertRadiusDelta: SCENE_CONSTANTS.SNAKE_SLOPE_INSERT_RADIUS_DELTA,
+    snakeCurveRoundingIterations: SCENE_CONSTANTS.SNAKE_CURVE_ROUNDING_ITERATIONS,
+    snakeCurveRoundingAngleStartDeg: SCENE_CONSTANTS.SNAKE_CURVE_ROUNDING_ANGLE_START_DEG,
+    snakeCurveRoundingAngleFullDeg: SCENE_CONSTANTS.SNAKE_CURVE_ROUNDING_ANGLE_FULL_DEG,
+    snakeCurveRoundingBlendMin: SCENE_CONSTANTS.SNAKE_CURVE_ROUNDING_BLEND_MIN,
+    snakeCurveRoundingBlendMax: SCENE_CONSTANTS.SNAKE_CURVE_ROUNDING_BLEND_MAX,
   })
   const {
     getPelletSurfacePositionFromNormal,

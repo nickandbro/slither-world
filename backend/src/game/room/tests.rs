@@ -64,6 +64,7 @@ fn snake_from_xs(xs: &[f64]) -> Vec<SnakeNode> {
 
 fn make_state() -> RoomState {
     RoomState {
+        room_id: "test-room".to_string(),
         sessions: HashMap::new(),
         players: HashMap::new(),
         pellets: Vec::new(),
@@ -460,6 +461,21 @@ fn steering_gain_scales_down_with_boost_speed() {
     assert!((normal_gain - TURN_RESPONSE_GAIN_NORMAL_PER_SEC).abs() < 1e-9);
     assert!((boost_gain - TURN_RESPONSE_GAIN_BOOST_PER_SEC).abs() < 1e-9);
     assert!(boost_gain < normal_gain);
+}
+
+#[test]
+fn movement_substeps_use_fixed_policy_for_boost_state() {
+    assert_eq!(
+        RoomState::movement_substep_count(false),
+        TURN_SUBSTEPS_NORMAL.max(1),
+    );
+    assert_eq!(
+        RoomState::movement_substep_count(true),
+        TURN_SUBSTEPS_BOOST.max(1),
+    );
+    assert!(
+        RoomState::movement_substep_count(true) >= RoomState::movement_substep_count(false)
+    );
 }
 
 #[test]

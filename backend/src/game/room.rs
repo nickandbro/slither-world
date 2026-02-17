@@ -27,7 +27,7 @@ use super::constants::{
     TURN_RATE, TURN_RATE_MAX_MULTIPLIER, TURN_RATE_MIN_MULTIPLIER,
     TURN_RESPONSE_GAIN_BOOST_PER_SEC, TURN_RESPONSE_GAIN_NORMAL_PER_SEC, TURN_SCANG_BASE,
     TURN_SCANG_RANGE, TURN_SC_LENGTH_DIVISOR, TURN_SC_MAX, TURN_SPEED_BOOST_TURN_PENALTY,
-    TURN_SPEED_MIN_MULTIPLIER,
+    TURN_SPEED_MIN_MULTIPLIER, TURN_SUBSTEPS_BOOST, TURN_SUBSTEPS_NORMAL,
 };
 use super::digestion::{
     add_digestion_with_strength, advance_digestions_with_boost, get_digestion_progress,
@@ -2138,6 +2138,14 @@ impl RoomState {
             + (TURN_RESPONSE_GAIN_BOOST_PER_SEC - TURN_RESPONSE_GAIN_NORMAL_PER_SEC) * blend
     }
 
+    fn movement_substep_count(is_boosting: bool) -> usize {
+        if is_boosting {
+            TURN_SUBSTEPS_BOOST.max(1)
+        } else {
+            TURN_SUBSTEPS_NORMAL.max(1)
+        }
+    }
+
     fn steering_turn_step(
         current_axis: Point,
         target_axis: Point,
@@ -2265,7 +2273,7 @@ impl RoomState {
             let is_boosting = wants_boost && Self::can_player_boost(player);
             player.is_boosting = is_boosting;
             let speed_factor = if is_boosting { BOOST_MULTIPLIER } else { 1.0 };
-            let step_count = (speed_factor.round() as usize).max(1);
+            let step_count = Self::movement_substep_count(is_boosting);
             let step_velocity = (BASE_SPEED * speed_factor) / step_count as f64;
             let turn_per_tick = Self::turn_rate_for(player.snake.len(), speed_factor);
             let turn_per_substep_cap = turn_per_tick / step_count as f64;

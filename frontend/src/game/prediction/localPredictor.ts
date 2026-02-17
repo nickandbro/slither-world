@@ -6,6 +6,8 @@ import {
   BOOST_MULTIPLIER,
   TICK_MS,
   steeringGainForSpeed,
+  TURN_SUBSTEPS_BOOST,
+  TURN_SUBSTEPS_NORMAL,
   turnRateFor,
 } from './parity/constants'
 import { applySnakeWithCollisions } from './parity/collision'
@@ -268,7 +270,10 @@ export function replayPredictedSnake(options: ReplayPredictionOptions): ReplayPr
 
     const targetAxis = tickInput?.axis ? normalize(tickInput.axis) : axis
     const speedFactor = tickInput?.boost && boostAllowed ? BOOST_MULTIPLIER : 1
-    const stepCount = Math.max(1, Math.round(speedFactor))
+    const stepCount =
+      tickInput?.boost && boostAllowed
+        ? Math.max(1, TURN_SUBSTEPS_BOOST)
+        : Math.max(1, TURN_SUBSTEPS_NORMAL)
     const stepVelocity = (BASE_SPEED * speedFactor) / stepCount
     const turnPerTick = turnRateFor(baseState.nodes.length, speedFactor)
     const turnPerSubstepCap = turnPerTick / stepCount

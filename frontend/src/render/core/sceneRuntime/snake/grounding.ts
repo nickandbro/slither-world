@@ -45,6 +45,11 @@ export type CreateSnakeCurveBuilderParams = {
   snakeContactLiftEps: number
   snakeContactClearance: number
   snakeSlopeInsertRadiusDelta: number
+  snakeCurveRoundingIterations: number
+  snakeCurveRoundingAngleStartDeg: number
+  snakeCurveRoundingAngleFullDeg: number
+  snakeCurveRoundingBlendMin: number
+  snakeCurveRoundingBlendMax: number
 }
 
 export type SnakeCurveBuilder = {
@@ -73,6 +78,11 @@ export const createSnakeCurveBuilder = ({
   snakeContactLiftEps,
   snakeContactClearance,
   snakeSlopeInsertRadiusDelta,
+  snakeCurveRoundingIterations,
+  snakeCurveRoundingAngleStartDeg,
+  snakeCurveRoundingAngleFullDeg,
+  snakeCurveRoundingBlendMin,
+  snakeCurveRoundingBlendMax,
 }: CreateSnakeCurveBuilderParams): SnakeCurveBuilder => {
   const snakeContactCenterTemp = new THREE.Vector3()
   const snakeContactTangentTemp = new THREE.Vector3()
@@ -83,6 +93,9 @@ export const createSnakeCurveBuilder = ({
   const snakeContactFallbackTemp = new THREE.Vector3()
   const snakeMidpointNormalTemp = new THREE.Vector3()
   const snakeMidpointTangentTemp = new THREE.Vector3()
+  const snakeCurveRoundPrevDirTemp = new THREE.Vector3()
+  const snakeCurveRoundNextDirTemp = new THREE.Vector3()
+  const snakeCurveRoundMidpointTemp = new THREE.Vector3()
 
   // Allocation-light snake curve generation scratch. Reused across all snakes each frame.
   const snakeCurvePointsScratch: THREE.Vector3[] = []
@@ -90,6 +103,18 @@ export const createSnakeCurveBuilder = ({
   const snakeNodeNormalsScratch: THREE.Vector3[] = []
   const snakeNodeTangentsScratch: THREE.Vector3[] = []
   let snakeNodeRadiiScratch = new Float32Array(0)
+  const roundIterations = Math.max(0, Math.floor(snakeCurveRoundingIterations))
+  const roundAngleStartDeg = Math.max(0, snakeCurveRoundingAngleStartDeg)
+  const roundAngleFullDeg = Math.max(roundAngleStartDeg + 1e-6, snakeCurveRoundingAngleFullDeg)
+  const roundBlendMin = Math.max(0, snakeCurveRoundingBlendMin)
+  const roundBlendMax = Math.max(roundBlendMin, snakeCurveRoundingBlendMax)
+
+  const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value))
+
+  const smoothstep = (edge0: number, edge1: number, x: number) => {
+    const t = clamp((x - edge0) / Math.max(1e-6, edge1 - edge0), 0, 1)
+    return t * t * (3 - 2 * t)
+  }
 
   const sampleSnakeContactLift = (
     normal: THREE.Vector3,
@@ -215,6 +240,52 @@ export const createSnakeCurveBuilder = ({
     const targetRadius = radiusA + (radiusB - radiusA) * t
     if (out.lengthSq() <= 1e-10) {
       out.copy(a)
+    }
+    if (targetRadius > 1e-8) {
+      out.normalize().multiplyScalar(targetRadius)
+    }
+  }
+
+  const writeRoundedInteriorPoint = (
+    out: THREE.Vector3,
+    prev: THREE.Vector3,
+    curr: THREE.Vector3,
+    next: THREE.Vector3,
+  ) => {
+    snakeCurveRoundPrevDirTemp.copy(curr).sub(prev)
+    snakeCurveRoundNextDirTemp.copy(next).sub(curr)
+    const prevLen = snakeCurveRoundPrevDirTemp.length()
+    const nextLen = snakeCurveRoundNextDirTemp.length()
+    if (prevLen <= 1e-8 || nextLen <= 1e-8) {
+      out.copy(curr)
+      return
+    }
+    snakeCurveRoundPrevDirTemp.multiplyScalar(1 / prevLen)
+    snakeCurveRoundNextDirTemp.multiplyScalar(1 / nextLen)
+    const bendDot = clamp(
+      snakeCurveRoundPrevDirTemp.dot(snakeCurveRoundNextDirTemp),
+      -1,
+      1,
+    )
+    const bendDeg = (Math.acos(bendDot) * 180) / Math.PI
+    if (!Number.isFinite(bendDeg)) {
+      out.copy(curr)
+      return
+    }
+    const roundT = smoothstep(roundAngleStartDeg, roundAngleFullDeg, bendDeg)
+    if (roundT <= 1e-6) {
+      out.copy(curr)
+      return
+    }
+    const blend = roundBlendMin + (roundBlendMax - roundBlendMin) * roundT
+    snakeCurveRoundMidpointTemp.copy(prev).add(next).multiplyScalar(0.5)
+    out.copy(curr).lerp(snakeCurveRoundMidpointTemp, blend)
+
+    const currRadius = curr.length()
+    const neighborRadius = (prev.length() + next.length()) * 0.5
+    const targetRadius = currRadius + (neighborRadius - currRadius) * blend
+    if (out.lengthSq() <= 1e-10) {
+      out.copy(curr)
     }
     if (targetRadius > 1e-8) {
       out.normalize().multiplyScalar(targetRadius)
@@ -368,7 +439,32 @@ export const createSnakeCurveBuilder = ({
       .copy(snakeCurvePointsScratch[writeIndex - 1]!)
     smoothWriteIndex += 1
     snakeCurvePointsSmoothScratch.length = smoothWriteIndex
-    return snakeCurvePointsSmoothScratch
+    if (smoothWriteIndex < 4 || roundIterations <= 0) {
+      return snakeCurvePointsSmoothScratch
+    }
+
+    ensureVectorScratchCapacity(snakeCurvePointsScratch, smoothWriteIndex)
+    snakeCurvePointsScratch.length = smoothWriteIndex
+    let roundSource = snakeCurvePointsSmoothScratch
+    let roundTarget = snakeCurvePointsScratch
+    const lastIndex = smoothWriteIndex - 1
+    for (let iter = 0; iter < roundIterations; iter += 1) {
+      roundTarget[0]!.copy(roundSource[0]!)
+      for (let i = 1; i < lastIndex; i += 1) {
+        writeRoundedInteriorPoint(
+          roundTarget[i]!,
+          roundSource[i - 1]!,
+          roundSource[i]!,
+          roundSource[i + 1]!,
+        )
+      }
+      roundTarget[lastIndex]!.copy(roundSource[lastIndex]!)
+      const nextSource = roundTarget
+      roundTarget = roundSource
+      roundSource = nextSource
+    }
+    roundSource.length = smoothWriteIndex
+    return roundSource
   }
 
   return {
