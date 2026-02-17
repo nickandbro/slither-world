@@ -16,6 +16,7 @@ export function registerAppDebugApi(options: RegisterAppDebugApiOptions): void {
   rootDebugApi.getLocalPlayerId = () => options.getLocalPlayerId()
   rootDebugApi.getLocalHeadNormal = () => options.getLocalHeadNormal()
   rootDebugApi.getLocalHeadForward = () => options.getLocalHeadForward()
+  rootDebugApi.getLocalSnakePoints = (maxNodes) => options.getLocalSnakePoints(maxNodes)
   rootDebugApi.getCameraRotationStats = () => ({ ...options.getCameraRotationStats() })
   rootDebugApi.getSegmentParityStats = () => ({ ...options.getSegmentParityStats() })
   rootDebugApi.getMenuFlowInfo = () => ({ ...options.menuDebugInfoRef.current })

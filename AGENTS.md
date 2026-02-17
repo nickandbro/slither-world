@@ -57,6 +57,9 @@ Repo root (recommended for full stack):
 - When running E2E specifically for local prediction/authority regressions, prefer the targeted prediction suite:
   - `cd frontend && npm run test:e2e -- e2e/prediction-authority.spec.ts --project=chromium --workers=1`
   - `cd frontend && npm run test:e2e -- --grep @prediction --project=chromium --workers=1`
+- When diagnosing snake-body "accordion" jitter (segment compression/expansion), use the focused spacing suite:
+  - `cd frontend && npm run test:e2e -- e2e/prediction-jitter.spec.ts --project=chromium --workers=1`
+  - `cd frontend && npm run test:e2e -- --grep @prediction-jitter --project=chromium --workers=1`
 - `e2e/steering-response.spec.ts` and `e2e/prediction-authority.spec.ts` now assert segment-parity/correction guardrails directly (front-window/full-body parity budgets, front mismatch duration, and soft-reconcile-over-6deg limits in jitter runs). Treat those gates as the primary regression signal for local prediction jaggedness.
 - For lag-handling changes, prefer script-based validation over ad hoc manual checks:
   - Run at least one automated baseline pass (`./scripts/run-lag-automation.sh --profile harsh --duration-secs 45 --no-screenshot`).
@@ -134,6 +137,7 @@ Repo root (recommended for full stack):
 - Cloudflare Worker serves static assets and proxies matchmaking/room websocket traffic; no Durable Objects or D1 bindings remain.
 - The client renders interpolated snapshots from the server tick; avoid bypassing the snapshot buffer when changing netcode or visuals.
 - Snapshot interpolation should preserve meta-derived fields on `PlayerSnapshot` (e.g. `skinColors`) so cosmetics remain stable during interpolation.
+- Snapshot interpolation for full-body snakes (`snakeDetail='full'`) now preserves per-segment arc spacing during blend; avoid reverting to independent per-node nlerp that can reintroduce visible segment "accordion" compression/expansion.
 - Client lag-spike mitigation is playout-buffer based and currently includes: capped jitter-derived delay (`netJitterDelayMaxTicks`), arrival-gap reentry cooldown/hysteresis, smooth playout-delay retargeting, and spike-class camera behavior (camera hold/recovery for harder spikes like `stale`/`seq-gap`, milder handling for `arrival-gap`).
 - Current default lag/prediction-tuning baseline (`frontend/src/app/core/constants.ts`): `netBaseDelayTicks=1.85`, `netMinDelayTicks=1.8`, `netMaxDelayTicks=4.6`, `netJitterDelayMultiplier=1.2`, `netJitterDelayMaxTicks=0.9`, `netSpikeDelayBoostTicks=1.35`, `netDelayBoostDecayPerSec=220`, `netSpikeImpairmentHoldMs=250`, `netSpikeImpairmentMaxHoldMs=850`, `localSnakeStabilizerRateNormal=18`, `localSnakeStabilizerRateSpike=7`.
 - Digestion bumps are identity-tracked across snapshots: each digestion item includes a stable `id` plus `progress`, and interpolation is ID-based to prevent bump jumps when older digestions complete during tail growth.
@@ -156,6 +160,7 @@ Repo root (recommended for full stack):
 - Prediction debug hooks:
   - `window.__SNAKE_DEBUG__.getPredictionInfo()` returns `{ enabled, latestInputSeq, latestAckSeq, pendingInputCount, replayedInputCountLastFrame, replayedTickCountLastFrame, commandsDroppedByCoalescingLastFrame, commandsCoalescedPerTickP95LastFrame, predictedHeadErrorDeg{lastDeg,p95Deg,maxDeg}, frontSegmentParityDeg{lastDeg,p95Deg,maxDeg}, fullBodyParityDeg{lastDeg,p95Deg,maxDeg}, frontMismatchMs, correctionSoftCount, correctionHardCount, lastCorrectionMagnitudeDeg, predictionDisabledReason }`.
   - `window.__SNAKE_DEBUG__.getPredictionPresentationInfo()` returns `{ headLagDeg{lastDeg,p95Deg,maxDeg}, bodyLagDeg{lastDeg,p95Deg,maxDeg}, bodyMicroReversalRate, sampleCount, microSampleCount, reversalCount }`.
+  - `window.__SNAKE_DEBUG__.getLocalSnakePoints(maxNodes?)` returns the currently displayed local snake nodes as normalized `{x,y,z}` points (useful for E2E spacing/accordion diagnostics).
   - `window.__SNAKE_DEBUG__.getPredictionEvents()` / `getPredictionReport()` expose prediction events and a summary report; `clearPredictionEvents()` resets the prediction event log.
   - `window.__SNAKE_DEBUG__.clearPredictionPresentationMetrics()` resets the rolling presentation-lag/reversal counters used by `getPredictionPresentationInfo()`.
   - `window.__SNAKE_DEBUG__.getSegmentParityStats()` returns `{ sampleCount, frontWindowP95Deg, frontWindowMaxDeg, fullBodyP95Deg, fullBodyMaxDeg, frontMismatchMs, frontMismatchActive }`.

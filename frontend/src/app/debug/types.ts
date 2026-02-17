@@ -240,6 +240,7 @@ export type RegisterAppDebugApiOptions = {
   getLocalPlayerId: () => string | null
   getLocalHeadNormal: () => { x: number; y: number; z: number } | null
   getLocalHeadForward: () => { x: number; y: number; z: number } | null
+  getLocalSnakePoints: (maxNodes?: number) => Array<{ x: number; y: number; z: number }>
   getCameraRotationStats: () => CameraRotationStats
   getSegmentParityStats: () => SegmentParityStats
 }
@@ -248,6 +249,7 @@ export type AppDebugApi = {
   getLocalPlayerId?: () => string | null
   getLocalHeadNormal?: () => { x: number; y: number; z: number } | null
   getLocalHeadForward?: () => { x: number; y: number; z: number } | null
+  getLocalSnakePoints?: (maxNodes?: number) => Array<{ x: number; y: number; z: number }>
   getMenuFlowInfo?: () => MenuFlowDebugInfo
   getNetSmoothingInfo?: () => NetSmoothingDebugInfo
   getNetTrafficInfo?: () => {

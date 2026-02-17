@@ -77,6 +77,12 @@ const PREDICTION_FRONT_HARD_GUARD_DEG = 8.5
 const PREDICTION_FRONT_HARD_GUARD_MS = 260
 const PREDICTION_FRONT_HARD_GUARD_COOLDOWN_MS = 380
 const PREDICTION_PARITY_WINDOW_SIZE = 240
+const PREDICTION_STEERING_SOFT_SUPPRESS_DEG = 6.8
+const PREDICTION_STEERING_SOFT_SUPPRESS_BOOST_DEG = 6.2
+const PREDICTION_HEAD_STEP_NORMAL_MAX_DEG = 4.2
+const PREDICTION_HEAD_STEP_RECOVERY_MAX_DEG = 4.9
+const PREDICTION_HEAD_STEP_STRESS_MAX_DEG = 5.4
+const ARC_ADVANCE_EPS = 1e-6
 
 const EMPTY_PREDICTION_ERROR = {
   lastDeg: 0,
@@ -145,6 +151,66 @@ const clampAngularStep = (from: Point | null, to: Point, maxStepDeg: number): Po
     y: fromNorm.y + (toNorm.y - fromNorm.y) * t,
     z: fromNorm.z + (toNorm.z - fromNorm.z) * t,
   })
+}
+
+const angularDeltaRad = (a: Point | null, b: Point | null): number => {
+  if (!a || !b) return 0
+  const an = normalize(a)
+  const bn = normalize(b)
+  const dotValue = clamp(dotPoint(an, bn), -1, 1)
+  const radians = Math.acos(dotValue)
+  return Number.isFinite(radians) ? radians : 0
+}
+
+const tangentToward = (from: Point, to: Point): Point | null => {
+  const fromNorm = normalize(from)
+  const toNorm = normalize(to)
+  const raw = {
+    x: toNorm.x - fromNorm.x,
+    y: toNorm.y - fromNorm.y,
+    z: toNorm.z - fromNorm.z,
+  }
+  const radial = dotPoint(raw, fromNorm)
+  const tangent = {
+    x: raw.x - fromNorm.x * radial,
+    y: raw.y - fromNorm.y * radial,
+    z: raw.z - fromNorm.z * radial,
+  }
+  const magnitude = Math.hypot(tangent.x, tangent.y, tangent.z)
+  if (!(magnitude > ARC_ADVANCE_EPS) || !Number.isFinite(magnitude)) return null
+  return {
+    x: tangent.x / magnitude,
+    y: tangent.y / magnitude,
+    z: tangent.z / magnitude,
+  }
+}
+
+const advanceAlongArc = (from: Point, toward: Point, angleRad: number): Point => {
+  const fromNorm = normalize(from)
+  const clampedAngle = clamp(angleRad, 0, Math.PI)
+  if (!(clampedAngle > ARC_ADVANCE_EPS)) return fromNorm
+  const tangent = tangentToward(fromNorm, toward)
+  if (!tangent) return normalize(toward)
+  const sinTheta = Math.sin(clampedAngle)
+  const cosTheta = Math.cos(clampedAngle)
+  return normalize({
+    x: fromNorm.x * cosTheta + tangent.x * sinTheta,
+    y: fromNorm.y * cosTheta + tangent.y * sinTheta,
+    z: fromNorm.z * cosTheta + tangent.z * sinTheta,
+  })
+}
+
+const enforceHeadNeckSpacing = (
+  head: Point,
+  neck: Point,
+  referenceHead: Point | null,
+  referenceNeck: Point | null,
+): Point => {
+  const targetAngle = angularDeltaRad(referenceHead, referenceNeck)
+  if (!Number.isFinite(targetAngle) || targetAngle <= ARC_ADVANCE_EPS) {
+    return normalize(head)
+  }
+  return advanceAlongArc(neck, head, targetAngle)
 }
 
 const pushWindowSample = (window: number[], value: number, maxSize: number): void => {
@@ -946,6 +1012,22 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
         if (!(mag > 1e-6) || !Number.isFinite(mag)) return null
         return tangent
       },
+      getLocalSnakePoints: (maxNodes = 0) => {
+        const snake = localSnakeDisplayRef.current
+        if (!snake || snake.length === 0) return []
+        const nodeLimit =
+          Number.isFinite(maxNodes) && maxNodes > 0
+            ? Math.max(1, Math.floor(maxNodes))
+            : snake.length
+        const count = Math.min(snake.length, nodeLimit)
+        const points: Array<{ x: number; y: number; z: number }> = []
+        for (let i = 0; i < count; i += 1) {
+          const node = snake[i]
+          if (!node) continue
+          points.push({ x: node.x, y: node.y, z: node.z })
+        }
+        return points
+      },
       getCameraRotationStats: () => ({ ...cameraRotationStatsRef.current }),
       getSegmentParityStats: () => ({ ...predictionSegmentParityStatsRef.current }),
     })
@@ -1621,6 +1703,15 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
 
       if (disabledReason !== 'none') {
         const incomingSnake = localPlayer.snake.map((node) => normalize(node))
+        const previousDisplayHead =
+          predictionDisplaySnakeRef.current?.[0] ?? localSnakeDisplayRef.current?.[0] ?? null
+        const incomingHead = incomingSnake[0] ?? null
+        if (incomingHead) {
+          const maxHeadStepDeg = hardSpikeActive
+            ? PREDICTION_HEAD_STEP_STRESS_MAX_DEG
+            : PREDICTION_HEAD_STEP_RECOVERY_MAX_DEG
+          incomingSnake[0] = clampAngularStep(previousDisplayHead, incomingHead, maxHeadStepDeg)
+        }
         localSnakeDisplayRef.current = incomingSnake
         predictionPhysicsSnakeRef.current = cloneSnake(incomingSnake)
         predictionDisplaySnakeRef.current = cloneSnake(incomingSnake)
@@ -1659,7 +1750,15 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
           frontMismatchMs: 0,
           predictionDisabledReason: disabledReason,
         }
-        return snapshot
+        const players = snapshot.players.slice()
+        players[localIndex] = {
+          ...localPlayer,
+          snake: incomingSnake,
+        }
+        return {
+          ...snapshot,
+          players,
+        }
       }
 
       const pendingCommands = predictionCommandBufferRef.current.getPendingAfterAck(
@@ -1703,6 +1802,11 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
         predictionFrontMismatchStartedAtMsRef.current === null
           ? 0
           : Math.max(0, nowMs - predictionFrontMismatchStartedAtMsRef.current)
+      const underNetworkStress =
+        lagSpikeActiveRef.current ||
+        netDebugInfoRef.current.jitterMs > 35 ||
+        netDebugInfoRef.current.receiveIntervalMs >
+          Math.max(70, serverTickMsRef.current * 1.45)
 
       if (predictionNeedsReconcileCheckRef.current) {
         const physicsHead =
@@ -1745,7 +1849,10 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
             decision.kind === 'soft' &&
             !forceHard &&
             activeSteering &&
-            decision.magnitudeDeg < (localPlayer.isBoosting ? 4.4 : 5.5)
+            decision.magnitudeDeg <
+              (localPlayer.isBoosting
+                ? PREDICTION_STEERING_SOFT_SUPPRESS_BOOST_DEG
+                : PREDICTION_STEERING_SOFT_SUPPRESS_DEG)
           ) {
             decision = {
               kind: 'none',
@@ -1753,11 +1860,6 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
               durationMs: 0,
             }
           }
-          const underNetworkStress =
-            lagSpikeActiveRef.current ||
-            netDebugInfoRef.current.jitterMs > 35 ||
-            netDebugInfoRef.current.receiveIntervalMs >
-              Math.max(70, serverTickMsRef.current * 1.45)
           const preserveHardCorrection =
             localPlayer.isBoosting &&
             activeSteering &&
@@ -1801,11 +1903,10 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
               magnitudeDeg: decision.magnitudeDeg,
             })
           } else if (decision.kind === 'hard') {
-            predictionHardDampenUntilMsRef.current = nowMs + 80
+            predictionHardDampenUntilMsRef.current = nowMs + 120
             predictionSoftStartAtMsRef.current = null
             predictionSoftUntilMsRef.current = null
             predictionSoftDurationMsRef.current = 0
-            predictionDisplaySnakeRef.current = cloneSnake(replayed.snake)
             predictionInfoRef.current = {
               ...predictionInfoRef.current,
               correctionHardCount: predictionInfoRef.current.correctionHardCount + 1,
@@ -1839,11 +1940,11 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
           const remainingMs = softUntilMs - nowMs
           const durationMs = Math.max(1, predictionSoftDurationMsRef.current)
           const progress = clamp(1 - remainingMs / durationMs, 0, 1)
-          const minRate = tuning.localSnakeStabilizerRateNormal * 1.1
-          const maxRate = tuning.localSnakeStabilizerRateNormal * 2.1
+          const minRate = tuning.localSnakeStabilizerRateNormal
+          const maxRate = tuning.localSnakeStabilizerRateNormal * 1.7
           rate = minRate + (maxRate - minRate) * progress
-          alphaMin = 0.24
-          alphaMax = 0.78
+          alphaMin = 0.2
+          alphaMax = 0.66
         } else {
           predictionSoftStartAtMsRef.current = null
           predictionSoftUntilMsRef.current = null
@@ -1943,10 +2044,30 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
       const previousDisplayHead = predictionDisplaySnakeRef.current?.[0] ?? null
       const nextHead = blendedSnake[0] ?? null
       const authoritativeHead = localPlayer.snake[0] ?? null
+      const authoritativeNeck = localPlayer.snake[1] ?? null
       if (nextHead) {
+        const frontGuardActive =
+          preBlendParity.frontMaxDeg > PREDICTION_FRONT_HARD_GUARD_DEG ||
+          frontMismatchMs > PREDICTION_FRONT_HARD_GUARD_MS
         const authoritativeHeadLag = angularDeltaDeg(nextHead, authoritativeHead)
-        const maxHeadStepDeg = authoritativeHeadLag > 4.5 ? 7 : 4.8
-        blendedSnake[0] = clampAngularStep(previousDisplayHead, nextHead, maxHeadStepDeg)
+        let maxHeadStepDeg = PREDICTION_HEAD_STEP_NORMAL_MAX_DEG
+        if (frontGuardActive || hardSpikeActive) {
+          maxHeadStepDeg = PREDICTION_HEAD_STEP_STRESS_MAX_DEG
+        } else if (underNetworkStress || authoritativeHeadLag > 4.5) {
+          maxHeadStepDeg = PREDICTION_HEAD_STEP_RECOVERY_MAX_DEG
+        }
+        let adjustedHead = clampAngularStep(previousDisplayHead, nextHead, maxHeadStepDeg)
+        const neck = blendedSnake[1] ?? authoritativeNeck
+        if (neck) {
+          adjustedHead = enforceHeadNeckSpacing(
+            adjustedHead,
+            neck,
+            authoritativeHead,
+            authoritativeNeck,
+          )
+          adjustedHead = clampAngularStep(previousDisplayHead, adjustedHead, maxHeadStepDeg)
+        }
+        blendedSnake[0] = adjustedHead
       }
       updatePredictionPresentationMetrics(blendedSnake, localPlayer.snake)
 

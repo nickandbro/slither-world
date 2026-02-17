@@ -17,6 +17,68 @@ const SNAKE_EXT_EPS = 1e-6
 const pointDistance = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z)
 
 const nlerpPoint = (a: Point, b: Point, t: number): Point => normalize(lerpPoint(a, b, t))
+const dotPoint = (a: Point, b: Point) => a.x * b.x + a.y * b.y + a.z * b.z
+
+const angularDistance = (a: Point, b: Point) =>
+  Math.acos(clamp(dotPoint(normalize(a), normalize(b)), -1, 1))
+
+function tangentToward(from: Point, to: Point): Point | null {
+  const fromNorm = normalize(from)
+  const toNorm = normalize(to)
+  const raw = {
+    x: toNorm.x - fromNorm.x,
+    y: toNorm.y - fromNorm.y,
+    z: toNorm.z - fromNorm.z,
+  }
+  const radial = dotPoint(raw, fromNorm)
+  const tangent = {
+    x: raw.x - fromNorm.x * radial,
+    y: raw.y - fromNorm.y * radial,
+    z: raw.z - fromNorm.z * radial,
+  }
+  const len = Math.hypot(tangent.x, tangent.y, tangent.z)
+  if (!(len > SNAKE_EXT_EPS) || !Number.isFinite(len)) return null
+  return {
+    x: tangent.x / len,
+    y: tangent.y / len,
+    z: tangent.z / len,
+  }
+}
+
+function advanceAlongArc(from: Point, toward: Point, angleRad: number): Point {
+  const fromNorm = normalize(from)
+  const clampedAngle = clamp(angleRad, 0, Math.PI)
+  if (!(clampedAngle > SNAKE_EXT_EPS)) return fromNorm
+  const tangent = tangentToward(fromNorm, toward)
+  if (!tangent) return normalize(toward)
+  const sinTheta = Math.sin(clampedAngle)
+  const cosTheta = Math.cos(clampedAngle)
+  return normalize({
+    x: fromNorm.x * cosTheta + tangent.x * sinTheta,
+    y: fromNorm.y * cosTheta + tangent.y * sinTheta,
+    z: fromNorm.z * cosTheta + tangent.z * sinTheta,
+  })
+}
+
+function preserveSnakeSegmentSpacing(snake: Point[], segmentAngles: number[]): Point[] {
+  if (snake.length <= 1) return cloneSnake(snake)
+  const out: Point[] = [normalize(snake[0])]
+  for (let i = 1; i < snake.length; i += 1) {
+    const prev = out[i - 1]
+    const current = normalize(snake[i])
+    if (!prev) {
+      out.push(current)
+      continue
+    }
+    const targetAngle = segmentAngles[i - 1]
+    if (!Number.isFinite(targetAngle) || targetAngle <= SNAKE_EXT_EPS) {
+      out.push(current)
+      continue
+    }
+    out.push(advanceAlongArc(prev, current, targetAngle))
+  }
+  return out
+}
 
 const cloneSnake = (snake: Point[]) => snake.map((node) => ({ ...node }))
 
@@ -213,12 +275,21 @@ function blendPlayers(a: PlayerSnapshot, b: PlayerSnapshot, t: number): PlayerSn
       if (maxLength > 0) {
         const aExt = lenA < maxLength ? extendSnakeTailForGrowth(a.snake, maxLength) : cloneSnake(a.snake)
         const bExt = lenB < maxLength ? extendSnakeTailByRepeatingTail(b.snake, maxLength) : cloneSnake(b.snake)
+        const segmentAngles: number[] = []
         const blended: Point[] = []
         for (let i = 0; i < maxLength; i += 1) {
           const nodeA = aExt[i]
           const nodeB = bExt[i]
           blended.push(nlerpPoint(nodeA, nodeB, t))
+          if (i > 0) {
+            const prevA = aExt[i - 1]
+            const prevB = bExt[i - 1]
+            const angleA = angularDistance(prevA, nodeA)
+            const angleB = angularDistance(prevB, nodeB)
+            segmentAngles.push(lerp(angleA, angleB, tLen))
+          }
         }
+        const blendedWithSpacing = preserveSnakeSegmentSpacing(blended, segmentAngles)
 
         // Preserve visual continuity across "commit a new node" boundaries by blending
         // length-units (integer nodes + fractional tail extension) and then re-deriving
@@ -231,7 +302,7 @@ function blendPlayers(a: PlayerSnapshot, b: PlayerSnapshot, t: number): PlayerSn
         snakeTotalLen = outTotalLen
         snakeStart = 0
         tailExtension = clamp(lenUnits - outTotalLen, 0, 0.999_999)
-        snake = blended.slice(0, outTotalLen)
+        snake = blendedWithSpacing.slice(0, outTotalLen)
       } else {
         snakeTotalLen = 0
         snakeStart = 0
