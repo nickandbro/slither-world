@@ -170,7 +170,7 @@ fn skip_player_state(bytes: &[u8], offset: &mut usize) {
         *offset += 1;
     }
     if field_mask & DELTA_FIELD_TAIL_EXT != 0 {
-        *offset += 1;
+        *offset += 2;
     }
     if field_mask & DELTA_FIELD_SNAKE != 0 {
         let mode = read_u8(bytes, offset);
@@ -205,7 +205,7 @@ fn skip_init_player_state(bytes: &[u8], offset: &mut usize) {
     *offset += 2; // score fraction (q16)
     *offset += 2; // oxygen (q16)
     *offset += 1; // girth (q8)
-    *offset += 1; // tail extension (q8)
+    *offset += 2; // tail extension (q16)
     let detail = read_u8(bytes, offset);
     let total_len = read_u16(bytes, offset);
     let snake_len = match detail {
@@ -837,9 +837,9 @@ fn write_player_state_encodes_digestion_id_and_progress() {
     let encoded_girth_q = payload[offset];
     assert_eq!(encoded_girth_q, 0);
     offset += 1;
-    let encoded_tail_ext_q = payload[offset];
+    let encoded_tail_ext_q = u16::from_le_bytes(payload[offset..offset + 2].try_into().unwrap());
     assert_eq!(encoded_tail_ext_q, 0);
-    offset += 1;
+    offset += 2;
 
     let detail = payload[offset];
     assert_eq!(detail, protocol::SNAKE_DETAIL_FULL);
@@ -914,7 +914,7 @@ fn write_player_state_encodes_most_recent_digestions_when_capped() {
     offset += 2; // score fraction
     offset += 2; // oxygen
     offset += 1; // girth
-    offset += 1; // tail extension
+    offset += 2; // tail extension
 
     let detail = payload[offset];
     assert_eq!(detail, protocol::SNAKE_DETAIL_FULL);

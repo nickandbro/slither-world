@@ -241,6 +241,26 @@ export type RegisterAppDebugApiOptions = {
   getLocalHeadNormal: () => { x: number; y: number; z: number } | null
   getLocalHeadForward: () => { x: number; y: number; z: number } | null
   getLocalSnakePoints: (maxNodes?: number) => Array<{ x: number; y: number; z: number }>
+  getLatestSnapshotState: () => {
+    seq: number | null
+    now: number | null
+    players: Array<{
+      id: string
+      name: string
+      alive: boolean
+      isBoosting: boolean
+      score: number
+      scoreFraction: number
+      snakeLen: number
+      snakeTotalLen: number
+      tailExtension: number
+      lenUnits: number
+      tailSegLen: number | null
+      tailRefLen: number | null
+      tailExtDist: number | null
+      tailEndLen: number | null
+    }>
+  }
   getCameraRotationStats: () => CameraRotationStats
   getSegmentParityStats: () => SegmentParityStats
 }
@@ -250,6 +270,26 @@ export type AppDebugApi = {
   getLocalHeadNormal?: () => { x: number; y: number; z: number } | null
   getLocalHeadForward?: () => { x: number; y: number; z: number } | null
   getLocalSnakePoints?: (maxNodes?: number) => Array<{ x: number; y: number; z: number }>
+  getLatestSnapshotState?: () => {
+    seq: number | null
+    now: number | null
+    players: Array<{
+      id: string
+      name: string
+      alive: boolean
+      isBoosting: boolean
+      score: number
+      scoreFraction: number
+      snakeLen: number
+      snakeTotalLen: number
+      tailExtension: number
+      lenUnits: number
+      tailSegLen: number | null
+      tailRefLen: number | null
+      tailExtDist: number | null
+      tailEndLen: number | null
+    }>
+  }
   getMenuFlowInfo?: () => MenuFlowDebugInfo
   getNetSmoothingInfo?: () => NetSmoothingDebugInfo
   getNetTrafficInfo?: () => {

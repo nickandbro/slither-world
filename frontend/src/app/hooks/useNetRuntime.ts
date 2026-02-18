@@ -955,6 +955,48 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
     [appendNetLagEvent, netDebugInfoRef, netTuningOverridesRef, netTuningRef, netTuningRevisionRef],
   )
 
+  const getLatestSnapshotState = useCallback(() => {
+    const latest = snapshotBufferRef.current[snapshotBufferRef.current.length - 1]
+    if (!latest) {
+      return {
+        seq: null,
+        now: null,
+        players: [],
+      }
+    }
+
+    const players = latest.players.map((player) => {
+      const snakeLen = player.snake.length
+      const snakeTotalLen = player.snakeTotalLen
+      const tailExtension = clamp(player.tailExtension, 0, 0.999_999)
+      const lenUnits = snakeTotalLen + tailExtension
+      const metrics =
+        snakeLen >= 2 ? computeTailEndMetrics(player.snake, tailExtension) : null
+      return {
+        id: player.id,
+        name: player.name,
+        alive: player.alive,
+        isBoosting: player.isBoosting,
+        score: player.score,
+        scoreFraction: player.scoreFraction,
+        snakeLen,
+        snakeTotalLen,
+        tailExtension,
+        lenUnits,
+        tailSegLen: metrics?.segLen ?? null,
+        tailRefLen: metrics?.refLen ?? null,
+        tailExtDist: metrics?.extDist ?? null,
+        tailEndLen: metrics?.endLen ?? null,
+      }
+    })
+
+    return {
+      seq: latest.seq,
+      now: latest.now,
+      players,
+    }
+  }, [snapshotBufferRef])
+
   useEffect(() => {
     registerAppDebugApi({
       menuDebugInfoRef,
@@ -1028,6 +1070,7 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
         }
         return points
       },
+      getLatestSnapshotState,
       getCameraRotationStats: () => ({ ...cameraRotationStatsRef.current }),
       getSegmentParityStats: () => ({ ...predictionSegmentParityStatsRef.current }),
     })
@@ -1041,6 +1084,7 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
     clearTailGrowthEvents,
     getPredictionReport,
     getRafPerfInfo,
+    getLatestSnapshotState,
     menuDebugInfoRef,
     motionDebugInfoRef,
     netDebugInfoRef,

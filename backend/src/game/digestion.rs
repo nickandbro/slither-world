@@ -40,7 +40,7 @@ pub fn add_digestion_with_strength(player: &mut Player, strength: f32, growth_am
     });
 }
 
-fn tail_growth_rate_per_step(backlog: f64) -> f64 {
+fn tail_growth_budget_per_tick(backlog: f64) -> f64 {
     if backlog <= 1e-9 {
         return 0.0;
     }
@@ -97,6 +97,7 @@ pub fn advance_digestions_with_boost(
     boost_drain: BoostDrainConfig,
 ) -> bool {
     let step_count = steps.max(1) as i32;
+    let step_count_f64 = step_count as f64;
     let min_length = if boost_drain.min_length > 0 {
         boost_drain.min_length
     } else {
@@ -121,7 +122,11 @@ pub fn advance_digestions_with_boost(
             let remaining = (digestion.growth_amount - digestion.applied_growth).max(0.0);
             tail_backlog += remaining;
         }
-        let mut budget = tail_growth_rate_per_step(tail_backlog).min(tail_backlog);
+        // Keep tail growth pacing independent from movement substep count.
+        // We compute one tick-wide budget and drain an equal share per substep so boost
+        // substepping does not create bursty visual growth.
+        let per_step_budget = tail_growth_budget_per_tick(tail_backlog) / step_count_f64;
+        let mut budget = per_step_budget.min(tail_backlog);
         if budget > 1e-9 {
             for digestion in &mut player.digestions {
                 if budget <= 1e-9 {

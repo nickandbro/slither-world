@@ -264,6 +264,12 @@ export const createScene = async (
   const lastTailDirections = new Map<string, THREE.Vector3>()
   const lastTailContactNormals = new Map<string, THREE.Vector3>()
   const tailFrameStates = new Map<string, TailFrameState>()
+  const tailExtensionVisualRatios = new Map<string, number>()
+  const tailExtensionBaseLengths = new Map<string, number>()
+  const tailCommitContinuityStates = new Map<
+    string,
+    { carryDistance: number; lastSnakeLen: number; lastTailEndLen: number }
+  >()
   const lastSnakeStarts = new Map<string, number>()
   const tempVector = new THREE.Vector3()
   const tempVectorB = new THREE.Vector3()
@@ -351,6 +357,9 @@ export const createScene = async (
     lastTailDirections.delete(id)
     lastTailContactNormals.delete(id)
     tailFrameStates.delete(id)
+    tailExtensionVisualRatios.delete(id)
+    tailExtensionBaseLengths.delete(id)
+    tailCommitContinuityStates.delete(id)
   }
   const {
     buildEnvironment,
@@ -651,7 +660,46 @@ export const createScene = async (
   }
   const snakeTubeCurve = new THREE.CatmullRomCurve3([new THREE.Vector3(), new THREE.Vector3()], false, 'centripetal')
   const { updateSnake } = createSnakePlayerRuntime({
-    constants: { deathFadeDuration: SCENE_CONSTANTS.DEATH_FADE_DURATION, deathStartOpacity: SCENE_CONSTANTS.DEATH_START_OPACITY, deathVisibilityCutoff: SCENE_CONSTANTS.DEATH_VISIBILITY_CUTOFF, digestionTravelEase: SCENE_CONSTANTS.DIGESTION_TRAVEL_EASE, snakeGirthScaleMin: SCENE_CONSTANTS.SNAKE_GIRTH_SCALE_MIN, snakeGirthScaleMax: SCENE_CONSTANTS.SNAKE_GIRTH_SCALE_MAX, digestionBulgeGirthMinScale: SCENE_CONSTANTS.DIGESTION_BULGE_GIRTH_MIN_SCALE, digestionBulgeGirthCurve: SCENE_CONSTANTS.DIGESTION_BULGE_GIRTH_CURVE, digestionBulgeRadiusCurve: SCENE_CONSTANTS.DIGESTION_BULGE_RADIUS_CURVE, snakeRadius: SCENE_CONSTANTS.SNAKE_RADIUS, snakeLiftFactor: SCENE_CONSTANTS.SNAKE_LIFT_FACTOR, headRadius: SCENE_CONSTANTS.HEAD_RADIUS, tailDirMinRatio: SCENE_CONSTANTS.TAIL_DIR_MIN_RATIO, digestionStartNodeIndex: SCENE_CONSTANTS.DIGESTION_START_NODE_INDEX, snakeSelfOverlapGlowEnabled: SCENE_CONSTANTS.SNAKE_SELF_OVERLAP_GLOW_ENABLED, snakeSelfOverlapMinPoints: SCENE_CONSTANTS.SNAKE_SELF_OVERLAP_MIN_POINTS, snakeSelfOverlapGlowVisibilityThreshold: SCENE_CONSTANTS.SNAKE_SELF_OVERLAP_GLOW_VISIBILITY_THRESHOLD, snakeSelfOverlapGlowOpacity: SCENE_CONSTANTS.SNAKE_SELF_OVERLAP_GLOW_OPACITY, lakeWaterMaskThreshold: SCENE_CONSTANTS.LAKE_WATER_MASK_THRESHOLD, tongueMouthForward: SCENE_CONSTANTS.TONGUE_MOUTH_FORWARD, tongueMouthOut: SCENE_CONSTANTS.TONGUE_MOUTH_OUT, nameplateFadeNearDistance: SCENE_CONSTANTS.NAMEPLATE_FADE_NEAR_DISTANCE, nameplateFadeFarDistance: SCENE_CONSTANTS.NAMEPLATE_FADE_FAR_DISTANCE, nameplateWorldWidth: SCENE_CONSTANTS.NAMEPLATE_WORLD_WIDTH, nameplateWorldAspect: SCENE_CONSTANTS.NAMEPLATE_WORLD_ASPECT, nameplateWorldOffset: SCENE_CONSTANTS.NAMEPLATE_WORLD_OFFSET },
+    constants: {
+      deathFadeDuration: SCENE_CONSTANTS.DEATH_FADE_DURATION,
+      deathStartOpacity: SCENE_CONSTANTS.DEATH_START_OPACITY,
+      deathVisibilityCutoff: SCENE_CONSTANTS.DEATH_VISIBILITY_CUTOFF,
+      digestionTravelEase: SCENE_CONSTANTS.DIGESTION_TRAVEL_EASE,
+      snakeGirthScaleMin: SCENE_CONSTANTS.SNAKE_GIRTH_SCALE_MIN,
+      snakeGirthScaleMax: SCENE_CONSTANTS.SNAKE_GIRTH_SCALE_MAX,
+      digestionBulgeGirthMinScale: SCENE_CONSTANTS.DIGESTION_BULGE_GIRTH_MIN_SCALE,
+      digestionBulgeGirthCurve: SCENE_CONSTANTS.DIGESTION_BULGE_GIRTH_CURVE,
+      digestionBulgeRadiusCurve: SCENE_CONSTANTS.DIGESTION_BULGE_RADIUS_CURVE,
+      snakeRadius: SCENE_CONSTANTS.SNAKE_RADIUS,
+      snakeLiftFactor: SCENE_CONSTANTS.SNAKE_LIFT_FACTOR,
+      headRadius: SCENE_CONSTANTS.HEAD_RADIUS,
+      tailDirMinRatio: SCENE_CONSTANTS.TAIL_DIR_MIN_RATIO,
+      tailExtensionEaseGrowRate: SCENE_CONSTANTS.TAIL_EXTENSION_EASE_GROW_RATE,
+      tailExtensionEaseShrinkRate: SCENE_CONSTANTS.TAIL_EXTENSION_EASE_SHRINK_RATE,
+      tailExtensionMaxStepPerSec: SCENE_CONSTANTS.TAIL_EXTENSION_MAX_STEP_PER_SEC,
+      tailExtensionBaseLenEaseRate: SCENE_CONSTANTS.TAIL_EXTENSION_BASE_LEN_EASE_RATE,
+      tailExtensionBaseLenMinFactor: SCENE_CONSTANTS.TAIL_EXTENSION_BASE_LEN_MIN_FACTOR,
+      tailExtensionBaseLenMaxFactor: SCENE_CONSTANTS.TAIL_EXTENSION_BASE_LEN_MAX_FACTOR,
+      tailCommitCarryDecayRate: SCENE_CONSTANTS.TAIL_COMMIT_CARRY_DECAY_RATE,
+      tailCommitMinPrevExtRatio: SCENE_CONSTANTS.TAIL_COMMIT_MIN_PREV_EXT_RATIO,
+      tailCommitMaxNextExtRatio: SCENE_CONSTANTS.TAIL_COMMIT_MAX_NEXT_EXT_RATIO,
+      tailCommitMinDrop: SCENE_CONSTANTS.TAIL_COMMIT_MIN_DROP,
+      tailCommitMaxExtraFactor: SCENE_CONSTANTS.TAIL_COMMIT_MAX_EXTRA_FACTOR,
+      digestionStartNodeIndex: SCENE_CONSTANTS.DIGESTION_START_NODE_INDEX,
+      snakeSelfOverlapGlowEnabled: SCENE_CONSTANTS.SNAKE_SELF_OVERLAP_GLOW_ENABLED,
+      snakeSelfOverlapMinPoints: SCENE_CONSTANTS.SNAKE_SELF_OVERLAP_MIN_POINTS,
+      snakeSelfOverlapGlowVisibilityThreshold:
+        SCENE_CONSTANTS.SNAKE_SELF_OVERLAP_GLOW_VISIBILITY_THRESHOLD,
+      snakeSelfOverlapGlowOpacity: SCENE_CONSTANTS.SNAKE_SELF_OVERLAP_GLOW_OPACITY,
+      lakeWaterMaskThreshold: SCENE_CONSTANTS.LAKE_WATER_MASK_THRESHOLD,
+      tongueMouthForward: SCENE_CONSTANTS.TONGUE_MOUTH_FORWARD,
+      tongueMouthOut: SCENE_CONSTANTS.TONGUE_MOUTH_OUT,
+      nameplateFadeNearDistance: SCENE_CONSTANTS.NAMEPLATE_FADE_NEAR_DISTANCE,
+      nameplateFadeFarDistance: SCENE_CONSTANTS.NAMEPLATE_FADE_FAR_DISTANCE,
+      nameplateWorldWidth: SCENE_CONSTANTS.NAMEPLATE_WORLD_WIDTH,
+      nameplateWorldAspect: SCENE_CONSTANTS.NAMEPLATE_WORLD_ASPECT,
+      nameplateWorldOffset: SCENE_CONSTANTS.NAMEPLATE_WORLD_OFFSET,
+    },
     camera,
     getLakes: () => environmentState.lakes,
     getSnakeCenterlineRadius,
@@ -663,6 +711,9 @@ export const createScene = async (
     lastAliveStates,
     lastSnakeStarts,
     tailFrameStates,
+    tailExtensionVisualRatios,
+    tailExtensionBaseLengths,
+    tailCommitContinuityStates,
     lastTailDirections,
     lastTailContactNormals,
     lastHeadPositions,

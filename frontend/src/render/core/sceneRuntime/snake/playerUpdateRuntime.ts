@@ -23,6 +23,12 @@ const HEAD_FORWARD_MIN_STEP_RAD = (Math.PI * 0.2) / 180
 const HEAD_FORWARD_MAX_TURN_RAD_PER_SEC_LOCAL = (Math.PI * 900) / 180
 const HEAD_FORWARD_MAX_TURN_RAD_PER_SEC_REMOTE = (Math.PI * 720) / 180
 
+type TailCommitContinuityState = {
+  carryDistance: number
+  lastSnakeLen: number
+  lastTailEndLen: number
+}
+
 type SnakePlayerRuntimeConstants = {
   deathFadeDuration: number
   deathStartOpacity: number
@@ -37,6 +43,17 @@ type SnakePlayerRuntimeConstants = {
   snakeLiftFactor: number
   headRadius: number
   tailDirMinRatio: number
+  tailExtensionEaseGrowRate: number
+  tailExtensionEaseShrinkRate: number
+  tailExtensionMaxStepPerSec: number
+  tailExtensionBaseLenEaseRate: number
+  tailExtensionBaseLenMinFactor: number
+  tailExtensionBaseLenMaxFactor: number
+  tailCommitCarryDecayRate: number
+  tailCommitMinPrevExtRatio: number
+  tailCommitMaxNextExtRatio: number
+  tailCommitMinDrop: number
+  tailCommitMaxExtraFactor: number
   digestionStartNodeIndex: number
   snakeSelfOverlapGlowEnabled: boolean
   snakeSelfOverlapMinPoints: number
@@ -68,6 +85,9 @@ type SnakePlayerRuntimeDeps = {
   lastAliveStates: Map<string, boolean>
   lastSnakeStarts: Map<string, number>
   tailFrameStates: Map<string, TailFrameState>
+  tailExtensionVisualRatios: Map<string, number>
+  tailExtensionBaseLengths: Map<string, number>
+  tailCommitContinuityStates: Map<string, TailCommitContinuityState>
   lastTailDirections: Map<string, THREE.Vector3>
   lastTailContactNormals: Map<string, THREE.Vector3>
   lastHeadPositions: Map<string, THREE.Vector3>
@@ -192,6 +212,9 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
     lastAliveStates,
     lastSnakeStarts,
     tailFrameStates,
+    tailExtensionVisualRatios,
+    tailExtensionBaseLengths,
+    tailCommitContinuityStates,
     lastTailDirections,
     lastTailContactNormals,
     lastHeadPositions,
@@ -233,6 +256,72 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
   const headForwardSlerpTemp = new THREE.Vector3()
   const headForwardAxisTemp = new THREE.Vector3()
   const headForwardRotateQuatTemp = new THREE.Quaternion()
+
+  const smoothTailExtensionRatio = (
+    playerId: string,
+    target: number,
+    deltaSeconds: number,
+  ): number => {
+    const targetClamped = clamp(target, 0, 0.999_999)
+    const previous = tailExtensionVisualRatios.get(playerId)
+    if (previous === undefined || !Number.isFinite(previous)) {
+      tailExtensionVisualRatios.set(playerId, targetClamped)
+      return targetClamped
+    }
+
+    const dt = clamp(deltaSeconds, 0, 0.1)
+    const rate =
+      targetClamped >= previous
+        ? constants.tailExtensionEaseGrowRate
+        : constants.tailExtensionEaseShrinkRate
+    const alpha = clamp(1 - Math.exp(-Math.max(0, rate) * dt), 0, 1)
+    let next = previous + (targetClamped - previous) * alpha
+
+    const maxStep = Math.max(0, constants.tailExtensionMaxStepPerSec) * dt
+    if (maxStep > 1e-6) {
+      next = clamp(next, previous - maxStep, previous + maxStep)
+    }
+    if (Math.abs(next - targetClamped) < 1e-4) {
+      next = targetClamped
+    }
+
+    const clampedNext = clamp(next, 0, 0.999_999)
+    tailExtensionVisualRatios.set(playerId, clampedNext)
+    return clampedNext
+  }
+
+  const smoothTailExtensionBaseLength = (
+    playerId: string,
+    measured: number,
+    deltaSeconds: number,
+  ): number => {
+    if (!Number.isFinite(measured) || measured <= 1e-6) {
+      const previous = tailExtensionBaseLengths.get(playerId)
+      return previous && Number.isFinite(previous) ? previous : 0
+    }
+
+    const previous = tailExtensionBaseLengths.get(playerId)
+    if (previous === undefined || !Number.isFinite(previous) || previous <= 1e-6) {
+      tailExtensionBaseLengths.set(playerId, measured)
+      return measured
+    }
+
+    const dt = clamp(deltaSeconds, 0, 0.1)
+    const minFactor = Math.max(0, constants.tailExtensionBaseLenMinFactor)
+    const maxFactor = Math.max(minFactor, constants.tailExtensionBaseLenMaxFactor)
+    const clampedTarget = clamp(measured, previous * minFactor, previous * maxFactor)
+    const alpha = clamp(
+      1 - Math.exp(-Math.max(0, constants.tailExtensionBaseLenEaseRate) * dt),
+      0,
+      1,
+    )
+    let next = previous + (clampedTarget - previous) * alpha
+    if (!Number.isFinite(next) || next <= 1e-6) {
+      next = clampedTarget
+    }
+    tailExtensionBaseLengths.set(playerId, next)
+    return next
+  }
 
   const updateSnake = (
     player: PlayerSnapshot,
@@ -302,6 +391,8 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
       if (isLocal) {
         setLocalGroundingInfo(null)
       }
+      tailExtensionVisualRatios.delete(player.id)
+      tailExtensionBaseLengths.delete(player.id)
       resetSnakeTransientState(player.id)
       pelletMouthTargets.delete(player.id)
       lastTailContactNormals.delete(player.id)
@@ -350,11 +441,15 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
     let tailExtensionDirection: THREE.Vector3 | null = null
     let tailDirMinLen = 0
     let extensionRatio = 0
+    let tailCommitCarryDistance = 0
     let boostBodyGlowCurvePoints: THREE.Vector3[] | null = null
     if (nodes.length < 2) {
       visual.tube.visible = false
       visual.selfOverlapGlow.visible = false
       visual.tail.visible = false
+      tailExtensionVisualRatios.delete(player.id)
+      tailExtensionBaseLengths.delete(player.id)
+      tailCommitContinuityStates.delete(player.id)
       lastTailDirections.delete(player.id)
       lastTailContactNormals.delete(player.id)
       tailFrameStates.delete(player.id)
@@ -390,21 +485,84 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
         : 0
       const hasAuthoritativeTailWindow =
         player.snakeStart + nodes.length === player.snakeTotalLen
-      extensionRatio = hasAuthoritativeTailWindow
+      const continuityState = tailCommitContinuityStates.get(player.id)
+      const previousSnakeLen =
+        continuityState && Number.isFinite(continuityState.lastSnakeLen)
+          ? continuityState.lastSnakeLen
+          : nodes.length
+      const previousTailEndLen =
+        continuityState && Number.isFinite(continuityState.lastTailEndLen)
+          ? continuityState.lastTailEndLen
+          : 0
+      const previousCarryDistance =
+        continuityState && Number.isFinite(continuityState.carryDistance)
+          ? Math.max(0, continuityState.carryDistance)
+          : 0
+      const targetExtensionRatio = hasAuthoritativeTailWindow
         ? clamp(player.tailExtension, 0, 0.999_999)
         : 0
-      const extensionBaseLength =
-        Number.isFinite(tailSegmentLength) && tailSegmentLength > 1e-6
-          ? tailSegmentLength
-          : referenceLength
+      const previousVisualRatioRaw = tailExtensionVisualRatios.get(player.id)
+      const previousVisualRatio =
+        previousVisualRatioRaw !== undefined && Number.isFinite(previousVisualRatioRaw)
+          ? clamp(previousVisualRatioRaw, 0, 0.999_999)
+          : targetExtensionRatio
+      extensionRatio = hasAuthoritativeTailWindow
+        ? smoothTailExtensionRatio(player.id, targetExtensionRatio, deltaSeconds)
+        : 0
+      if (!hasAuthoritativeTailWindow) {
+        tailExtensionVisualRatios.delete(player.id)
+        tailExtensionBaseLengths.delete(player.id)
+      }
+      const measuredExtensionBaseLength =
+        Number.isFinite(referenceLength) && referenceLength > 1e-6
+          ? referenceLength
+          : tailSegmentLength
+      const extensionBaseLength = smoothTailExtensionBaseLength(
+        player.id,
+        measuredExtensionBaseLength,
+        deltaSeconds,
+      )
       const extensionDistance = Math.max(0, extensionBaseLength * extensionRatio)
+      const dt = clamp(deltaSeconds, 0, 0.1)
+      tailCommitCarryDistance = previousCarryDistance
+      if (dt > 0 && tailCommitCarryDistance > 1e-6) {
+        const decay = Math.exp(-Math.max(0, constants.tailCommitCarryDecayRate) * dt)
+        tailCommitCarryDistance = Math.max(0, tailCommitCarryDistance * decay)
+      }
+      if (player.alive && hasAuthoritativeTailWindow) {
+        const grewByNodes = nodes.length - previousSnakeLen
+        const carryCap = Math.max(
+          Math.max(0, constants.tailCommitMinDrop),
+          extensionBaseLength * Math.max(0, constants.tailCommitMaxExtraFactor),
+        )
+        if (
+          grewByNodes > 0 &&
+          previousVisualRatio >= constants.tailCommitMinPrevExtRatio &&
+          targetExtensionRatio <= constants.tailCommitMaxNextExtRatio
+        ) {
+          const projectedTailEndLen = Math.max(0, extensionBaseLength + extensionDistance)
+          const drop = previousTailEndLen - projectedTailEndLen
+          if (drop >= constants.tailCommitMinDrop) {
+            tailCommitCarryDistance = clamp(
+              tailCommitCarryDistance + drop,
+              0,
+              carryCap,
+            )
+          }
+        } else if (tailCommitCarryDistance > carryCap) {
+          tailCommitCarryDistance = carryCap
+        }
+      } else {
+        tailCommitCarryDistance = 0
+      }
+      const extensionDistanceWithCarry = extensionDistance + tailCommitCarryDistance
       tailExtensionDirection = computeTailExtendDirection(
         curvePoints,
         tailDirMinLen,
         lastTailDirection,
         tailFrameState,
       )
-      if (extensionDistance > 0) {
+      if (extensionDistanceWithCarry > 0) {
         let extensionDir = tailExtensionDirection
         if (curvePoints.length >= 2) {
           const tailPos = curvePoints[curvePoints.length - 1]
@@ -438,7 +596,11 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
             extensionDir = rawDir
           }
         }
-        const extendedTail = computeExtendedTailPoint(curvePoints, extensionDistance, extensionDir)
+        const extendedTail = computeExtendedTailPoint(
+          curvePoints,
+          extensionDistanceWithCarry,
+          extensionDir,
+        )
         if (extendedTail) {
           curvePoints[curvePoints.length - 1] = extendedTail
         }
@@ -556,6 +718,9 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
       lastTailDirections.delete(player.id)
       lastTailContactNormals.delete(player.id)
       tailFrameStates.delete(player.id)
+      tailExtensionVisualRatios.delete(player.id)
+      tailExtensionBaseLengths.delete(player.id)
+      tailCommitContinuityStates.delete(player.id)
       pelletMouthTargets.delete(player.id)
       lastSnakeStarts.delete(player.id)
       if (isLocal) {
@@ -887,6 +1052,11 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
         lastTailContactNormals.set(player.id, tailNormal.clone())
       }
       const tailSegmentLength = tailPos.distanceTo(prevPos)
+      tailCommitContinuityStates.set(player.id, {
+        carryDistance: tailCommitCarryDistance,
+        lastSnakeLen: nodes.length,
+        lastTailEndLen: tailSegmentLength,
+      })
       let tailDir = projectToTangentPlane(tailPos.clone().sub(prevPos), tailNormal)
       if (!tailDir || (tailDirMinLen > 0 && tailSegmentLength < tailDirMinLen)) {
         tailDir =
@@ -921,6 +1091,8 @@ export const createSnakePlayerRuntime = (deps: SnakePlayerRuntimeDeps) => {
       visual.tail.position.set(0, 0, 0)
       visual.tail.quaternion.identity()
       visual.tail.scale.setScalar(1)
+    } else {
+      tailCommitContinuityStates.delete(player.id)
     }
 
     if (isLocal) {

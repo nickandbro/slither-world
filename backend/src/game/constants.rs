@@ -102,9 +102,10 @@ pub const DIGESTION_TAIL_SETTLE_STEPS: i64 = 4;
 pub const DIGESTION_INTAKE_DELAY_MS: i64 = 340;
 pub const DIGESTION_INTAKE_DELAY_STEPS: i64 =
     (DIGESTION_INTAKE_DELAY_MS + TICK_MS as i64 - 1) / TICK_MS as i64;
-// Tail growth is smoothed by draining "pending" tail growth at a dynamic rate:
-// `rate = base + mult * sqrt(backlog)`, clamped to `max`.
-// This keeps small growth smooth while letting large bursts catch up faster than linear.
+// Tail growth is smoothed by draining "pending" tail growth at a dynamic tick budget:
+// `budget = base + mult * sqrt(backlog)`, clamped to `max`.
+// Runtime code divides this tick budget across movement substeps so boost substepping does not
+// produce bursty visual tail growth.
 pub const DIGESTION_TAIL_GROWTH_BASE_PER_STEP: f64 = 0.035;
 pub const DIGESTION_TAIL_GROWTH_BACKLOG_SQRT_MULT: f64 = 0.08;
 pub const DIGESTION_TAIL_GROWTH_MAX_PER_STEP: f64 = 0.28;

@@ -228,7 +228,7 @@ struct DeltaPlayerCache {
     score_fraction_q: u8,
     oxygen_q: u8,
     girth_q: u8,
-    tail_ext_q: u8,
+    tail_ext_q: u16,
     snake: DeltaSnakeCache,
     digestions: Vec<DeltaDigestionCache>,
 }
@@ -2730,7 +2730,7 @@ impl RoomState {
                 encoder.write_u8(current.girth_q);
             }
             if field_mask & DELTA_FIELD_TAIL_EXT != 0 {
-                encoder.write_u8(current.tail_ext_q);
+                encoder.write_u16(current.tail_ext_q);
             }
             if field_mask & DELTA_FIELD_SNAKE != 0 {
                 let mode = snake_mode.unwrap_or(DELTA_SNAKE_REBASE);
@@ -2909,7 +2909,7 @@ impl RoomState {
             girth_q: Self::quantize_girth_scale_u8(Self::player_girth_scale_from_len(
                 player.snake.len(),
             )),
-            tail_ext_q: Self::quantize_unit_u8(clamp(player.tail_extension, 0.0, 1.0)),
+            tail_ext_q: Self::quantize_unit_u16(clamp(player.tail_extension, 0.0, 1.0)),
             snake: DeltaSnakeCache {
                 detail,
                 total_len: window.total_len.min(u16::MAX as usize) as u16,
@@ -3039,7 +3039,7 @@ impl RoomState {
         encoder.write_u16(Self::quantize_unit_u16(clamp(player.oxygen, 0.0, 1.0)));
         let girth_scale = Self::player_girth_scale_from_len(player.snake.len());
         encoder.write_u8(Self::quantize_girth_scale_u8(girth_scale));
-        encoder.write_u8(Self::quantize_unit_u8(clamp(
+        encoder.write_u16(Self::quantize_unit_u16(clamp(
             player.tail_extension,
             0.0,
             1.0,

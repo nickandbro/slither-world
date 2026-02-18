@@ -16,7 +16,7 @@ export type PlayerMeta = {
   skinColors?: string[]
 }
 
-const VERSION = 18
+const VERSION = 19
 
 const TYPE_JOIN = 0x01
 const TYPE_INPUT = 0x02
@@ -384,7 +384,7 @@ function decodeStateDelta(
     const scoreFraction = readDeltaQ8(reader, fieldMask, DELTA_FIELD_SCORE_FRACTION, previous?.scoreFraction)
     const oxygen = readDeltaQ8(reader, fieldMask, DELTA_FIELD_OXYGEN, previous?.oxygen)
     const girthQ = readDeltaQ8AsRaw(reader, fieldMask, DELTA_FIELD_GIRTH, previous?.girthScale)
-    const tailExt = readDeltaQ8(reader, fieldMask, DELTA_FIELD_TAIL_EXT, previous?.tailExtension)
+    const tailExt = readDeltaQ16(reader, fieldMask, DELTA_FIELD_TAIL_EXT, previous?.tailExtension)
     if (
       flags === null ||
       score === null ||
@@ -504,6 +504,20 @@ function readDeltaQ8(
     const value = reader.readU8()
     if (value === null) return null
     return value / 255
+  }
+  return previous ?? null
+}
+
+function readDeltaQ16(
+  reader: Reader,
+  fieldMask: number,
+  bit: number,
+  previous: number | undefined,
+): number | null {
+  if ((fieldMask & bit) !== 0) {
+    const value = reader.readU16()
+    if (value === null) return null
+    return value / 65535
   }
   return previous ?? null
 }
@@ -697,7 +711,7 @@ function readPlayerStates(
     const scoreFractionQ = reader.readU16()
     const oxygenQ = reader.readU16()
     const girthQ = reader.readU8()
-    const tailExtQ = reader.readU8()
+    const tailExtQ = reader.readU16()
     const snakeDetailRaw = reader.readU8()
     const snakeTotalLen = reader.readU16()
     if (
@@ -720,7 +734,7 @@ function readPlayerStates(
     const scoreFraction = Math.min(0.999_999, Math.max(0, scoreFractionQ / 65535))
     const oxygen = Math.min(1, Math.max(0, oxygenQ / 65535))
     const girthScale = 1 + (girthQ / 255) * 1
-    const tailExtension = Math.min(1, Math.max(0, tailExtQ / 255))
+    const tailExtension = Math.min(1, Math.max(0, tailExtQ / 65535))
 
     let snakeDetail: PlayerSnapshot['snakeDetail'] = 'full'
     let snakeStart = 0
