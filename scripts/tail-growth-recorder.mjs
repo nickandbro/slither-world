@@ -228,6 +228,33 @@ const extractTailEndJumps = (events, stream) => {
   return jumps
 }
 
+const extractPredictionLengthMismatches = (events) => {
+  const mismatches = []
+  for (const event of events) {
+    const snakeLen = toFiniteOrNull(event?.snakeLen)
+    const rawSnakeLen = toFiniteOrNull(event?.rawSnakeLen)
+    if (snakeLen === null || rawSnakeLen === null) continue
+    if (snakeLen === rawSnakeLen) continue
+    mismatches.push({
+      stream: 'render_prediction_length',
+      id: event?.id ?? null,
+      seq: event?.seq ?? null,
+      now: event?.now ?? null,
+      tMs: toFiniteOrNull(event?.tMs),
+      snakeLen,
+      rawSnakeLen,
+      snakeTotalLen: toFiniteOrNull(event?.snakeTotalLen),
+      rawSnakeTotalLen: toFiniteOrNull(event?.rawSnakeTotalLen),
+      deltaSnakeLen: snakeLen - rawSnakeLen,
+      tailExtension: toFiniteOrNull(event?.tailExtension),
+      rawTailExtension: toFiniteOrNull(event?.rawTailExtension),
+      tailEndLen: toFiniteOrNull(event?.tailEndLen),
+      rawTailEndLen: toFiniteOrNull(event?.rawTailEndLen),
+    })
+  }
+  return mismatches
+}
+
 const classifyJumpSources = (rxJumps, renderJumps) => {
   const incidents = []
   const matchedRx = new Set()
@@ -310,6 +337,7 @@ const classifyTailRootCause = ({
   stretchEvents,
   segmentSpacingJumps,
   allPlayerJumps,
+  predictionLengthMismatches,
 }) => {
   const renderSignalCount =
     lenUnitSummary.renderJumpCount +
@@ -317,7 +345,8 @@ const classifyTailRootCause = ({
     shrinkEvents.length +
     stretchEvents.length +
     segmentSpacingJumps.length +
-    allPlayerJumps.length
+    allPlayerJumps.length +
+    predictionLengthMismatches.length
   const rxSignalCount = lenUnitSummary.rxJumpCount
 
   let rootCause = 'none'
@@ -378,6 +407,14 @@ const classifyTailRootCause = ({
       rx: null,
     })
   }
+  for (const mismatch of predictionLengthMismatches) {
+    incidents.push({
+      source: 'client_prediction_length_mismatch',
+      kind: 'prediction_length',
+      render: mismatch,
+      rx: null,
+    })
+  }
 
   incidents.sort((a, b) => {
     const aMag = Math.max(
@@ -406,6 +443,7 @@ const classifyTailRootCause = ({
     stretchCount: stretchEvents.length,
     segmentSpacingJumpCount: segmentSpacingJumps.length,
     allPlayerJumpCount: allPlayerJumps.length,
+    predictionLenMismatchCount: predictionLengthMismatches.length,
     incidents,
   }
 }
@@ -813,6 +851,7 @@ const run = async () => {
     const stretchEvents = renderEvents.filter((event) => event?.kind === 'stretch')
     const segmentSpacingJumps = extractSegmentSpacingJumps(samples)
     const allPlayerJumps = extractAllPlayerJumps(allPlayerEvents)
+    const predictionLengthMismatches = extractPredictionLengthMismatches(renderEvents)
     const jumpSummary = classifyTailRootCause({
       lenUnitSummary,
       renderTailEndJumps,
@@ -820,6 +859,7 @@ const run = async () => {
       stretchEvents,
       segmentSpacingJumps,
       allPlayerJumps,
+      predictionLengthMismatches,
     })
 
     const largestIncident = jumpSummary.incidents[0] ?? null
@@ -853,6 +893,7 @@ const run = async () => {
         stretchCount: jumpSummary.stretchCount,
         segmentSpacingJumpCount: jumpSummary.segmentSpacingJumpCount,
         allPlayerJumpCount: jumpSummary.allPlayerJumpCount,
+        predictionLenMismatchCount: jumpSummary.predictionLenMismatchCount,
         maxAbsDeltaLenUnits,
         topIncidents: jumpSummary.incidents.slice(0, 30),
       },

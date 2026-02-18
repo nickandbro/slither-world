@@ -16,7 +16,7 @@ export type PlayerMeta = {
   skinColors?: string[]
 }
 
-const VERSION = 19
+const VERSION = 20
 
 const TYPE_JOIN = 0x01
 const TYPE_INPUT = 0x02
@@ -94,6 +94,7 @@ const DELTA_FIELD_GIRTH = 1 << 4
 const DELTA_FIELD_TAIL_EXT = 1 << 5
 const DELTA_FIELD_SNAKE = 1 << 6
 const DELTA_FIELD_DIGESTIONS = 1 << 7
+const DELTA_FIELD_TAIL_TIP = 1 << 8
 
 const DELTA_SNAKE_REBASE = 0
 const DELTA_SNAKE_SHIFT_HEAD = 1
@@ -106,6 +107,7 @@ type CachedPlayerState = {
   oxygen: number
   girthScale: number
   tailExtension: number
+  tailTip: Point | null
   snakeDetail: PlayerSnapshot['snakeDetail']
   snakeStart: number
   snakeTotalLen: number
@@ -385,13 +387,15 @@ function decodeStateDelta(
     const oxygen = readDeltaQ8(reader, fieldMask, DELTA_FIELD_OXYGEN, previous?.oxygen)
     const girthQ = readDeltaQ8AsRaw(reader, fieldMask, DELTA_FIELD_GIRTH, previous?.girthScale)
     const tailExt = readDeltaQ16(reader, fieldMask, DELTA_FIELD_TAIL_EXT, previous?.tailExtension)
+    const tailTip = readDeltaTailTip(reader, fieldMask, previous?.tailTip)
     if (
       flags === null ||
       score === null ||
       scoreFraction === null ||
       oxygen === null ||
       girthQ === null ||
-      tailExt === null
+      tailExt === null ||
+      tailTip === undefined
     ) {
       deltaDecoderState.awaitKeyframe = true
       return null
@@ -409,6 +413,9 @@ function decodeStateDelta(
       return null
     }
 
+    const resolvedTailTip =
+      snakeState.snakeDetail === 'stub' || snakeState.snake.length === 0 ? null : tailTip
+
     nextPlayers.set(netId, {
       netId,
       flags,
@@ -417,6 +424,7 @@ function decodeStateDelta(
       oxygen,
       girthScale: 1 + (girthQ / 255) * 1,
       tailExtension: tailExt,
+      tailTip: resolvedTailTip,
       snakeDetail: snakeState.snakeDetail,
       snakeStart: snakeState.snakeStart,
       snakeTotalLen: snakeState.snakeTotalLen,
@@ -463,6 +471,7 @@ function cachedPlayerToSnapshot(
     isBoosting: (cached.flags & 0x02) !== 0,
     girthScale: cached.girthScale,
     tailExtension: cached.tailExtension,
+    tailTip: cached.tailTip,
     alive: (cached.flags & 0x01) !== 0,
     snakeDetail: cached.snakeDetail,
     snakeStart: cached.snakeStart,
@@ -534,6 +543,20 @@ function readDeltaQ8AsRaw(
   if (previousScale === undefined) return null
   const q = Math.round((previousScale - 1) * 255)
   return Math.max(0, Math.min(255, q))
+}
+
+function readDeltaTailTip(
+  reader: Reader,
+  fieldMask: number,
+  previous: Point | null | undefined,
+): Point | null | undefined {
+  if ((fieldMask & DELTA_FIELD_TAIL_TIP) !== 0) {
+    const ox = reader.readI16()
+    const oy = reader.readI16()
+    if (ox === null || oy === null) return undefined
+    return decodeOctI16ToPoint(ox, oy)
+  }
+  return previous ?? null
 }
 
 function readDeltaSnakeState(
@@ -712,6 +735,8 @@ function readPlayerStates(
     const oxygenQ = reader.readU16()
     const girthQ = reader.readU8()
     const tailExtQ = reader.readU16()
+    const tailTipOx = reader.readI16()
+    const tailTipOy = reader.readI16()
     const snakeDetailRaw = reader.readU8()
     const snakeTotalLen = reader.readU16()
     if (
@@ -722,6 +747,8 @@ function readPlayerStates(
       oxygenQ === null ||
       girthQ === null ||
       tailExtQ === null ||
+      tailTipOx === null ||
+      tailTipOy === null ||
       snakeDetailRaw === null ||
       snakeTotalLen === null
     ) {
@@ -735,6 +762,7 @@ function readPlayerStates(
     const oxygen = Math.min(1, Math.max(0, oxygenQ / 65535))
     const girthScale = 1 + (girthQ / 255) * 1
     const tailExtension = Math.min(1, Math.max(0, tailExtQ / 65535))
+    const tailTipRaw = decodeOctI16ToPoint(tailTipOx, tailTipOy)
 
     let snakeDetail: PlayerSnapshot['snakeDetail'] = 'full'
     let snakeStart = 0
@@ -790,6 +818,7 @@ function readPlayerStates(
       isBoosting,
       girthScale,
       tailExtension,
+      tailTip: snakeDetail === 'stub' || snakeLen === 0 ? null : tailTipRaw,
       alive,
       snakeDetail,
       snakeStart,

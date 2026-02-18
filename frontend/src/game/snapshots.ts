@@ -256,6 +256,13 @@ function blendScoreFraction(a: PlayerSnapshot, b: PlayerSnapshot, t: number) {
   return clamp(lerp(fracA, fracB, t), 0, 0.999_999)
 }
 
+function blendTailTip(a: Point | null, b: Point | null, t: number): Point | null {
+  if (a && b) return nlerpPoint(a, b, t)
+  if (b) return { ...b }
+  if (a && t < 0.95) return { ...a }
+  return null
+}
+
 function blendPlayers(a: PlayerSnapshot, b: PlayerSnapshot, t: number): PlayerSnapshot {
   if (a.alive !== b.alive) {
     return b
@@ -343,6 +350,7 @@ function blendPlayers(a: PlayerSnapshot, b: PlayerSnapshot, t: number): PlayerSn
     isBoosting: b.isBoosting,
     girthScale: lerp(a.girthScale, b.girthScale, t),
     tailExtension,
+    tailTip: blendTailTip(a.tailTip, b.tailTip, t),
     alive: b.alive,
     snakeDetail: b.snakeDetail,
     snakeStart,

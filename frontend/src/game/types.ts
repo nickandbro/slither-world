@@ -31,6 +31,7 @@ export type PlayerSnapshot = {
   isBoosting: boolean
   girthScale: number
   tailExtension: number
+  tailTip: Point | null
   alive: boolean
   snakeDetail: 'full' | 'window' | 'stub'
   snakeStart: number

@@ -172,6 +172,9 @@ fn skip_player_state(bytes: &[u8], offset: &mut usize) {
     if field_mask & DELTA_FIELD_TAIL_EXT != 0 {
         *offset += 2;
     }
+    if field_mask & DELTA_FIELD_TAIL_TIP != 0 {
+        *offset += 4;
+    }
     if field_mask & DELTA_FIELD_SNAKE != 0 {
         let mode = read_u8(bytes, offset);
         if mode == DELTA_SNAKE_SHIFT_HEAD {
@@ -206,6 +209,7 @@ fn skip_init_player_state(bytes: &[u8], offset: &mut usize) {
     *offset += 2; // oxygen (q16)
     *offset += 1; // girth (q8)
     *offset += 2; // tail extension (q16)
+    *offset += 4; // tail tip (oct i16,i16)
     let detail = read_u8(bytes, offset);
     let total_len = read_u16(bytes, offset);
     let snake_len = match detail {
@@ -840,6 +844,7 @@ fn write_player_state_encodes_digestion_id_and_progress() {
     let encoded_tail_ext_q = u16::from_le_bytes(payload[offset..offset + 2].try_into().unwrap());
     assert_eq!(encoded_tail_ext_q, 0);
     offset += 2;
+    offset += 4; // tail tip
 
     let detail = payload[offset];
     assert_eq!(detail, protocol::SNAKE_DETAIL_FULL);
@@ -915,6 +920,7 @@ fn write_player_state_encodes_most_recent_digestions_when_capped() {
     offset += 2; // oxygen
     offset += 1; // girth
     offset += 2; // tail extension
+    offset += 4; // tail tip
 
     let detail = payload[offset];
     assert_eq!(detail, protocol::SNAKE_DETAIL_FULL);

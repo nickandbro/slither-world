@@ -168,8 +168,9 @@ pub fn advance_digestions_with_boost(
         }
 
         if player.tail_extension >= 1.0 {
-            add_snake_node_for_growth(&mut player.snake, player.axis);
-            player.tail_extension -= 1.0;
+            let next_tail_extension = player.tail_extension - 1.0;
+            add_snake_node_for_growth(&mut player.snake, player.axis, next_tail_extension);
+            player.tail_extension = next_tail_extension;
         }
         if player.tail_extension < 0.0 {
             if remove_snake_tail_node(&mut player.snake, min_length) {

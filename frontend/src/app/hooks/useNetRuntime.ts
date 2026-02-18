@@ -1809,8 +1809,15 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
         predictionLatestAckSeqRef.current,
       )
       const activePredictionInput = pendingCommands.length > 0
-      const baseSnake = predictionAuthoritativeSnakeRef.current ?? localPlayer.snake
-      const baseReceivedAtMs = predictionAuthoritativeReceivedAtMsRef.current ?? performance.now()
+      let baseSnake = predictionAuthoritativeSnakeRef.current ?? localPlayer.snake
+      let baseReceivedAtMs = predictionAuthoritativeReceivedAtMsRef.current ?? performance.now()
+      if (baseSnake.length !== localPlayer.snake.length) {
+        // Keep prediction length-locked to the currently rendered authoritative snapshot.
+        // Without this, rapid growth can momentarily over-extend local display length and
+        // then self-correct, producing visible tail pops.
+        baseSnake = localPlayer.snake
+        baseReceivedAtMs = performance.now()
+      }
       const spawnFloor = predictionLifeSpawnFloorRef.current ?? localPlayer.score
       const boostAllowed = localPlayer.isBoosting || localPlayer.score >= spawnFloor + 1
       const snakeAngularRadius = snakeContactAngularRadiusForScale(localPlayer.girthScale)
@@ -2078,12 +2085,28 @@ export function useNetRuntime(options: UseNetRuntimeOptions): UseNetRuntimeResul
           microDeadbandDeg: PREDICTION_MICRO_DEADBAND_DEG,
         })
       }
-      const predictedFrontCount = Math.max(1, PREDICTION_DISPLAY_FRONT_PREDICTED_SEGMENTS)
+      const predictedFrontCount = Math.min(
+        localPlayer.snake.length,
+        Math.max(1, PREDICTION_DISPLAY_FRONT_PREDICTED_SEGMENTS),
+      )
       const alignedCount = Math.min(blendedSnake.length, localPlayer.snake.length)
       for (let index = predictedFrontCount; index < alignedCount; index += 1) {
         const authoritativeNode = localPlayer.snake[index]
         if (!authoritativeNode) continue
         blendedSnake[index] = normalize(authoritativeNode)
+      }
+      if (blendedSnake.length !== localPlayer.snake.length) {
+        if (blendedSnake.length > localPlayer.snake.length) {
+          blendedSnake = blendedSnake.slice(0, localPlayer.snake.length)
+        } else {
+          const nextSnake = blendedSnake.slice()
+          for (let index = nextSnake.length; index < localPlayer.snake.length; index += 1) {
+            const authoritativeNode = localPlayer.snake[index]
+            if (!authoritativeNode) break
+            nextSnake.push(normalize(authoritativeNode))
+          }
+          blendedSnake = nextSnake
+        }
       }
       const previousDisplayHead = predictionDisplaySnakeRef.current?.[0] ?? null
       const nextHead = blendedSnake[0] ?? null

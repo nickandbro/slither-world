@@ -42,10 +42,10 @@ use super::input::parse_axis;
 use super::math::{
     base_collision_angular_radius, clamp, collision_distance_for_angular_radii,
     collision_with_angular_radii, cross, dot, length, normalize, point_from_spherical, random_axis,
-    rotate_around_axis, rotate_toward, rotate_y, rotate_z,
+    rotate_toward, rotate_y, rotate_z,
 };
 use super::physics::apply_snake_with_collisions;
-use super::snake::{create_snake, rotate_snake};
+use super::snake::{compute_extended_tail_point, compute_tail_tip_point, create_snake, rotate_snake};
 use super::types::{Pellet, PelletState, Player, Point, SnakeNode};
 use crate::protocol;
 use crate::shared::names::sanitize_player_name;
@@ -81,6 +81,7 @@ const STATE_DELTA_KEYFRAME_INTERVAL: u32 = 4;
 const BOT_COUNT_ENV_KEY: &str = "SNAKE_BOT_COUNT";
 const BOT_SUPPRESS_ROOM_PREFIX_ENV_KEY: &str = "SNAKE_NO_BOTS_ROOM_PREFIX";
 const OXYGEN_DISABLED_ENV_KEY: &str = "SNAKE_DISABLE_OXYGEN";
+const ROCK_PELLET_FREQ_MULT_ENV_KEY: &str = "SNAKE_DEBUG_ROCK_PELLET_FREQ_MULT";
 
 const DELTA_FRAME_KEYFRAME: u8 = 1 << 0;
 
@@ -92,6 +93,7 @@ const DELTA_FIELD_GIRTH: u16 = 1 << 4;
 const DELTA_FIELD_TAIL_EXT: u16 = 1 << 5;
 const DELTA_FIELD_SNAKE: u16 = 1 << 6;
 const DELTA_FIELD_DIGESTIONS: u16 = 1 << 7;
+const DELTA_FIELD_TAIL_TIP: u16 = 1 << 8;
 
 const DELTA_SNAKE_REBASE: u8 = 0;
 const DELTA_SNAKE_SHIFT_HEAD: u8 = 1;
@@ -229,6 +231,7 @@ struct DeltaPlayerCache {
     oxygen_q: u8,
     girth_q: u8,
     tail_ext_q: u16,
+    tail_tip_oct: (i16, i16),
     snake: DeltaSnakeCache,
     digestions: Vec<DeltaDigestionCache>,
 }
@@ -253,6 +256,9 @@ const SMALL_PELLET_COLOR_COUNT: u8 = 12;
 const PELLET_SPAWN_COLLIDER_MARGIN_ANGLE: f64 = 0.0055;
 const PELLET_DEATH_LOCAL_RESPAWN_ATTEMPTS: usize = 14;
 const PELLET_DEATH_GLOBAL_RESPAWN_ATTEMPTS: usize = 40;
+const ROCK_PELLET_RING_OFFSET_MIN_ANGLE: f64 = 0.006;
+const ROCK_PELLET_RING_OFFSET_MAX_ANGLE: f64 = 0.06;
+const ROCK_PELLET_SPAWN_ATTEMPTS: usize = 8;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -815,6 +821,34 @@ impl RoomState {
         })
     }
 
+    fn rock_pellet_frequency_multiplier() -> f64 {
+        static ROCK_PELLET_FREQ_MULT: OnceLock<f64> = OnceLock::new();
+        *ROCK_PELLET_FREQ_MULT.get_or_init(|| {
+            std::env::var(ROCK_PELLET_FREQ_MULT_ENV_KEY)
+                .ok()
+                .and_then(|value| value.trim().parse::<f64>().ok())
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .unwrap_or(1.0)
+        })
+    }
+
+    fn rock_pellet_spawn_bias_probability(&self) -> f64 {
+        if self.environment.mountains.is_empty() {
+            return 0.0;
+        }
+
+        let multiplier = Self::rock_pellet_frequency_multiplier();
+        if multiplier <= 1.0 {
+            return 0.0;
+        }
+
+        // `1 - 1/m` gives an intuitive curve:
+        // - 2x -> 50% near-rock bias
+        // - 5x -> 80% near-rock bias
+        // - 20x -> 95% near-rock bias
+        clamp(1.0 - (1.0 / multiplier), 0.0, 0.98)
+    }
+
     fn bot_count(&self) -> usize {
         self.players.values().filter(|player| player.is_bot).count()
     }
@@ -1143,8 +1177,7 @@ impl RoomState {
         point_from_spherical(theta, phi)
     }
 
-    fn random_small_pellet(&mut self, rng: &mut impl Rng) -> Pellet {
-        let normal = Self::random_unit_point(rng);
+    fn make_small_pellet(&mut self, normal: Point, rng: &mut impl Rng) -> Pellet {
         let size = rng.gen_range(SMALL_PELLET_SIZE_MIN..=SMALL_PELLET_SIZE_MAX);
         Pellet {
             id: self.next_small_pellet_id(),
@@ -1155,6 +1188,48 @@ impl RoomState {
             growth_fraction: SMALL_PELLET_GROWTH_FRACTION,
             state: PelletState::Idle,
         }
+    }
+
+    fn random_small_pellet(&mut self, rng: &mut impl Rng) -> Pellet {
+        let normal = Self::random_unit_point(rng);
+        self.make_small_pellet(normal, rng)
+    }
+
+    fn random_small_pellet_near_rock(&mut self, rng: &mut impl Rng) -> Option<Pellet> {
+        if self.environment.mountains.is_empty() {
+            return None;
+        }
+
+        for _ in 0..ROCK_PELLET_SPAWN_ATTEMPTS {
+            let mountain_index = rng.gen_range(0..self.environment.mountains.len());
+            let mountain = &self.environment.mountains[mountain_index];
+            let (tangent, bitangent) = tangent_basis(mountain.normal);
+            let theta = rng.gen::<f64>() * PI * 2.0;
+            let dir = normalize(Point {
+                x: tangent.x * theta.cos() + bitangent.x * theta.sin(),
+                y: tangent.y * theta.cos() + bitangent.y * theta.sin(),
+                z: tangent.z * theta.cos() + bitangent.z * theta.sin(),
+            });
+            let outline_radius = sample_outline_radius(&mountain.outline, theta);
+            let ring_offset = rng
+                .gen_range(ROCK_PELLET_RING_OFFSET_MIN_ANGLE..=ROCK_PELLET_RING_OFFSET_MAX_ANGLE);
+            let angle = clamp(
+                outline_radius + PELLET_SPAWN_COLLIDER_MARGIN_ANGLE + ring_offset,
+                0.0,
+                PI - 1e-4,
+            );
+            let candidate = normalize(Point {
+                x: mountain.normal.x * angle.cos() + dir.x * angle.sin(),
+                y: mountain.normal.y * angle.cos() + dir.y * angle.sin(),
+                z: mountain.normal.z * angle.cos() + dir.z * angle.sin(),
+            });
+            if self.is_far_enough_from_heads(candidate) && !self.is_invalid_pellet_spawn(candidate)
+            {
+                return Some(self.make_small_pellet(candidate, rng));
+            }
+        }
+
+        None
     }
 
     fn is_far_enough_from_heads(&self, point: Point) -> bool {
@@ -1293,7 +1368,13 @@ impl RoomState {
 
     fn spawn_small_pellet_with_rng(&mut self, rng: &mut impl Rng) -> Option<Pellet> {
         const SPAWN_ATTEMPTS: usize = 20;
+        let rock_spawn_bias_probability = self.rock_pellet_spawn_bias_probability();
         for _ in 0..SPAWN_ATTEMPTS {
+            if rock_spawn_bias_probability > 0.0 && rng.gen_bool(rock_spawn_bias_probability) {
+                if let Some(pellet) = self.random_small_pellet_near_rock(rng) {
+                    return Some(pellet);
+                }
+            }
             let pellet = self.random_small_pellet(rng);
             if self.is_far_enough_from_heads(pellet.normal)
                 && !self.is_invalid_pellet_spawn(pellet.normal)
@@ -1955,96 +2036,6 @@ impl RoomState {
         Self::snake_body_angular_radius_for_scale(scale)
     }
 
-    fn project_to_tangent(direction: Point, normal: Point) -> Point {
-        Point {
-            x: direction.x - normal.x * dot(direction, normal),
-            y: direction.y - normal.y * dot(direction, normal),
-            z: direction.z - normal.z * dot(direction, normal),
-        }
-    }
-
-    fn extended_tail_point(player: &Player) -> Option<Point> {
-        if player.tail_extension <= 1e-6 || player.snake.len() < 2 {
-            return None;
-        }
-        let tail_node = player.snake.last()?;
-        let prev_node = player.snake.get(player.snake.len().saturating_sub(2))?;
-        let tail = normalize(Point {
-            x: tail_node.x,
-            y: tail_node.y,
-            z: tail_node.z,
-        });
-        let prev = normalize(Point {
-            x: prev_node.x,
-            y: prev_node.y,
-            z: prev_node.z,
-        });
-
-        let mut base_segment = Point {
-            x: tail.x - prev.x,
-            y: tail.y - prev.y,
-            z: tail.z - prev.z,
-        };
-        let mut base_length = length(base_segment);
-        let mut tail_dir = Self::project_to_tangent(base_segment, tail);
-
-        if length(tail_dir) <= 1e-8 && player.snake.len() >= 3 {
-            let prev_prev_node = player.snake.get(player.snake.len().saturating_sub(3))?;
-            let prev_prev = normalize(Point {
-                x: prev_prev_node.x,
-                y: prev_prev_node.y,
-                z: prev_prev_node.z,
-            });
-            base_segment = Point {
-                x: prev.x - prev_prev.x,
-                y: prev.y - prev_prev.y,
-                z: prev.z - prev_prev.z,
-            };
-            base_length = length(base_segment);
-            tail_dir = Self::project_to_tangent(base_segment, tail);
-        }
-        if base_length <= 1e-8 || !base_length.is_finite() {
-            return None;
-        }
-        let tail_dir_len = length(tail_dir);
-        if tail_dir_len <= 1e-8 || !tail_dir_len.is_finite() {
-            return None;
-        }
-        let tail_dir = Point {
-            x: tail_dir.x / tail_dir_len,
-            y: tail_dir.y / tail_dir_len,
-            z: tail_dir.z / tail_dir_len,
-        };
-
-        let extension_ratio = clamp(player.tail_extension, 0.0, 0.999_999);
-        let extend_distance = base_length * extension_ratio;
-        if extend_distance <= 1e-8 || !extend_distance.is_finite() {
-            return None;
-        }
-
-        let axis = cross(tail, tail_dir);
-        let axis_len = length(axis);
-        let tail_radius = length(tail).max(1e-6);
-        let angle = extend_distance / tail_radius;
-        let mut extended = tail;
-        if axis_len > 1e-8 && angle.is_finite() {
-            let axis_unit = Point {
-                x: axis.x / axis_len,
-                y: axis.y / axis_len,
-                z: axis.z / axis_len,
-            };
-            rotate_around_axis(&mut extended, axis_unit, angle);
-            return Some(normalize(extended));
-        }
-
-        let fallback = normalize(Point {
-            x: tail.x + tail_dir.x * extend_distance,
-            y: tail.y + tail_dir.y * extend_distance,
-            z: tail.z + tail_dir.z * extend_distance,
-        });
-        Some(fallback)
-    }
-
     fn detect_snake_head_body_collisions(
         player_snapshots: &[PlayerCollisionSnapshot],
         dead: &mut HashSet<String>,
@@ -2352,7 +2343,9 @@ impl RoomState {
                         z: node.z,
                     })
                     .collect::<Vec<_>>();
-                if let Some(extended_tail) = Self::extended_tail_point(player) {
+                if let Some(extended_tail) =
+                    compute_extended_tail_point(&player.snake, player.tail_extension)
+                {
                     snake_points.push(extended_tail);
                 }
                 PlayerCollisionSnapshot {
@@ -2552,7 +2545,7 @@ impl RoomState {
         for visible in visible_players.iter().take(visible_player_count) {
             let player = visible.player;
             let window = visible.window;
-            capacity += 2 + 1 + 4 + 2 + 2 + 1 + 1 + 1 + 2; // net id + flags + score + frac + oxygen + girth + tail_ext + detail + total_len
+            capacity += 2 + 1 + 4 + 2 + 2 + 1 + 2 + 4 + 1 + 2; // net id + flags + score + frac + oxygen + girth + tail_ext + tail_tip(oct) + detail + total_len
             match window.detail {
                 SnakeDetail::Full => {
                     capacity += 2 + window.len * 4;
@@ -2684,6 +2677,12 @@ impl RoomState {
             {
                 field_mask |= DELTA_FIELD_TAIL_EXT;
             }
+            if previous
+                .map(|prev| prev.tail_tip_oct != current.tail_tip_oct)
+                .unwrap_or(true)
+            {
+                field_mask |= DELTA_FIELD_TAIL_TIP;
+            }
 
             let mut snake_mode: Option<u8> = None;
             let mut shifted_head: Option<(i16, i16)> = None;
@@ -2731,6 +2730,10 @@ impl RoomState {
             }
             if field_mask & DELTA_FIELD_TAIL_EXT != 0 {
                 encoder.write_u16(current.tail_ext_q);
+            }
+            if field_mask & DELTA_FIELD_TAIL_TIP != 0 {
+                encoder.write_i16(current.tail_tip_oct.0);
+                encoder.write_i16(current.tail_tip_oct.1);
             }
             if field_mask & DELTA_FIELD_SNAKE != 0 {
                 let mode = snake_mode.unwrap_or(DELTA_SNAKE_REBASE);
@@ -2910,6 +2913,9 @@ impl RoomState {
                 player.snake.len(),
             )),
             tail_ext_q: Self::quantize_unit_u16(clamp(player.tail_extension, 0.0, 1.0)),
+            tail_tip_oct: compute_tail_tip_point(&player.snake, player.tail_extension)
+                .map(Self::encode_unit_vec_oct_i16)
+                .unwrap_or((0, 0)),
             snake: DeltaSnakeCache {
                 detail,
                 total_len: window.total_len.min(u16::MAX as usize) as u16,
@@ -3044,6 +3050,11 @@ impl RoomState {
             0.0,
             1.0,
         )));
+        let tail_tip_oct = compute_tail_tip_point(&player.snake, player.tail_extension)
+            .map(Self::encode_unit_vec_oct_i16)
+            .unwrap_or((0, 0));
+        encoder.write_i16(tail_tip_oct.0);
+        encoder.write_i16(tail_tip_oct.1);
         let detail = match window.detail {
             SnakeDetail::Full => protocol::SNAKE_DETAIL_FULL,
             SnakeDetail::Window => protocol::SNAKE_DETAIL_WINDOW,

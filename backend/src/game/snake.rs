@@ -3,6 +3,8 @@ use super::math::{clamp, cross, dot, length, normalize, rotate_around_axis, rota
 use super::types::{Point, SnakeNode};
 use std::collections::VecDeque;
 
+const TAIL_EXTENSION_MAX_RATIO: f64 = 0.999_999;
+
 #[derive(Clone, Copy, Debug)]
 struct TailContinuation {
     point: Point,
@@ -47,6 +49,169 @@ fn project_tangent(from: Point, to: Point) -> Point {
                     to,
                 ),
     }
+}
+
+fn project_to_tangent(direction: Point, normal: Point) -> Point {
+    Point {
+        x: direction.x - normal.x * dot(direction, normal),
+        y: direction.y - normal.y * dot(direction, normal),
+        z: direction.z - normal.z * dot(direction, normal),
+    }
+}
+
+fn tail_extension_basis(snake: &[SnakeNode]) -> Option<(Point, Point, f64)> {
+    if snake.len() < 2 {
+        return None;
+    }
+    let tail_node = snake.last()?;
+    let prev_node = snake.get(snake.len().saturating_sub(2))?;
+    let tail = normalize(Point {
+        x: tail_node.x,
+        y: tail_node.y,
+        z: tail_node.z,
+    });
+    let prev = normalize(Point {
+        x: prev_node.x,
+        y: prev_node.y,
+        z: prev_node.z,
+    });
+
+    let mut base_segment = Point {
+        x: tail.x - prev.x,
+        y: tail.y - prev.y,
+        z: tail.z - prev.z,
+    };
+    let mut base_length = length(base_segment);
+    let mut tail_dir = project_to_tangent(base_segment, tail);
+
+    if length(tail_dir) <= 1e-8 && snake.len() >= 3 {
+        let prev_prev_node = snake.get(snake.len().saturating_sub(3))?;
+        let prev_prev = normalize(Point {
+            x: prev_prev_node.x,
+            y: prev_prev_node.y,
+            z: prev_prev_node.z,
+        });
+        base_segment = Point {
+            x: prev.x - prev_prev.x,
+            y: prev.y - prev_prev.y,
+            z: prev.z - prev_prev.z,
+        };
+        base_length = length(base_segment);
+        tail_dir = project_to_tangent(base_segment, tail);
+    }
+    if base_length <= 1e-8 || !base_length.is_finite() {
+        return None;
+    }
+    let tail_dir_len = length(tail_dir);
+    if tail_dir_len <= 1e-8 || !tail_dir_len.is_finite() {
+        return None;
+    }
+    Some((
+        tail,
+        Point {
+            x: tail_dir.x / tail_dir_len,
+            y: tail_dir.y / tail_dir_len,
+            z: tail_dir.z / tail_dir_len,
+        },
+        base_length,
+    ))
+}
+
+fn rotate_tail_along_direction(tail: Point, tail_dir: Point, extend_distance: f64) -> Option<Point> {
+    if extend_distance <= 1e-8 || !extend_distance.is_finite() {
+        return None;
+    }
+    let axis = cross(tail, tail_dir);
+    let axis_len = length(axis);
+    let tail_radius = length(tail).max(1e-6);
+    let angle = extend_distance / tail_radius;
+    if !angle.is_finite() {
+        return None;
+    }
+
+    if axis_len > 1e-8 {
+        let axis_unit = Point {
+            x: axis.x / axis_len,
+            y: axis.y / axis_len,
+            z: axis.z / axis_len,
+        };
+        let mut extended = tail;
+        rotate_around_axis(&mut extended, axis_unit, angle);
+        return Some(normalize(extended));
+    }
+
+    Some(normalize(Point {
+        x: tail.x + tail_dir.x * extend_distance,
+        y: tail.y + tail_dir.y * extend_distance,
+        z: tail.z + tail_dir.z * extend_distance,
+    }))
+}
+
+pub fn compute_extended_tail_point(snake: &[SnakeNode], tail_extension: f64) -> Option<Point> {
+    let ratio = clamp(tail_extension, 0.0, TAIL_EXTENSION_MAX_RATIO);
+    if ratio <= 1e-6 {
+        return None;
+    }
+    let (tail, tail_dir, base_length) = tail_extension_basis(snake)?;
+    let extend_distance = base_length * ratio;
+    if extend_distance <= 1e-8 || !extend_distance.is_finite() {
+        return None;
+    }
+    rotate_tail_along_direction(tail, tail_dir, extend_distance)
+}
+
+pub fn compute_tail_tip_point(snake: &[SnakeNode], tail_extension: f64) -> Option<Point> {
+    if let Some(extended) = compute_extended_tail_point(snake, tail_extension) {
+        return Some(extended);
+    }
+    snake.last().map(|tail_node| {
+        normalize(Point {
+            x: tail_node.x,
+            y: tail_node.y,
+            z: tail_node.z,
+        })
+    })
+}
+
+fn resolve_growth_continuity_from_extension(
+    snake: &[SnakeNode],
+    tail_extension_after: f64,
+) -> Option<TailContinuation> {
+    if snake.len() < 2 {
+        return None;
+    }
+    let (tail, tail_dir, base_length) = tail_extension_basis(snake)?;
+    let pre_tip = rotate_tail_along_direction(
+        tail,
+        tail_dir,
+        base_length * TAIL_EXTENSION_MAX_RATIO,
+    )?;
+    let ratio_after = clamp(tail_extension_after, 0.0, TAIL_EXTENSION_MAX_RATIO);
+
+    let axis = cross(tail, tail_dir);
+    let axis_len = length(axis);
+    if axis_len <= 1e-8 || !axis_len.is_finite() {
+        return None;
+    }
+    let axis_unit = Point {
+        x: axis.x / axis_len,
+        y: axis.y / axis_len,
+        z: axis.z / axis_len,
+    };
+
+    let total_angle = clamp(dot(tail, pre_tip), -1.0, 1.0).acos();
+    if !total_angle.is_finite() || total_angle <= 1e-8 {
+        return None;
+    }
+    let seg_angle = (total_angle / (1.0 + ratio_after)).max(1e-6);
+    let mut point = tail;
+    rotate_around_axis(&mut point, axis_unit, seg_angle);
+    Some(TailContinuation {
+        point: normalize(point),
+        history_axis: Some(axis_unit),
+        history_spacing: Some(seg_angle),
+        history_sign: 1.0,
+    })
 }
 
 fn collect_distinct_tail_points(snake: &[SnakeNode]) -> Vec<Point> {
@@ -219,7 +384,7 @@ pub fn add_snake_node(snake: &mut Vec<SnakeNode>, axis: Point) {
     snake.push(snake_node);
 }
 
-pub fn add_snake_node_for_growth(snake: &mut Vec<SnakeNode>, axis: Point) {
+pub fn add_snake_node_for_growth(snake: &mut Vec<SnakeNode>, axis: Point, tail_extension_after: f64) {
     let mut snake_node = SnakeNode {
         x: 0.0,
         y: 0.0,
@@ -237,7 +402,12 @@ pub fn add_snake_node_for_growth(snake: &mut Vec<SnakeNode>, axis: Point) {
     // Using history points can disagree with the client-side fractional tail extension (which is a
     // local arc continuation). That mismatch shows up as a visible "pop" right when
     // `tail_extension` crosses 1.0 and a full node is committed.
-    if let Some(continuation) = resolve_tail_continuation(snake, axis, false) {
+    if let Some(continuity) = resolve_growth_continuity_from_extension(snake, tail_extension_after) {
+        snake_node.x = continuity.point.x;
+        snake_node.y = continuity.point.y;
+        snake_node.z = continuity.point.z;
+        apply_growth_history(snake, &mut snake_node, continuity);
+    } else if let Some(continuation) = resolve_tail_continuation(snake, axis, false) {
         snake_node.x = continuation.point.x;
         snake_node.y = continuation.point.y;
         snake_node.z = continuation.point.z;

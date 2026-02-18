@@ -9,10 +9,12 @@ ROOM_ORIGIN_URL="http://localhost:${BACKEND_PORT}"
 LOCAL_URL="http://localhost:${LOCAL_PORT}"
 WATCH="${WATCH:-1}"
 FRONTEND_MODE="${FRONTEND_MODE:-worker}" # worker|vite
+ROCK_PELLET_FREQ_MULT="${SNAKE_DEBUG_ROCK_PELLET_FREQ_MULT:-}"
+BACKEND_HEALTH_TIMEOUT_SECS="${BACKEND_HEALTH_TIMEOUT_SECS:-40}"
 
 usage() {
   cat <<EOF
-Usage: ./run-local-dev-copy.sh [--watch|--no-watch] [--worker|--vite]
+Usage: ./run-local-dev-copy.sh [--watch|--no-watch] [--worker|--vite] [--rock-pellet-freq-mult <mult>]
 
 Starts a local stack on :${LOCAL_PORT} with a standalone backend on :${BACKEND_PORT}.
 
@@ -26,6 +28,11 @@ Watch mode (default: on):
   - Vite mode: frontend uses Vite HMR
 
 Set WATCH=0 or pass --no-watch to disable backend restarts.
+Set BACKEND_HEALTH_TIMEOUT_SECS to adjust backend startup wait before failing (default: 40).
+Debug:
+  --rock-pellet-freq-mult <mult>
+      Bias small-pellet spawns near mountain/rock edges by multiplier (e.g. 20).
+      Equivalent env var: SNAKE_DEBUG_ROCK_PELLET_FREQ_MULT=<mult>
 EOF
 }
 
@@ -46,6 +53,10 @@ while [[ $# -gt 0 ]]; do
     --vite)
       FRONTEND_MODE="vite"
       shift
+      ;;
+    --rock-pellet-freq-mult)
+      ROCK_PELLET_FREQ_MULT="$2"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -178,6 +189,15 @@ if [[ -f "${ROOT_DIR}/.env" ]]; then
   source "${ROOT_DIR}/.env"
   set +a
 fi
+if [[ -z "${ROCK_PELLET_FREQ_MULT}" ]] && [[ -n "${SNAKE_DEBUG_ROCK_PELLET_FREQ_MULT:-}" ]]; then
+  ROCK_PELLET_FREQ_MULT="${SNAKE_DEBUG_ROCK_PELLET_FREQ_MULT}"
+fi
+if [[ -n "${ROCK_PELLET_FREQ_MULT}" ]]; then
+  if ! awk -v v="${ROCK_PELLET_FREQ_MULT}" 'BEGIN { exit !(v > 0) }'; then
+    echo "--rock-pellet-freq-mult must be a number > 0" >&2
+    exit 1
+  fi
+fi
 
 if [[ -z "${ROOM_TOKEN_SECRET:-}" ]]; then
   echo "ROOM_TOKEN_SECRET is required. Set it in .env or the shell environment." >&2
@@ -188,31 +208,36 @@ if [[ "${FRONTEND_MODE}" == "worker" ]] && [[ -z "${ROOM_PROXY_SECRET:-}" ]]; th
   exit 1
 fi
 
+BACKEND_ENV=(
+  PORT="${BACKEND_PORT}"
+  SNAKE_ROLE=standalone
+  ROOM_TOKEN_SECRET="${ROOM_TOKEN_SECRET}"
+  STANDALONE_ROOM_ORIGIN="${ROOM_ORIGIN_URL}"
+)
+if [[ -n "${ROCK_PELLET_FREQ_MULT}" ]]; then
+  BACKEND_ENV+=(SNAKE_DEBUG_ROCK_PELLET_FREQ_MULT="${ROCK_PELLET_FREQ_MULT}")
+  echo "Debug rock pellet multiplier enabled: ${ROCK_PELLET_FREQ_MULT}x"
+fi
+
 if [[ "${WATCH}" == "1" ]]; then
   (
     cd "${ROOT_DIR}/backend"
     exec env \
-      PORT="${BACKEND_PORT}" \
-      SNAKE_ROLE=standalone \
-      ROOM_TOKEN_SECRET="${ROOM_TOKEN_SECRET}" \
-      STANDALONE_ROOM_ORIGIN="${ROOM_ORIGIN_URL}" \
+      "${BACKEND_ENV[@]}" \
       cargo watch -q -w src -w migrations -w Cargo.toml -x run
   ) &
 else
   (
     cd "${ROOT_DIR}/backend"
     exec env \
-      PORT="${BACKEND_PORT}" \
-      SNAKE_ROLE=standalone \
-      ROOM_TOKEN_SECRET="${ROOM_TOKEN_SECRET}" \
-      STANDALONE_ROOM_ORIGIN="${ROOM_ORIGIN_URL}" \
+      "${BACKEND_ENV[@]}" \
       cargo run
   ) &
 fi
 BACKEND_PID=$!
 echo "Standalone backend starting on ${BACKEND_URL} (PID ${BACKEND_PID})"
 
-for _ in $(seq 1 40); do
+for _ in $(seq 1 "${BACKEND_HEALTH_TIMEOUT_SECS}"); do
   if curl -fsS "${BACKEND_URL}/api/health" >/dev/null 2>&1; then
     break
   fi

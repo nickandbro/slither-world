@@ -268,7 +268,7 @@ export const createScene = async (
   const tailExtensionBaseLengths = new Map<string, number>()
   const tailCommitContinuityStates = new Map<
     string,
-    { carryDistance: number; lastSnakeLen: number; lastTailEndLen: number }
+    { extensionDistance: number; lastSnakeLen: number }
   >()
   const lastSnakeStarts = new Map<string, number>()
   const tempVector = new THREE.Vector3()
