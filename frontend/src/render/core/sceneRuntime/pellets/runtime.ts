@@ -141,7 +141,7 @@ export const createPelletRuntimeUpdater = (
       pelletBucketOpacityArrays[i] = null
     }
 
-    // Keep large glow sprites stable near the horizon while culling the far hemisphere.
+    // Keep large glow points stable near the horizon while culling the far hemisphere.
     const visibleLimit = Math.min(Math.PI - 1e-4, viewAngle + PELLET_GLOW_HORIZON_MARGIN)
     const minDirectionDot = Math.cos(visibleLimit)
     let visibleCount = 0
@@ -189,42 +189,20 @@ export const createPelletRuntimeUpdater = (
       const bucket = pelletBuckets[bucketIndex]
       if (required <= 0) {
         if (bucket) {
-          if (bucket.kind === 'points') {
-            bucket.shadowPoints.visible = false
-            bucket.corePoints.visible = false
-            bucket.innerGlowPoints.visible = false
-            bucket.glowPoints.visible = false
-            bucket.corePoints.geometry.setDrawRange(0, 0)
-          } else {
-            bucket.shadowSprite.visible = false
-            bucket.coreSprite.visible = false
-            bucket.innerGlowSprite.visible = false
-            bucket.glowSprite.visible = false
-            bucket.shadowSprite.count = 0
-            bucket.coreSprite.count = 0
-            bucket.innerGlowSprite.count = 0
-            bucket.glowSprite.count = 0
-          }
+          bucket.shadowPoints.visible = false
+          bucket.corePoints.visible = false
+          bucket.innerGlowPoints.visible = false
+          bucket.glowPoints.visible = false
+          bucket.corePoints.geometry.setDrawRange(0, 0)
         }
         continue
       }
       const nextBucket = ensurePelletBucketCapacity(bucketIndex, required)
-      if (nextBucket.kind === 'points') {
-        nextBucket.shadowPoints.visible = true
-        nextBucket.corePoints.visible = true
-        nextBucket.innerGlowPoints.visible = true
-        nextBucket.glowPoints.visible = true
-        nextBucket.corePoints.geometry.setDrawRange(0, required)
-      } else {
-        nextBucket.shadowSprite.visible = true
-        nextBucket.coreSprite.visible = true
-        nextBucket.innerGlowSprite.visible = true
-        nextBucket.glowSprite.visible = true
-        nextBucket.shadowSprite.count = required
-        nextBucket.coreSprite.count = required
-        nextBucket.innerGlowSprite.count = required
-        nextBucket.glowSprite.count = required
-      }
+      nextBucket.shadowPoints.visible = true
+      nextBucket.corePoints.visible = true
+      nextBucket.innerGlowPoints.visible = true
+      nextBucket.glowPoints.visible = true
+      nextBucket.corePoints.geometry.setDrawRange(0, required)
       pelletBucketPositionArrays[bucketIndex] = nextBucket.positionAttribute.array as Float32Array
       pelletBucketOpacityArrays[bucketIndex] = nextBucket.opacityAttribute.array as Float32Array
     }

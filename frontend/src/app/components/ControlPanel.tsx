@@ -1,11 +1,8 @@
-import type { DayNightDebugMode, RendererPreference } from '../../render/webglScene'
+import type { DayNightDebugMode } from '../../render/webglScene'
 
 type ControlPanelProps = {
   roomInput: string
   playerName: string
-  rendererPreference: RendererPreference
-  rendererStatus: string
-  rendererFallbackReason: string | null
   debugUiEnabled: boolean
   mountainDebug: boolean
   lakeDebug: boolean
@@ -16,7 +13,6 @@ type ControlPanelProps = {
   onPlayerNameChange: (value: string) => void
   onJoinRoom: () => void
   onUpdatePlayerName: () => void
-  onRendererModeChange: (value: string) => void
   onMountainDebugChange: (value: boolean) => void
   onLakeDebugChange: (value: boolean) => void
   onTreeDebugChange: (value: boolean) => void
@@ -27,9 +23,6 @@ type ControlPanelProps = {
 export function ControlPanel({
   roomInput,
   playerName,
-  rendererPreference,
-  rendererStatus,
-  rendererFallbackReason,
   debugUiEnabled,
   mountainDebug,
   lakeDebug,
@@ -40,7 +33,6 @@ export function ControlPanel({
   onPlayerNameChange,
   onJoinRoom,
   onUpdatePlayerName,
-  onRendererModeChange,
   onMountainDebugChange,
   onLakeDebugChange,
   onTreeDebugChange,
@@ -81,24 +73,6 @@ export function ControlPanel({
         <button type='button' onClick={onUpdatePlayerName}>
           Update
         </button>
-      </div>
-      <div className='control-row'>
-        <label className='control-label' htmlFor='renderer-mode'>
-          Renderer
-        </label>
-        <select
-          id='renderer-mode'
-          value={rendererPreference}
-          onChange={(event) => onRendererModeChange(event.target.value)}
-        >
-          <option value='auto'>Auto</option>
-          <option value='webgpu'>WebGPU</option>
-          <option value='webgl'>WebGL</option>
-        </select>
-      </div>
-      <div className='renderer-status' aria-live='polite'>
-        <div>{rendererStatus}</div>
-        {rendererFallbackReason && <div className='renderer-fallback'>{rendererFallbackReason}</div>}
       </div>
       {debugUiEnabled && (
         <div className='control-row debug-controls'>

@@ -185,19 +185,6 @@ select {
   min-width: 160px;
 }
 
-.renderer-status {
-  display: flex;
-  flex-direction: column;
-  gap: 0.18rem;
-  font-family: 'Space Mono', monospace;
-  font-size: 0.72rem;
-  color: rgba(11, 19, 32, 0.78);
-}
-
-.renderer-fallback {
-  color: rgba(11, 19, 32, 0.56);
-}
-
 button {
   border: none;
   border-radius: 999px;

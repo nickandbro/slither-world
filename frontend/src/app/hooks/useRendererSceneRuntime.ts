@@ -5,8 +5,6 @@ import {
   createRenderScene,
   type DayNightDebugMode,
   type RenderScene,
-  type RendererBackend,
-  type RendererPreference,
 } from '@render/webglScene'
 import { updateCamera } from '@game/camera'
 import { clamp, normalize, rotateVectorByQuat } from '@game/math'
@@ -28,7 +26,6 @@ import {
   type MenuFlowDebugInfo,
   type MenuPhase,
 } from '@app/core/menuCamera'
-import { formatRendererError } from '@app/core/renderMath'
 import { resetBoostFx, updateBoostFx, type BoostFxState } from '@app/core/boostFx'
 import {
   updateAdaptiveQuality,
@@ -61,7 +58,6 @@ type DebugFlags = {
 }
 
 type UseRendererSceneRuntimeOptions = {
-  rendererPreference: RendererPreference
   glCanvasRef: MutableRefObject<HTMLCanvasElement | null>
   hudCanvasRef: MutableRefObject<HTMLCanvasElement | null>
   boostFxRef: MutableRefObject<HTMLDivElement | null>
@@ -71,8 +67,6 @@ type UseRendererSceneRuntimeOptions = {
   headScreenRef: MutableRefObject<{ x: number; y: number } | null>
   localSnakeDisplayRef: MutableRefObject<Point[] | null>
   lastRenderFrameMsRef: MutableRefObject<number | null>
-  setActiveRenderer: Dispatch<SetStateAction<RendererBackend | null>>
-  setRendererFallbackReason: Dispatch<SetStateAction<string | null>>
   environmentRef: MutableRefObject<Environment | null>
   debugFlagsRef: MutableRefObject<DebugFlags>
   dayNightDebugModeRef: MutableRefObject<DayNightDebugMode>
@@ -161,7 +155,6 @@ type UseRendererSceneRuntimeOptions = {
 
 export function useRendererSceneRuntime(options: UseRendererSceneRuntimeOptions) {
   const {
-    rendererPreference,
     glCanvasRef,
     hudCanvasRef,
     boostFxRef,
@@ -171,8 +164,6 @@ export function useRendererSceneRuntime(options: UseRendererSceneRuntimeOptions)
     headScreenRef,
     localSnakeDisplayRef,
     lastRenderFrameMsRef,
-    setActiveRenderer,
-    setRendererFallbackReason,
     environmentRef,
     debugFlagsRef,
     dayNightDebugModeRef,
@@ -273,8 +264,6 @@ export function useRendererSceneRuntime(options: UseRendererSceneRuntimeOptions)
     if (!glCanvas || !hudCanvas) return
     const hudCtx = hudCanvas.getContext('2d')
     if (!hudCtx) return
-    setActiveRenderer(null)
-    setRendererFallbackReason(null)
 
     let disposed = false
     let webgl: RenderScene | null = null
@@ -285,22 +274,19 @@ export function useRendererSceneRuntime(options: UseRendererSceneRuntimeOptions)
     const setupScene = async () => {
       try {
         resetBoostFxVisual()
-        const created = await createRenderScene(glCanvas, rendererPreference)
+        const created = await createRenderScene(glCanvas)
         if (disposed) {
           created.scene.dispose()
           return
         }
         webgl = created.scene
         webglRef.current = webgl
-        setActiveRenderer(created.activeBackend)
-        setRendererFallbackReason(created.fallbackReason)
 
         if (environmentRef.current) {
         webgl.setEnvironment?.(environmentRef.current)
         }
         webgl.setDebugFlags?.(debugFlagsRef.current)
         webgl.setDayNightDebugMode?.(dayNightDebugModeRef.current)
-        webgl.setWebgpuWorldSamples?.(adaptiveQualityRef.current.webgpuSamples)
         syncPelletConsumeTargetsToRenderer()
 
         const handleResize = () => {
@@ -1020,16 +1006,14 @@ export function useRendererSceneRuntime(options: UseRendererSceneRuntimeOptions)
 		            }
 		          }
               if (config && webgl && updateConfig) {
-                updateAdaptiveQuality(adaptiveQualityRef.current, frameDeltaSeconds, nowMs, webgl, updateConfig)
+                updateAdaptiveQuality(adaptiveQualityRef.current, frameDeltaSeconds, nowMs, updateConfig)
               }
 		          frameId = window.requestAnimationFrame(renderLoop)
 		        }
 
         renderLoop()
-      } catch (error) {
+      } catch {
         if (disposed) return
-        setActiveRenderer(null)
-        setRendererFallbackReason(formatRendererError(error))
       }
     }
 
@@ -1052,10 +1036,8 @@ export function useRendererSceneRuntime(options: UseRendererSceneRuntimeOptions)
       controlsCameraRef.current = { q: { ...MENU_CAMERA.q }, active: true }
       resetBoostFxVisual()
     }
-    // Renderer swaps are intentionally triggered by explicit backend preference only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    rendererPreference,
     getRenderSnapshot,
     netDebugEnabled,
     appendNetLagEvent,

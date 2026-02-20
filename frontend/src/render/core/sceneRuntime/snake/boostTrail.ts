@@ -576,7 +576,7 @@ export const createBoostTrailController = ({
     if (trail.retireCut !== 0) {
       trail.retireCut = 0
       if (!webglShaderHooksEnabled) {
-        // WebGPU fallback encodes retire fade in UVs, so it needs a geometry rebuild.
+        // Retire fade is encoded in UVs, so this path needs a geometry rebuild.
         markBoostTrailDirty(trail)
       }
     }
@@ -590,7 +590,7 @@ export const createBoostTrailController = ({
     if (Math.abs(trail.retireCut - t) > 1e-4) {
       trail.retireCut = t
       if (!webglShaderHooksEnabled) {
-        // WebGPU fallback encodes retire fade in UVs, so it needs a geometry rebuild.
+        // Retire fade is encoded in UVs, so this path needs a geometry rebuild.
         markBoostTrailDirty(trail)
       }
     }
@@ -812,7 +812,7 @@ export const createBoostTrailController = ({
         if (activeTrail.retireCut !== 0) {
           activeTrail.retireCut = 0
           if (!webglShaderHooksEnabled) {
-            // WebGPU fallback encodes retire fade in UVs, so it needs a geometry rebuild.
+            // Retire fade is encoded in UVs, so this path needs a geometry rebuild.
             markBoostTrailDirty(activeTrail)
           }
         }

@@ -1,5 +1,4 @@
 import * as THREE from 'three'
-import type { WebGPURenderer } from 'three/webgpu'
 import { createMenuPreviewOverlay, type MenuPreviewOverlay } from './menuPreview'
 import { createPointerArrowOverlay, type PointerArrowOverlay } from './pointerArrow'
 import { normalizeHexColor } from '../utils/color'
@@ -13,7 +12,7 @@ type GetSnakeSkinTextureResult = {
 }
 
 type MenuPreviewRuntimeDeps = {
-  renderer: THREE.WebGLRenderer | WebGPURenderer
+  renderer: THREE.WebGLRenderer
   headGeometry: THREE.BufferGeometry
   snakeRadius: number
   snakeTubeRadialSegments: number
@@ -66,8 +65,7 @@ export const createMenuPreviewRuntime = (deps: MenuPreviewRuntimeDeps): MenuPrev
   } = deps
 
   const snakeSkinTextureCache = new Map<string, THREE.CanvasTexture>()
-  const maxAnisotropy =
-    renderer instanceof THREE.WebGLRenderer ? renderer.capabilities.getMaxAnisotropy() : 1
+  const maxAnisotropy = renderer.capabilities.getMaxAnisotropy()
 
   const getSnakeSkinTexture = (primaryColor: string, skinColors?: string[] | null) => {
     const base = (skinColors && skinColors.length > 0 ? skinColors : [primaryColor]).map(

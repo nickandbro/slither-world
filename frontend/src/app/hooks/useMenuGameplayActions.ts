@@ -1,8 +1,8 @@
 import { useCallback, type Dispatch, type MutableRefObject, type SetStateAction } from 'react'
 import type { Camera, Point } from '@game/types'
-import { createRandomPlayerName, sanitizeRoomName, storeRendererPreference } from '@game/storage'
+import { createRandomPlayerName, sanitizeRoomName } from '@game/storage'
 import { encodeRespawn } from '@game/wsProtocol'
-import type { RenderScene, RendererPreference } from '@render/webglScene'
+import type { RenderScene } from '@render/webglScene'
 import {
   MENU_CAMERA,
   MENU_CAMERA_TARGET,
@@ -51,13 +51,11 @@ type UseMenuGameplayActionsOptions = {
   localLifeSpawnedRef: MutableRefObject<boolean>
   deathStartedAtMsRef: MutableRefObject<number | null>
   returnToMenuCommittedRef: MutableRefObject<boolean>
-  rendererPreference: RendererPreference
 }
 
 type UseMenuGameplayActionsResult = {
   handleJoinRoom: () => void
   handlePlay: () => void
-  handleRendererModeChange: (value: string) => void
 }
 
 export function useMenuGameplayActions(
@@ -94,7 +92,6 @@ export function useMenuGameplayActions(
     localLifeSpawnedRef,
     deathStartedAtMsRef,
     returnToMenuCommittedRef,
-    rendererPreference,
   } = options
 
   const handleJoinRoom = useCallback(() => {
@@ -204,19 +201,8 @@ export function useMenuGameplayActions(
     webglRef,
   ])
 
-  const handleRendererModeChange = useCallback((value: string) => {
-    const mode: RendererPreference =
-      value === 'webgl' || value === 'webgpu' || value === 'auto' ? value : 'auto'
-    if (mode === rendererPreference) return
-    storeRendererPreference(mode)
-    const url = new URL(window.location.href)
-    url.searchParams.set('renderer', mode)
-    window.location.replace(url.toString())
-  }, [rendererPreference])
-
   return {
     handleJoinRoom,
     handlePlay,
-    handleRendererModeChange,
   }
 }

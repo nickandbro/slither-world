@@ -70,7 +70,7 @@
 - `6a7a591`: fixed idle room scale-down heartbeat activity tracking.
 - `prod-20260208-firewall-amd64-022020`: added control-plane create-time firewall assignment (`HETZNER_ROOM_FIREWALL_IDS`) for autoscaled room VMs.
 - `prod-20260208-lag-autotune-73d9c68`: lag-spike mitigation improvements (client playout buffering, camera hold/recovery) and WS protocol bump to `12`.
-- `ccdeb07`: minimized client obfuscation (avoid WebGL/WebGPU perf regressions) and split vendor chunk so only app code is obfuscated.
+- `ccdeb07`: minimized client obfuscation (avoid renderer perf regressions) and split vendor chunk so only app code is obfuscated.
 - Room ID truncation fix (WS token mismatch):
   - Frontend no longer truncates server-assigned room IDs before websocket connect.
   - Frontend room sanitization length increased to `64`.

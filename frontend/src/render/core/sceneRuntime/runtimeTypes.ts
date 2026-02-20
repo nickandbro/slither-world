@@ -76,8 +76,7 @@ export type PebbleCullEntry = {
   radius: number
 }
 
-export type RendererPreference = 'auto' | 'webgl' | 'webgpu'
-export type RendererBackend = 'webgl' | 'webgpu'
+export type RendererBackend = 'webgl'
 export type DayNightDebugMode = 'auto' | 'accelerated'
 
 export type RenderScene = {
@@ -100,8 +99,6 @@ export type RenderScene = {
   setMenuPreviewOrbit: (yaw: number, pitch: number) => void
   queuePelletConsumeTargets?: (targets: ReadonlyMap<number, string> | null) => void
   clearPelletConsumeTargets?: () => void
-  // WebGPU-only quality knob (offscreen MSAA samples). No-op on WebGL.
-  setWebgpuWorldSamples?: (samples: number) => void
   setEnvironment: (environment: Environment) => void
   setDebugFlags: (flags: {
     mountainOutline?: boolean
@@ -117,6 +114,4 @@ export type WebGLScene = RenderScene
 
 export type CreateRenderSceneResult = {
   scene: RenderScene
-  activeBackend: RendererBackend
-  fallbackReason: string | null
 }

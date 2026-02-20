@@ -6,22 +6,12 @@ import {
 const LOCAL_STORAGE_ID = 'spherical_snake_player_id'
 const LOCAL_STORAGE_NAME = 'spherical_snake_player_name'
 const LOCAL_STORAGE_ROOM = 'spherical_snake_room'
-const LOCAL_STORAGE_RENDERER = 'spherical_snake_renderer'
 
 export const DEFAULT_ROOM = 'main'
-export const DEFAULT_RENDERER = 'auto'
-export type RendererPreference = 'auto' | 'webgl' | 'webgpu'
 const MAX_ROOM_NAME_LENGTH = 64
 
 export function createRandomPlayerName() {
   return `Player-${Math.floor(Math.random() * 999) + 1}`
-}
-
-export function sanitizeRendererPreference(value: string | null | undefined): RendererPreference {
-  if (value === 'webgl' || value === 'webgpu' || value === 'auto') {
-    return value
-  }
-  return DEFAULT_RENDERER
 }
 
 export function getInitialName() {
@@ -49,20 +39,6 @@ export function getInitialRoom() {
   return sanitizeRoomName(fromUrl ?? stored ?? DEFAULT_ROOM)
 }
 
-export function getStoredRendererPreference() {
-  const value = readLocalStorage(LOCAL_STORAGE_RENDERER)
-  return sanitizeRendererPreference(value)
-}
-
-export function getInitialRendererPreference() {
-  const params = new URLSearchParams(window.location.search)
-  const fromUrl = params.get('renderer')
-  if (fromUrl) {
-    return sanitizeRendererPreference(fromUrl)
-  }
-  return getStoredRendererPreference()
-}
-
 export function storePlayerName(name: string) {
   writeLocalStorage(LOCAL_STORAGE_NAME, name)
 }
@@ -73,8 +49,4 @@ export function storeRoomName(roomName: string) {
 
 export function storePlayerId(playerId: string) {
   writeLocalStorage(LOCAL_STORAGE_ID, playerId)
-}
-
-export function storeRendererPreference(renderer: RendererPreference) {
-  writeLocalStorage(LOCAL_STORAGE_RENDERER, renderer)
 }

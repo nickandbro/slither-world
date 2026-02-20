@@ -18,9 +18,7 @@ type DebugBoostTrailState = {
 }
 
 type RendererInfo = {
-  requestedBackend: 'auto' | 'webgl' | 'webgpu'
-  activeBackend: 'webgl' | 'webgpu'
-  fallbackReason: string | null
+  activeBackend: 'webgl'
   webglShaderHooksEnabled: boolean
 }
 

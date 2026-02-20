@@ -1,5 +1,4 @@
 import { clamp } from '@game/math'
-import type { RenderScene } from '@render/webglScene'
 
 export type AdaptiveQualityState = {
   enabled: boolean
@@ -8,15 +7,12 @@ export type AdaptiveQualityState = {
   currentDpr: number
   ewmaFrameMs: number
   lastAdjustAtMs: number
-  webgpuSamples: number
-  webgpuLastChangeMs: number
 }
 
 export function updateAdaptiveQuality(
   state: AdaptiveQualityState,
   frameDeltaSeconds: number,
   nowMs: number,
-  webgl: RenderScene,
   updateConfig: () => void,
 ): void {
   if (!state.enabled) return
@@ -50,24 +46,5 @@ export function updateAdaptiveQuality(
   if (Math.abs(nextDpr - state.currentDpr) > 1e-6) {
     state.currentDpr = nextDpr
     updateConfig()
-  }
-
-  const setSamples = webgl.setWebgpuWorldSamples
-  if (typeof setSamples !== 'function') return
-
-  const atMinDpr = state.currentDpr <= minDpr + 0.01
-  if (state.webgpuSamples > 1) {
-    if (atMinDpr && state.ewmaFrameMs > 22 && nowMs - state.webgpuLastChangeMs > 2000) {
-      state.webgpuSamples = 1
-      state.webgpuLastChangeMs = nowMs
-      setSamples(1)
-    }
-    return
-  }
-
-  if (state.ewmaFrameMs < 16 && nowMs - state.webgpuLastChangeMs > 10_000) {
-    state.webgpuSamples = 4
-    state.webgpuLastChangeMs = nowMs
-    setSamples(4)
   }
 }

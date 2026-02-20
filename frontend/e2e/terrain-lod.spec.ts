@@ -49,7 +49,7 @@ const getEnvironmentCullInfo = async (page: Page) => {
 
 test.describe('terrain patch visibility', () => {
   test('keeps static patch topology and updates visibility in webgl', async ({ page }) => {
-    await page.goto('/?renderer=webgl')
+    await page.goto('/')
     await enterGame(page)
 
     await page.waitForFunction(() => {
@@ -114,29 +114,5 @@ test.describe('terrain patch visibility', () => {
     expect((cullAfter?.visibleMountains ?? 0) <= (cullAfter?.totalMountains ?? 0)).toBeTruthy()
     expect((cullAfter?.visiblePebbles ?? 0) <= (cullAfter?.totalPebbles ?? 0)).toBeTruthy()
     expect((cullAfter?.visibleLakes ?? 0) <= (cullAfter?.totalLakes ?? 0)).toBeTruthy()
-  })
-
-  test('exposes patch info in webgpu mode @webgpu', async ({ page }) => {
-    await page.goto('/?renderer=webgpu')
-    await enterGame(page)
-
-    await page.waitForFunction(() => {
-      const debugApi = (
-        window as Window & {
-          __SNAKE_DEBUG__?: {
-            getTerrainPatchInfo?: () => TerrainPatchInfo
-          }
-        }
-      ).__SNAKE_DEBUG__
-      const info = debugApi?.getTerrainPatchInfo?.()
-      return !!info && info.totalPatches > 0 && info.visiblePatches > 0
-    })
-
-    const info = await getTerrainPatchInfo(page)
-    expect(info).not.toBeNull()
-    expect(info?.patchBands).toBe(12)
-    expect(info?.patchSlices).toBe(24)
-    expect(info?.dynamicRebuilds).toBe(false)
-    expect(info?.wireframeEnabled).toBe(false)
   })
 })

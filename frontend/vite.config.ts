@@ -58,7 +58,7 @@ function clientObfuscationPlugin(enabled: boolean): Plugin {
           continue
         }
 
-        // The goal is minimal obfuscation that doesn't risk perturbing WebGL/WebGPU
+        // The goal is minimal obfuscation that doesn't risk perturbing WebGL
         // performance-critical library code. Only obfuscate chunks that are pure app (`src/`)
         // code and contain no `node_modules/` modules.
         const moduleIds = item.moduleIds ?? []

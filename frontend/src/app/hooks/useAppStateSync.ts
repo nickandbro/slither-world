@@ -1,6 +1,6 @@
 import { useEffect, type MutableRefObject } from 'react'
 import type { Environment } from '@game/types'
-import { storePlayerName, storeRendererPreference, storeRoomName } from '@game/storage'
+import { storePlayerName, storeRoomName } from '@game/storage'
 import {
   persistDayNightDebugMode,
   persistDebugSettings,
@@ -8,7 +8,6 @@ import {
 import type {
   DayNightDebugMode,
   RenderScene,
-  RendererPreference,
 } from '@render/webglScene'
 
 type MenuUiMode = 'home' | 'skin' | 'builder'
@@ -40,7 +39,6 @@ type UseAppStateSyncOptions = {
   dayNightDebugMode: DayNightDebugMode
   dayNightDebugModeRef: MutableRefObject<DayNightDebugMode>
   roomName: string
-  rendererPreference: RendererPreference
 }
 
 export function useAppStateSync(options: UseAppStateSyncOptions) {
@@ -64,7 +62,6 @@ export function useAppStateSync(options: UseAppStateSyncOptions) {
     dayNightDebugMode,
     dayNightDebugModeRef,
     roomName,
-    rendererPreference,
   } = options
 
   useEffect(() => {
@@ -130,11 +127,4 @@ export function useAppStateSync(options: UseAppStateSyncOptions) {
     url.searchParams.set('room', roomName)
     window.history.replaceState({}, '', url)
   }, [roomName])
-
-  useEffect(() => {
-    storeRendererPreference(rendererPreference)
-    const url = new URL(window.location.href)
-    url.searchParams.set('renderer', rendererPreference)
-    window.history.replaceState({}, '', url)
-  }, [rendererPreference])
 }

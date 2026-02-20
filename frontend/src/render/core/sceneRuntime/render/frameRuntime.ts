@@ -1,5 +1,4 @@
 import * as THREE from 'three'
-import type { WebGPURenderer } from 'three/webgpu'
 import type { Camera, GameStateSnapshot, Point } from '../../../../game/types'
 import { updatePointerArrowOverlay, type PointerArrowOverlay } from '../overlays/pointerArrow'
 import type { MenuPreviewOverlay } from '../overlays/menuPreview'
@@ -15,7 +14,7 @@ type RenderPassUpdater = (
 ) => void
 
 type SceneFrameRuntimeDeps = {
-  renderer: THREE.WebGLRenderer | WebGPURenderer
+  renderer: THREE.WebGLRenderer
   scene: THREE.Scene
   camera: THREE.PerspectiveCamera
   world: THREE.Group
@@ -77,10 +76,6 @@ type SceneFrameRuntimeDeps = {
   getViewportSize: () => { width: number; height: number }
   renderPerfInfo: RenderPerfInfo
   renderPerfSlowFramesMax: number
-  webgpuOffscreenEnabled: boolean
-  webgpuWorldTarget: THREE.RenderTarget | null
-  webgpuPresentScene: THREE.Scene | null
-  webgpuPresentCamera: THREE.OrthographicCamera | null
   constants: {
     snakeRadius: number
     snakeGirthScaleMin: number
@@ -139,10 +134,6 @@ export const createSceneFrameRuntime = (deps: SceneFrameRuntimeDeps) => {
     getViewportSize,
     renderPerfInfo,
     renderPerfSlowFramesMax,
-    webgpuOffscreenEnabled,
-    webgpuWorldTarget,
-    webgpuPresentScene,
-    webgpuPresentCamera,
     constants,
   } = deps
 
@@ -443,20 +434,6 @@ export const createSceneFrameRuntime = (deps: SceneFrameRuntimeDeps) => {
     }
 
     const savedAutoClear = renderer.autoClear
-    const savedRenderTarget =
-      (renderer as unknown as { getRenderTarget?: () => unknown }).getRenderTarget?.() ?? null
-    const useWebgpuOffscreen =
-      webgpuOffscreenEnabled &&
-      webgpuWorldTarget !== null &&
-      webgpuPresentScene !== null &&
-      webgpuPresentCamera !== null
-
-    if (useWebgpuOffscreen) {
-      ;(renderer as unknown as { setRenderTarget?: (target: unknown) => void }).setRenderTarget?.(
-        webgpuWorldTarget,
-      )
-    }
-
     renderer.autoClear = false
     renderer.clear()
     try {
@@ -506,42 +483,17 @@ export const createSceneFrameRuntime = (deps: SceneFrameRuntimeDeps) => {
         passLakesMs = performance.now() - passStartMs
       }
 
-      if (useWebgpuOffscreen) {
-        if (menuPreviewOverlay.isVisible()) {
-          menuPreviewOverlay.applyRenderRotation()
-          renderer.clear(false, true, false)
-          renderer.render(menuPreviewOverlay.scene, menuPreviewOverlay.camera)
-        }
-        if (pointerOverlayRoot.visible) {
-          renderer.clear(false, true, false)
-          renderer.render(pointerOverlayScene, camera)
-        }
-      } else {
-        if (menuPreviewOverlay.isVisible()) {
-          menuPreviewOverlay.applyRenderRotation()
-          renderer.clearDepth()
-          renderer.render(menuPreviewOverlay.scene, menuPreviewOverlay.camera)
-        }
-        if (pointerOverlayRoot.visible) {
-          renderer.clearDepth()
-          renderer.render(pointerOverlayScene, camera)
-        }
+      if (menuPreviewOverlay.isVisible()) {
+        menuPreviewOverlay.applyRenderRotation()
+        renderer.clearDepth()
+        renderer.render(menuPreviewOverlay.scene, menuPreviewOverlay.camera)
+      }
+      if (pointerOverlayRoot.visible) {
+        renderer.clearDepth()
+        renderer.render(pointerOverlayScene, camera)
       }
     } finally {
       renderer.autoClear = savedAutoClear
-    }
-
-    if (useWebgpuOffscreen) {
-      ;(renderer as unknown as { setRenderTarget?: (target: unknown) => void }).setRenderTarget?.(
-        null,
-      )
-      const savedPresentAutoClear = renderer.autoClear
-      renderer.autoClear = true
-      renderer.render(webgpuPresentScene!, webgpuPresentCamera!)
-      renderer.autoClear = savedPresentAutoClear
-      ;(renderer as unknown as { setRenderTarget?: (target: unknown) => void }).setRenderTarget?.(
-        savedRenderTarget,
-      )
     }
 
     if (perfEnabled) {

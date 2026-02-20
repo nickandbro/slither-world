@@ -34,7 +34,6 @@ import { createPelletRuntimeUpdater } from './pellets/runtime'
 import { createDayNightRuntime } from './render/dayNightRuntime'
 import { createDayNightBootstrap } from './render/dayNightBootstrap'
 import { createSceneFrameRuntime } from './render/frameRuntime'
-import { createWebgpuOffscreenSetup, createWebgpuWorldTarget } from './render/webgpuOffscreen'
 import { createRenderer } from './render/passes'
 import type { SceneDebugApi } from './debug/attachDebugApi'
 import { registerRuntimeDebugApi } from './debug/registerRuntimeDebug'
@@ -85,8 +84,6 @@ import {
 import * as SCENE_CONSTANTS from './constants'
 import type {
   DeathState,
-  RendererBackend,
-  RendererPreference,
   RenderScene,
   SnakeVisual,
 } from './runtimeTypes'
@@ -94,29 +91,12 @@ export type {
   CreateRenderSceneResult,
   DayNightDebugMode,
   RendererBackend,
-  RendererPreference,
   RenderScene,
   WebGLScene,
 } from './runtimeTypes'
-export const createScene = async (
-  canvas: HTMLCanvasElement,
-  requestedBackend: RendererPreference,
-  activeBackend: RendererBackend,
-  fallbackReason: string | null,
-): Promise<RenderScene> => {
-  const renderer = await createRenderer(canvas, activeBackend)
-  const webglShaderHooksEnabled = activeBackend === 'webgl'
-  const webgpuOffscreenEnabled = activeBackend === 'webgpu'
-  // WebGPURenderer runs an internal output conversion pass when rendering to the canvas.
-  // Our world render is multi-pass; rendering everything into an explicit RenderTarget keeps
-  // depth consistent between passes (so pellet glow never sees terrain depth) and presents once.
-  const webgpuOffscreenSetup = createWebgpuOffscreenSetup(webgpuOffscreenEnabled)
-  let webgpuWorldTarget = webgpuOffscreenSetup.worldTarget
-  let webgpuWorldSamples = webgpuOffscreenSetup.worldSamples
-  const webgpuPresentScene = webgpuOffscreenSetup.presentScene
-  const webgpuPresentCamera = webgpuOffscreenSetup.presentCamera
-  let webgpuPresentMaterial = webgpuOffscreenSetup.presentMaterial
-  let webgpuPresentQuad = webgpuOffscreenSetup.presentQuad
+export const createScene = async (canvas: HTMLCanvasElement): Promise<RenderScene> => {
+  const renderer = createRenderer(canvas)
+  const webglShaderHooksEnabled = true
   const scene = new THREE.Scene()
   const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 20)
   camera.position.set(0, 0, 3)
@@ -181,12 +161,6 @@ export const createScene = async (
   const intakeConeGeometry = new THREE.PlaneGeometry(1, 1, 1, 1)
   intakeConeGeometry.translate(0, 0.5, 0)
   const intakeConeTexture = createIntakeConeTexture()
-  // WebGPU does not support variable-size point primitives, so render pellets via instanced sprites.
-  const pelletsUseSprites = activeBackend === 'webgpu'
-  // Avoid mid-game resizes (and the associated pipeline/binding churn) by giving WebGPU buckets a
-  // reasonable initial capacity. Per-bucket counts tend to be in the tens/low-hundreds even during
-  // mass deaths, so 128 is a good tradeoff.
-  const PELLET_SPRITE_BUCKET_MIN_CAPACITY = 128
   const PELLET_COLOR_BUCKET_COUNT = SCENE_CONSTANTS.PELLET_COLORS.length
   const PELLET_BUCKET_COUNT = PELLET_COLOR_BUCKET_COUNT * SCENE_CONSTANTS.PELLET_SIZE_TIER_MULTIPLIERS.length
   const PELLET_SHADOW_POINT_SIZE = SCENE_CONSTANTS.PELLET_RADIUS * 9.4
@@ -197,13 +171,9 @@ export const createScene = async (
   const pelletCoreTexture = createPelletCoreTexture()
   const pelletInnerGlowTexture = createPelletInnerGlowTexture()
   const pelletGlowTexture = createPelletGlowTexture()
-  // WebGPU does not support `MeshDepthMaterial` (it can't be converted to a node material),
-  // but for this pass we only need depth writes. Use a depth-only basic material instead.
-  const occluderDepthMaterial = webglShaderHooksEnabled
-    ? new THREE.MeshDepthMaterial({
-        depthPacking: THREE.BasicDepthPacking,
-      })
-    : new THREE.MeshBasicMaterial()
+  const occluderDepthMaterial = new THREE.MeshDepthMaterial({
+    depthPacking: THREE.BasicDepthPacking,
+  })
   occluderDepthMaterial.depthTest = true
   occluderDepthMaterial.depthWrite = true
   occluderDepthMaterial.colorWrite = false
@@ -245,7 +215,6 @@ export const createScene = async (
   const pelletIdsSeen = new Set<number>()
   let viewportWidth = 1
   let viewportHeight = 1
-  let viewportDpr = 1
   const viewportState = {
     get width() {
       return viewportWidth
@@ -313,9 +282,7 @@ export const createScene = async (
     boostTrails,
     lastForwardDirections,
     getRendererInfo: () => ({
-      requestedBackend,
-      activeBackend,
-      fallbackReason,
+      activeBackend: 'webgl',
       webglShaderHooksEnabled,
     }),
     renderPerfInfo,
@@ -766,8 +733,6 @@ export const createScene = async (
   const { pelletBucketIndex, ensurePelletBucketCapacity } = createPelletBucketManager({
     pelletBuckets,
     pelletsGroup,
-    pelletsUseSprites,
-    pelletSpriteBucketMinCapacity: PELLET_SPRITE_BUCKET_MIN_CAPACITY,
     pelletColorBucketCount: PELLET_COLOR_BUCKET_COUNT,
     pelletSizeTierMultipliers: SCENE_CONSTANTS.PELLET_SIZE_TIER_MULTIPLIERS,
     pelletSizeTierMediumMin: SCENE_CONSTANTS.PELLET_SIZE_TIER_MEDIUM_MIN,
@@ -875,10 +840,6 @@ export const createScene = async (
     getViewportSize: () => ({ width: viewportWidth, height: viewportHeight }),
     renderPerfInfo,
     renderPerfSlowFramesMax,
-    webgpuOffscreenEnabled,
-    webgpuWorldTarget,
-    webgpuPresentScene,
-    webgpuPresentCamera,
     constants: { snakeRadius: SCENE_CONSTANTS.SNAKE_RADIUS, snakeGirthScaleMin: SCENE_CONSTANTS.SNAKE_GIRTH_SCALE_MIN, snakeGirthScaleMax: SCENE_CONSTANTS.SNAKE_GIRTH_SCALE_MAX, snakeLiftFactor: SCENE_CONSTANTS.SNAKE_LIFT_FACTOR, headRadius: SCENE_CONSTANTS.HEAD_RADIUS, lakeWaterEmissiveBase: SCENE_CONSTANTS.LAKE_WATER_EMISSIVE_BASE, lakeWaterEmissivePulse: SCENE_CONSTANTS.LAKE_WATER_EMISSIVE_PULSE, lakeWaterWaveSpeed: SCENE_CONSTANTS.LAKE_WATER_WAVE_SPEED, planetPatchEnabled: SCENE_CONSTANTS.PLANET_PATCH_ENABLED },
   })
   const setEnvironment = (environment: Environment) => buildEnvironment(environment)
@@ -886,50 +847,15 @@ export const createScene = async (
 	  const resize = (width: number, height: number, dpr: number) => {
 	    viewportWidth = width
 	    viewportHeight = height
-	    viewportDpr = Number.isFinite(dpr) && dpr > 0 ? dpr : 1
 	    renderer.setPixelRatio(dpr)
 	    renderer.setSize(width, height, false)
-	    if (webgpuWorldTarget) {
-	      const rtW = Math.max(1, Math.floor(width * viewportDpr))
-	      const rtH = Math.max(1, Math.floor(height * viewportDpr))
-	      webgpuWorldTarget.setSize(rtW, rtH)
-	    }
 	    const safeHeight = height > 0 ? height : 1
 	    const aspect = width / safeHeight
 	    camera.aspect = aspect
 	    camera.updateProjectionMatrix()
     menuPreviewOverlay.resize(width, aspect)
   }
-  const setWebgpuWorldSamples = (requestedSamples: number) => {
-    if (!webgpuOffscreenEnabled) return
-    const rounded = Math.round(requestedSamples)
-    const nextSamples = rounded <= 1 ? 1 : 4
-    if (nextSamples === webgpuWorldSamples) return
-    webgpuWorldSamples = nextSamples
-    if (!webgpuWorldTarget || !webgpuPresentMaterial) return
-    const previousTarget = webgpuWorldTarget
-    const nextTarget = createWebgpuWorldTarget(webgpuWorldSamples)
-    const rtW = Math.max(1, Math.floor(viewportWidth * viewportDpr))
-    const rtH = Math.max(1, Math.floor(viewportHeight * viewportDpr))
-    nextTarget.setSize(rtW, rtH)
-    webgpuWorldTarget = nextTarget
-    webgpuPresentMaterial.map = nextTarget.texture
-    webgpuPresentMaterial.needsUpdate = true
-    previousTarget.dispose()
-  }
 		  const dispose = () => {
-	    if (webgpuPresentQuad) {
-	      webgpuPresentQuad.geometry.dispose()
-	      webgpuPresentQuad = null
-	    }
-	    if (webgpuPresentMaterial) {
-	      webgpuPresentMaterial.dispose()
-	      webgpuPresentMaterial = null
-	    }
-		    if (webgpuWorldTarget) {
-		      webgpuWorldTarget.dispose()
-		      webgpuWorldTarget = null
-		    }
 		    renderer.dispose()
 		    boostTrailWarmup.dispose()
 	    disposeEnvironment()
@@ -970,27 +896,15 @@ export const createScene = async (
     for (let i = 0; i < pelletBuckets.length; i += 1) {
       const bucket = pelletBuckets[i]
       if (!bucket) continue
-      if (bucket.kind === 'points') {
-        pelletsGroup.remove(bucket.shadowPoints)
-        pelletsGroup.remove(bucket.glowPoints)
-        pelletsGroup.remove(bucket.innerGlowPoints)
-        pelletsGroup.remove(bucket.corePoints)
-        bucket.corePoints.geometry.dispose()
-        bucket.shadowMaterial.dispose()
-        bucket.coreMaterial.dispose()
-        bucket.innerGlowMaterial.dispose()
-        bucket.glowMaterial.dispose()
-      } else {
-        pelletsGroup.remove(bucket.shadowSprite)
-        pelletsGroup.remove(bucket.glowSprite)
-        pelletsGroup.remove(bucket.innerGlowSprite)
-        pelletsGroup.remove(bucket.coreSprite)
-        // Sprite geometry is shared; only dispose materials.
-        bucket.shadowMaterial.dispose()
-        bucket.coreMaterial.dispose()
-        bucket.innerGlowMaterial.dispose()
-        bucket.glowMaterial.dispose()
-      }
+      pelletsGroup.remove(bucket.shadowPoints)
+      pelletsGroup.remove(bucket.glowPoints)
+      pelletsGroup.remove(bucket.innerGlowPoints)
+      pelletsGroup.remove(bucket.corePoints)
+      bucket.corePoints.geometry.dispose()
+      bucket.shadowMaterial.dispose()
+      bucket.coreMaterial.dispose()
+      bucket.innerGlowMaterial.dispose()
+      bucket.glowMaterial.dispose()
       pelletBuckets[i] = null
     }
     pelletShadowTexture?.dispose()
@@ -1028,7 +942,6 @@ export const createScene = async (
     setMenuPreviewOrbit,
     queuePelletConsumeTargets,
     clearPelletConsumeTargets,
-    setWebgpuWorldSamples: webgpuOffscreenEnabled ? setWebgpuWorldSamples : undefined,
     setEnvironment,
     setDebugFlags,
     setDayNightDebugMode,

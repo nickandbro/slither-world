@@ -3,8 +3,6 @@ import './App.css'
 import {
   type DayNightDebugMode,
   type RenderScene,
-  type RendererBackend,
-  type RendererPreference,
 } from './render/webglScene'
 import type { Camera, Environment, GameStateSnapshot, PelletSnapshot, Point } from './game/types'
 import { IDENTITY_QUAT, clamp } from './game/math'
@@ -15,7 +13,6 @@ import {
   getInitialRoom,
   getInitialName,
   getStoredPlayerId,
-  getInitialRendererPreference,
 } from './game/storage'
 import {
   encodeInputFast,
@@ -95,7 +92,8 @@ type MenuUiMode = 'home' | 'skin' | 'builder'
 const LOCAL_STORAGE_ADAPTIVE_QUALITY = 'spherical_snake_adaptive_quality'
 const LOCAL_STORAGE_MIN_DPR = 'spherical_snake_min_dpr'
 const LOCAL_STORAGE_MAX_DPR = 'spherical_snake_max_dpr'
-const LOCAL_STORAGE_WEBGPU_MSAA_SAMPLES = 'spherical_snake_webgpu_msaa_samples'
+const LEGACY_LOCAL_STORAGE_RENDERER = 'spherical_snake_renderer'
+const LEGACY_LOCAL_STORAGE_WEBGPU_MSAA_SAMPLES = 'spherical_snake_webgpu_msaa_samples'
 
 export default function App() {
   const RAF_SLOW_FRAME_THRESHOLD_MS = 50
@@ -261,11 +259,6 @@ export default function App() {
     currentDpr: 0,
     ewmaFrameMs: 16.7,
     lastAdjustAtMs: 0,
-    webgpuSamples:
-      readLocalStorageNumber(LOCAL_STORAGE_WEBGPU_MSAA_SAMPLES, 4, { min: 1, max: 4 }) >= 2
-        ? 4
-        : 1,
-    webgpuLastChangeMs: 0,
   })
   const localSnakeDisplayRef = useRef<Point[] | null>(null)
   const lastRenderFrameMsRef = useRef<number | null>(null)
@@ -299,10 +292,7 @@ export default function App() {
   const [builderDesignName, setBuilderDesignName] = useState('')
   const [roomName, setRoomName] = useState(getInitialRoom)
   const [roomInput, setRoomInput] = useState(getInitialRoom)
-  const [rendererPreference] = useState<RendererPreference>(getInitialRendererPreference)
   const [connectionStatus, setConnectionStatus] = useState('Connecting')
-  const [activeRenderer, setActiveRenderer] = useState<RendererBackend | null>(null)
-  const [rendererFallbackReason, setRendererFallbackReason] = useState<string | null>(null)
   const [menuPhase, setMenuPhase] = useState<MenuPhase>('preplay')
   const [menuOverlayExiting, setMenuOverlayExiting] = useState(false)
   const [showPlayAgain, setShowPlayAgain] = useState(false)
@@ -365,6 +355,25 @@ export default function App() {
     }
   }, [])
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try {
+      window.localStorage.removeItem(LEGACY_LOCAL_STORAGE_RENDERER)
+      window.localStorage.removeItem(LEGACY_LOCAL_STORAGE_WEBGPU_MSAA_SAMPLES)
+    } catch {
+      // ignore localStorage access errors
+    }
+
+    try {
+      const url = new URL(window.location.href)
+      if (!url.searchParams.has('renderer')) return
+      url.searchParams.delete('renderer')
+      window.history.replaceState({}, '', url)
+    } catch {
+      // ignore URL parsing errors
+    }
+  }, [])
+
   const localPlayer = useMemo(() => {
     return gameState?.players.find((player) => player.id === playerId) ?? null
   }, [gameState, playerId])
@@ -409,14 +418,6 @@ export default function App() {
     cameraBlendStartMsRef.current = null
     setMenuPhase('playing')
   }, [localPlayer, menuPhase])
-
-  const rendererStatus = useMemo(() => {
-    if (!activeRenderer) return 'Renderer: Initializing...'
-    if (rendererFallbackReason) {
-      return `Renderer: ${activeRenderer.toUpperCase()} (WebGPU fallback)`
-    }
-    return `Renderer: ${activeRenderer.toUpperCase()}`
-  }, [activeRenderer, rendererFallbackReason])
 
   function sendInputSnapshot(force = false) {
     const INPUT_AXIS_DEADBAND_DEG = 0.05
@@ -619,7 +620,6 @@ export default function App() {
     dayNightDebugMode,
     dayNightDebugModeRef,
     roomName,
-    rendererPreference,
   })
 
   const startInputLoop = () => {
@@ -785,7 +785,6 @@ export default function App() {
   })
 
   useRendererSceneRuntime({
-    rendererPreference,
     glCanvasRef,
     hudCanvasRef,
     boostFxRef,
@@ -795,8 +794,6 @@ export default function App() {
     headScreenRef,
     localSnakeDisplayRef,
     lastRenderFrameMsRef,
-    setActiveRenderer,
-    setRendererFallbackReason,
     environmentRef,
     debugFlagsRef,
     dayNightDebugModeRef,
@@ -863,7 +860,7 @@ export default function App() {
     cameraRotationStatsRef,
   })
 
-  const { handleJoinRoom, handlePlay, handleRendererModeChange } = useMenuGameplayActions({
+  const { handleJoinRoom, handlePlay } = useMenuGameplayActions({
     roomInput,
     roomName,
     setRoomInput,
@@ -894,7 +891,6 @@ export default function App() {
     localLifeSpawnedRef,
     deathStartedAtMsRef,
     returnToMenuCommittedRef,
-    rendererPreference,
   })
 
   const {
@@ -1030,9 +1026,6 @@ export default function App() {
           <ControlPanel
             roomInput={roomInput}
             playerName={playerName}
-            rendererPreference={rendererPreference}
-            rendererStatus={rendererStatus}
-            rendererFallbackReason={rendererFallbackReason}
             debugUiEnabled={DEBUG_UI_ENABLED}
             mountainDebug={mountainDebug}
             lakeDebug={lakeDebug}
@@ -1043,7 +1036,6 @@ export default function App() {
             onPlayerNameChange={setPlayerName}
             onJoinRoom={handleJoinRoom}
             onUpdatePlayerName={() => socketRef.current && sendJoin(socketRef.current, false)}
-            onRendererModeChange={handleRendererModeChange}
             onMountainDebugChange={setMountainDebug}
             onLakeDebugChange={setLakeDebug}
             onTreeDebugChange={setTreeDebug}
