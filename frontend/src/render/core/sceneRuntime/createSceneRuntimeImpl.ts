@@ -152,7 +152,9 @@ export const createScene = async (canvas: HTMLCanvasElement): Promise<RenderScen
   const intakeConeGeometry = new THREE.PlaneGeometry(1, 1, 1, 1)
   intakeConeGeometry.translate(0, 0.5, 0)
   const intakeConeTexture = createIntakeConeTexture()
-  const PELLET_BUCKET_COUNT = SCENE_CONSTANTS.PELLET_SIZE_TIER_MULTIPLIERS.length
+  const PELLET_PULSE_BUCKET_COUNT = Math.max(1, SCENE_CONSTANTS.PELLET_COLORS.length)
+  const PELLET_BUCKET_COUNT =
+    SCENE_CONSTANTS.PELLET_SIZE_TIER_MULTIPLIERS.length * PELLET_PULSE_BUCKET_COUNT
   const PELLET_SHADOW_POINT_SIZE = SCENE_CONSTANTS.PELLET_RADIUS * 9.4
   const PELLET_CORE_POINT_SIZE = SCENE_CONSTANTS.PELLET_RADIUS * 5
   const PELLET_INNER_GLOW_POINT_SIZE = SCENE_CONSTANTS.PELLET_RADIUS * 14
@@ -669,6 +671,7 @@ export const createScene = async (canvas: HTMLCanvasElement): Promise<RenderScen
   const { pelletBucketIndex, ensurePelletBucketCapacity } = createPelletBucketManager({
     pelletBuckets,
     pelletsGroup,
+    pelletPulseBucketCount: PELLET_PULSE_BUCKET_COUNT,
     pelletSizeTierMultipliers: SCENE_CONSTANTS.PELLET_SIZE_TIER_MULTIPLIERS,
     pelletSizeTierMediumMin: SCENE_CONSTANTS.PELLET_SIZE_TIER_MEDIUM_MIN,
     pelletSizeTierLargeMin: SCENE_CONSTANTS.PELLET_SIZE_TIER_LARGE_MIN,

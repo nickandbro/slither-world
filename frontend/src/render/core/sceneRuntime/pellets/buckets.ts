@@ -17,6 +17,7 @@ export type PelletSpriteBucket = {
   baseCoreSize: number
   baseInnerGlowSize: number
   baseGlowSize: number
+  pulseBucketIndex: number
   sizeTierIndex: number
   bucketIndex: number
 }
@@ -24,6 +25,7 @@ export type PelletSpriteBucket = {
 export type CreatePelletBucketManagerParams = {
   pelletBuckets: Array<PelletSpriteBucket | null>
   pelletsGroup: THREE.Group
+  pelletPulseBucketCount: number
   pelletSizeTierMultipliers: number[]
   pelletSizeTierMediumMin: number
   pelletSizeTierLargeMin: number
@@ -42,7 +44,7 @@ export type CreatePelletBucketManagerParams = {
 }
 
 export type PelletBucketManager = {
-  pelletBucketIndex: (size: number) => number
+  pelletBucketIndex: (pelletId: number, size: number) => number
   ensurePelletBucketCapacity: (bucketIndex: number, required: number) => PelletSpriteBucket
 }
 
@@ -86,6 +88,7 @@ const applyPelletAttributesToPointsMaterial = (
 export const createPelletBucketManager = ({
   pelletBuckets,
   pelletsGroup,
+  pelletPulseBucketCount,
   pelletSizeTierMultipliers,
   pelletSizeTierMediumMin,
   pelletSizeTierLargeMin,
@@ -102,18 +105,30 @@ export const createPelletBucketManager = ({
   pelletInnerGlowOpacityBase,
   pelletGlowOpacityBase,
 }: CreatePelletBucketManagerParams): PelletBucketManager => {
-  const bucketCount = Math.max(1, pelletSizeTierMultipliers.length)
+  const sizeTierCount = Math.max(1, pelletSizeTierMultipliers.length)
+  const pulseBucketCount = Math.max(1, Math.floor(pelletPulseBucketCount))
+  const bucketCount = sizeTierCount * pulseBucketCount
 
   const pelletSizeTierIndex = (size: number) => {
-    if (!Number.isFinite(size) || bucketCount <= 1) return 0
-    if (bucketCount >= 3 && size >= pelletSizeTierLargeMin) return 2
+    if (!Number.isFinite(size) || sizeTierCount <= 1) return 0
+    if (sizeTierCount >= 3 && size >= pelletSizeTierLargeMin) return 2
     if (size >= pelletSizeTierMediumMin) return 1
     return 0
   }
 
-  const pelletBucketIndex = (size: number) => {
+  const pelletPulseBucketIndex = (pelletId: number) => {
+    if (pulseBucketCount <= 1 || !Number.isFinite(pelletId)) {
+      return 0
+    }
+    const bucket = Math.trunc(pelletId) % pulseBucketCount
+    return bucket >= 0 ? bucket : bucket + pulseBucketCount
+  }
+
+  const pelletBucketIndex = (pelletId: number, size: number) => {
     const tierIndex = pelletSizeTierIndex(size)
-    return Math.max(0, Math.min(bucketCount - 1, tierIndex))
+    const pulseIndex = pelletPulseBucketIndex(pelletId)
+    const bucketIndex = tierIndex * pulseBucketCount + pulseIndex
+    return Math.max(0, Math.min(bucketCount - 1, bucketIndex))
   }
 
   const createBucketGeometry = (capacity: number) => {
@@ -135,7 +150,12 @@ export const createPelletBucketManager = ({
   }
 
   const createPelletBucket = (bucketIndex: number, capacity: number): PelletSpriteBucket => {
-    const sizeTierIndex = Math.max(0, Math.min(bucketCount - 1, bucketIndex))
+    const clampedBucketIndex = Math.max(0, Math.min(bucketCount - 1, bucketIndex))
+    const sizeTierIndex = Math.max(
+      0,
+      Math.min(sizeTierCount - 1, Math.floor(clampedBucketIndex / pulseBucketCount)),
+    )
+    const pulseBucketIndex = clampedBucketIndex % pulseBucketCount
     const sizeMultiplier = pelletSizeTierMultipliers[sizeTierIndex] ?? 1
     const baseShadowSize = pelletShadowPointSize * sizeMultiplier
     const baseCoreSize = pelletCorePointSize * sizeMultiplier
@@ -242,8 +262,9 @@ export const createPelletBucketManager = ({
       baseCoreSize,
       baseInnerGlowSize,
       baseGlowSize,
+      pulseBucketIndex,
       sizeTierIndex,
-      bucketIndex,
+      bucketIndex: clampedBucketIndex,
     }
   }
 

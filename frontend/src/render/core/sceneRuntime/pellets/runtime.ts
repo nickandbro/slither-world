@@ -47,7 +47,7 @@ type CreatePelletRuntimeUpdaterOptions = {
   pelletBucketOpacityArrays: Array<Float32Array | null>
   pelletBucketColorArrays: Array<Float32Array | null>
   pelletBuckets: Array<PelletSpriteBucket | null>
-  pelletBucketIndex: (size: number) => number
+  pelletBucketIndex: (pelletId: number, size: number) => number
   ensurePelletBucketCapacity: (bucketIndex: number, requiredCount: number) => PelletSpriteBucket
   resolvePelletRenderSize: (state: PelletVisualState) => number
   tempVector: THREE.Vector3
@@ -171,7 +171,7 @@ export const createPelletRuntimeUpdater = (
         continue
       }
       const renderPelletSize = resolvePelletRenderSize(state)
-      const bucketIndex = pelletBucketIndex(renderPelletSize)
+      const bucketIndex = pelletBucketIndex(pellet.id, renderPelletSize)
       pelletBucketCounts[bucketIndex] += 1
       visibleCount += 1
     }
@@ -188,7 +188,7 @@ export const createPelletRuntimeUpdater = (
       ) {
         continue
       }
-      const bucketIndex = pelletBucketIndex(ghost.size)
+      const bucketIndex = pelletBucketIndex(ghost.pelletId, ghost.size)
       pelletBucketCounts[bucketIndex] += 1
       visibleCount += 1
     }
@@ -232,7 +232,7 @@ export const createPelletRuntimeUpdater = (
         continue
       }
       const renderPelletSize = resolvePelletRenderSize(state)
-      const bucketIndex = pelletBucketIndex(renderPelletSize)
+      const bucketIndex = pelletBucketIndex(pellet.id, renderPelletSize)
       const positions = pelletBucketPositionArrays[bucketIndex]
       const opacities = pelletBucketOpacityArrays[bucketIndex]
       const colors = pelletBucketColorArrays[bucketIndex]
@@ -272,7 +272,7 @@ export const createPelletRuntimeUpdater = (
       ) {
         continue
       }
-      const bucketIndex = pelletBucketIndex(ghost.size)
+      const bucketIndex = pelletBucketIndex(ghost.pelletId, ghost.size)
       const positions = pelletBucketPositionArrays[bucketIndex]
       const opacities = pelletBucketOpacityArrays[bucketIndex]
       const colors = pelletBucketColorArrays[bucketIndex]
@@ -323,7 +323,7 @@ export const createPelletRuntimeUpdater = (
       if (!bucket) continue
       const phase =
         timeSeconds * PELLET_GLOW_PULSE_SPEED +
-        bucket.bucketIndex * PELLET_GLOW_PHASE_STEP +
+        bucket.pulseBucketIndex * PELLET_GLOW_PHASE_STEP +
         bucket.sizeTierIndex * 0.91
       const pulse = 0.5 + 0.5 * Math.cos(phase)
       const centered = (pulse - 0.5) * 2
