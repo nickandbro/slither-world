@@ -15,7 +15,7 @@ export type PelletSnapshot = {
   x: number
   y: number
   z: number
-  colorIndex: number
+  color: string
   size: number
 }
 

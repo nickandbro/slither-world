@@ -37,13 +37,6 @@ import { createSceneFrameRuntime } from './render/frameRuntime'
 import { createRenderer } from './render/passes'
 import type { SceneDebugApi } from './debug/attachDebugApi'
 import { registerRuntimeDebugApi } from './debug/registerRuntimeDebug'
-import {
-  createBoostTrailAlphaTexture,
-  createBoostTrailController,
-  createBoostTrailMaterial,
-  createBoostTrailWarmupManager,
-  type BoostTrailState,
-} from './snake/boostTrail'
 import { createSnakeCollectionRuntime } from './snake/collectionRuntime'
 import { createSnakePlayerVisualRuntime } from './snake/playerVisualRuntime'
 import { createSnakePlayerRuntime } from './snake/playerUpdateRuntime'
@@ -144,10 +137,8 @@ export const createScene = async (canvas: HTMLCanvasElement): Promise<RenderScen
   const environmentState: EnvironmentRuntimeControllerState = createInitialEnvironmentRuntimeState()
   const environmentGroup = new THREE.Group()
   world.add(environmentGroup)
-  const boostTrailsGroup = new THREE.Group()
   const snakesGroup = new THREE.Group()
   const pelletsGroup = new THREE.Group()
-  world.add(boostTrailsGroup)
   world.add(snakesGroup)
   world.add(pelletsGroup)
   const headGeometry = new THREE.SphereGeometry(SCENE_CONSTANTS.HEAD_RADIUS, 18, 18)
@@ -161,8 +152,7 @@ export const createScene = async (canvas: HTMLCanvasElement): Promise<RenderScen
   const intakeConeGeometry = new THREE.PlaneGeometry(1, 1, 1, 1)
   intakeConeGeometry.translate(0, 0.5, 0)
   const intakeConeTexture = createIntakeConeTexture()
-  const PELLET_COLOR_BUCKET_COUNT = SCENE_CONSTANTS.PELLET_COLORS.length
-  const PELLET_BUCKET_COUNT = PELLET_COLOR_BUCKET_COUNT * SCENE_CONSTANTS.PELLET_SIZE_TIER_MULTIPLIERS.length
+  const PELLET_BUCKET_COUNT = SCENE_CONSTANTS.PELLET_SIZE_TIER_MULTIPLIERS.length
   const PELLET_SHADOW_POINT_SIZE = SCENE_CONSTANTS.PELLET_RADIUS * 9.4
   const PELLET_CORE_POINT_SIZE = SCENE_CONSTANTS.PELLET_RADIUS * 5
   const PELLET_INNER_GLOW_POINT_SIZE = SCENE_CONSTANTS.PELLET_RADIUS * 14
@@ -183,6 +173,7 @@ export const createScene = async (canvas: HTMLCanvasElement): Promise<RenderScen
   const pelletBucketOffsets = new Array<number>(PELLET_BUCKET_COUNT).fill(0)
   const pelletBucketPositionArrays: Array<Float32Array | null> = new Array(PELLET_BUCKET_COUNT).fill(null)
   const pelletBucketOpacityArrays: Array<Float32Array | null> = new Array(PELLET_BUCKET_COUNT).fill(null)
+  const pelletBucketColorArrays: Array<Float32Array | null> = new Array(PELLET_BUCKET_COUNT).fill(null)
   const pelletGroundCache = new Map<number, PelletGroundCacheEntry>()
   const pelletMotionStates = new Map<number, PelletMotionState>()
   const pelletVisualStates = new Map<number, PelletVisualState>()
@@ -225,7 +216,6 @@ export const createScene = async (canvas: HTMLCanvasElement): Promise<RenderScen
   }
   const snakes = new Map<string, SnakeVisual>()
   const snakeTubeCaches = new Map<string, SnakeTubeCache>()
-  const boostTrails = new Map<string, BoostTrailState[]>()
   const deathStates = new Map<string, DeathState>()
   const lastAliveStates = new Map<string, boolean>()
   const lastHeadPositions = new Map<string, THREE.Vector3>()
@@ -279,7 +269,6 @@ export const createScene = async (canvas: HTMLCanvasElement): Promise<RenderScen
   debugApi = registerRuntimeDebugApi({
     enabled: debugEnabled || perfDebugEnabled,
     snakes,
-    boostTrails,
     lastForwardDirections,
     getRendererInfo: () => ({
       activeBackend: 'webgl',
@@ -429,56 +418,6 @@ export const createScene = async (canvas: HTMLCanvasElement): Promise<RenderScen
     }
     return getAnalyticTerrainRadius(normal, sample)
   }
-  const boostTrailAlphaTexture = createBoostTrailAlphaTexture({
-    width: SCENE_CONSTANTS.BOOST_TRAIL_ALPHA_TEXTURE_WIDTH,
-    height: SCENE_CONSTANTS.BOOST_TRAIL_ALPHA_TEXTURE_HEIGHT,
-    edgeFadeCap: SCENE_CONSTANTS.BOOST_TRAIL_EDGE_FADE_CAP,
-    sideFadeCap: SCENE_CONSTANTS.BOOST_TRAIL_SIDE_FADE_CAP,
-  })
-  const createBoostTrailMaterialInstance = () =>
-    createBoostTrailMaterial({
-      color: SCENE_CONSTANTS.BOOST_TRAIL_COLOR,
-      opacity: SCENE_CONSTANTS.BOOST_TRAIL_OPACITY,
-      alphaTexture: boostTrailAlphaTexture,
-      retireFeather: SCENE_CONSTANTS.BOOST_TRAIL_RETIRE_FEATHER,
-      webglShaderHooksEnabled,
-    })
-  const boostTrailWarmup = createBoostTrailWarmupManager({
-    world,
-    scene,
-    camera,
-    renderer,
-    createBoostTrailMaterial: createBoostTrailMaterialInstance,
-    webglShaderHooksEnabled,
-  })
-  boostTrailWarmup.warmOnce()
-  const {
-    updateBoostTrailForPlayer,
-    updateInactiveBoostTrails,
-    disposeAllBoostTrails,
-  } = createBoostTrailController({
-    boostTrails,
-    boostTrailsGroup,
-    createBoostTrailMaterial: createBoostTrailMaterialInstance,
-    webglShaderHooksEnabled,
-    getTerrainRadius,
-    buildTangentBasis,
-    planetRadius: SCENE_CONSTANTS.PLANET_RADIUS,
-    boostTrailSurfaceOffset: SCENE_CONSTANTS.BOOST_TRAIL_SURFACE_OFFSET,
-    boostTrailMinSampleDistance: SCENE_CONSTANTS.BOOST_TRAIL_MIN_SAMPLE_DISTANCE,
-    boostTrailMaxSamples: SCENE_CONSTANTS.BOOST_TRAIL_MAX_SAMPLES,
-    boostTrailMaxArcAngle: SCENE_CONSTANTS.BOOST_TRAIL_MAX_ARC_ANGLE,
-    boostTrailFadeSeconds: SCENE_CONSTANTS.BOOST_TRAIL_FADE_SECONDS,
-    boostTrailMaxCurveSegments: SCENE_CONSTANTS.BOOST_TRAIL_MAX_CURVE_SEGMENTS,
-    boostTrailCurveSegmentsPerPoint: SCENE_CONSTANTS.BOOST_TRAIL_CURVE_SEGMENTS_PER_POINT,
-    boostTrailMaxCenterPoints: SCENE_CONSTANTS.BOOST_TRAIL_MAX_CENTER_POINTS,
-    boostTrailMaxVertexCount: SCENE_CONSTANTS.BOOST_TRAIL_MAX_VERTEX_COUNT,
-    boostTrailMaxIndexCount: SCENE_CONSTANTS.BOOST_TRAIL_MAX_INDEX_COUNT,
-    boostTrailPoolMax: SCENE_CONSTANTS.BOOST_TRAIL_POOL_MAX,
-    boostTrailWidth: SCENE_CONSTANTS.BOOST_TRAIL_WIDTH,
-    boostTrailRetireFeather: SCENE_CONSTANTS.BOOST_TRAIL_RETIRE_FEATHER,
-    boostTrailEdgeFadeCap: SCENE_CONSTANTS.BOOST_TRAIL_EDGE_FADE_CAP,
-  })
   const getSnakeCenterlineRadius = (
     normal: THREE.Vector3,
     radiusOffset: number,
@@ -722,18 +661,14 @@ export const createScene = async (canvas: HTMLCanvasElement): Promise<RenderScen
     snakes,
     lastHeadPositions,
     lastForwardDirections,
-    lastTailContactNormals,
     setLocalGroundingInfo: (value) => {
       localGroundingInfo = value
     },
     updateSnake,
-    updateBoostTrailForPlayer,
-    updateInactiveBoostTrails,
   })
   const { pelletBucketIndex, ensurePelletBucketCapacity } = createPelletBucketManager({
     pelletBuckets,
     pelletsGroup,
-    pelletColorBucketCount: PELLET_COLOR_BUCKET_COUNT,
     pelletSizeTierMultipliers: SCENE_CONSTANTS.PELLET_SIZE_TIER_MULTIPLIERS,
     pelletSizeTierMediumMin: SCENE_CONSTANTS.PELLET_SIZE_TIER_MEDIUM_MIN,
     pelletSizeTierLargeMin: SCENE_CONSTANTS.PELLET_SIZE_TIER_LARGE_MIN,
@@ -745,7 +680,6 @@ export const createScene = async (canvas: HTMLCanvasElement): Promise<RenderScen
     pelletCoreTexture,
     pelletInnerGlowTexture,
     pelletGlowTexture,
-    pelletColors: SCENE_CONSTANTS.PELLET_COLORS,
     pelletShadowOpacityBase: SCENE_CONSTANTS.PELLET_SHADOW_OPACITY_BASE,
     pelletCoreOpacityBase: SCENE_CONSTANTS.PELLET_CORE_OPACITY_BASE,
     pelletInnerGlowOpacityBase: SCENE_CONSTANTS.PELLET_INNER_GLOW_OPACITY_BASE,
@@ -763,6 +697,7 @@ export const createScene = async (canvas: HTMLCanvasElement): Promise<RenderScen
     pelletBucketOffsets,
     pelletBucketPositionArrays,
     pelletBucketOpacityArrays,
+    pelletBucketColorArrays,
     pelletBuckets,
     pelletBucketIndex,
     ensurePelletBucketCapacity,
@@ -857,7 +792,6 @@ export const createScene = async (canvas: HTMLCanvasElement): Promise<RenderScen
   }
 		  const dispose = () => {
 		    renderer.dispose()
-		    boostTrailWarmup.dispose()
 	    disposeEnvironment()
     camera.remove(skyGroup)
     skyDomeGeometry.dispose()
@@ -923,8 +857,6 @@ export const createScene = async (canvas: HTMLCanvasElement): Promise<RenderScen
       removeSnake(visual, id)
     }
     snakes.clear()
-    disposeAllBoostTrails()
-    boostTrailAlphaTexture?.dispose()
     if ((debugEnabled || perfDebugEnabled) && typeof window !== 'undefined') {
       const debugWindow = window as Window & { __SNAKE_DEBUG__?: unknown }
       if (debugWindow.__SNAKE_DEBUG__ === debugApi) {

@@ -11,7 +11,9 @@ export type PelletConsumeGhost = {
   startRadius: number
   startSize: number
   size: number
-  colorIndex: number
+  colorR: number
+  colorG: number
+  colorB: number
   age: number
   duration: number
   targetPlayerId: string | null
@@ -107,7 +109,9 @@ export const createPelletConsumeGhostHelpers = ({
       existingGhost.startRadius = startRadius
       existingGhost.startSize = startSize
       existingGhost.size = startSize
-      existingGhost.colorIndex = state.colorIndex
+      existingGhost.colorR = state.colorR
+      existingGhost.colorG = state.colorG
+      existingGhost.colorB = state.colorB
       existingGhost.age = 0
       existingGhost.duration = pelletConsumeGhostDurationSecs
       existingGhost.targetPlayerId = targetPlayerId
@@ -125,7 +129,9 @@ export const createPelletConsumeGhostHelpers = ({
       startRadius,
       startSize,
       size: startSize,
-      colorIndex: state.colorIndex,
+      colorR: state.colorR,
+      colorG: state.colorG,
+      colorB: state.colorB,
       age: 0,
       duration: pelletConsumeGhostDurationSecs,
       targetPlayerId,

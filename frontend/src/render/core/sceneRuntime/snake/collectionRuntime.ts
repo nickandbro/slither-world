@@ -16,7 +16,6 @@ type CreateSnakeCollectionRuntimeOptions = {
   snakes: Map<string, SnakeVisual>
   lastHeadPositions: Map<string, THREE.Vector3>
   lastForwardDirections: Map<string, THREE.Vector3>
-  lastTailContactNormals: Map<string, THREE.Vector3>
   setLocalGroundingInfo: (value: SnakeGroundingInfo | null) => void
   updateSnake: (
     player: PlayerSnapshot,
@@ -24,12 +23,6 @@ type CreateSnakeCollectionRuntimeOptions = {
     deltaSeconds: number,
     nowMs: number,
   ) => void
-  updateBoostTrailForPlayer: (
-    player: PlayerSnapshot,
-    tailContactNormal: THREE.Vector3 | null,
-    nowMs: number,
-  ) => void
-  updateInactiveBoostTrails: (activeIds: Set<string>, nowMs: number) => void
 }
 
 type SnakeCollectionRuntime = {
@@ -57,11 +50,8 @@ export const createSnakeCollectionRuntime = (
     snakes,
     lastHeadPositions,
     lastForwardDirections,
-    lastTailContactNormals,
     setLocalGroundingInfo,
     updateSnake,
-    updateBoostTrailForPlayer,
-    updateInactiveBoostTrails,
   } = options
 
   const removeSnake = (visual: SnakeVisual, id: string) => {
@@ -114,8 +104,6 @@ export const createSnakeCollectionRuntime = (
         deltaSeconds,
         nowMs,
       )
-      const tailContactNormal = lastTailContactNormals.get(player.id) ?? null
-      updateBoostTrailForPlayer(player, tailContactNormal, nowMs)
     }
 
     for (const [id, visual] of snakes) {
@@ -126,7 +114,6 @@ export const createSnakeCollectionRuntime = (
         lastForwardDirections.delete(id)
       }
     }
-    updateInactiveBoostTrails(activeIds, nowMs)
   }
 
   return {

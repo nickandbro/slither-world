@@ -46,6 +46,25 @@ pub const SMALL_PELLET_SIZE_MIN: f32 = 0.55;
 pub const SMALL_PELLET_SIZE_MAX: f32 = 0.95;
 pub const DEATH_PELLET_SIZE_MIN: f32 = 1.65;
 pub const DEATH_PELLET_SIZE_MAX: f32 = 2.85;
+pub const BOOST_TRAIL_PELLET_INTERVAL_MS: i64 = 100;
+pub const BOOST_TRAIL_PELLET_TTL_MS: i64 = 30_000;
+pub const BOOST_TRAIL_PELLET_SIZE_MIN: f32 = 0.55;
+pub const BOOST_TRAIL_PELLET_SIZE_MAX: f32 = 0.75;
+pub const BOOST_TRAIL_PELLET_GROWTH_FRACTION: f64 = SMALL_PELLET_GROWTH_FRACTION;
+pub const SMALL_PELLET_COLOR_PALETTE: [[u8; 3]; 12] = [
+    [0xff, 0x5f, 0x6d], // #ff5f6d
+    [0xff, 0xc8, 0x57], // #ffc857
+    [0x5c, 0xff, 0x8d], // #5cff8d
+    [0x5d, 0xc9, 0xff], // #5dc9ff
+    [0x9f, 0x7b, 0xff], // #9f7bff
+    [0xff, 0x7b, 0xcb], // #ff7bcb
+    [0xff, 0xd8, 0x6b], // #ffd86b
+    [0x6b, 0xff, 0xea], // #6bffea
+    [0x8b, 0xe1, 0x5b], // #8be15b
+    [0xff, 0x96, 0x42], // #ff9642
+    [0x6f, 0x8b, 0xff], // #6f8bff
+    [0xf9, 0xff, 0x6b], // #f9ff6b
+];
 pub const EVASIVE_PELLET_MIN_LEN: usize = STARTING_LENGTH;
 pub const EVASIVE_PELLET_MAX_LEN: usize = 20;
 pub const EVASIVE_PELLET_COOLDOWN_MS: i64 = 60_000;

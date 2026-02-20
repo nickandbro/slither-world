@@ -43,10 +43,11 @@ pub enum PelletState {
 pub struct Pellet {
     pub id: u32,
     pub normal: Point,
-    pub color_index: u8,
+    pub color_rgb: [u8; 3],
     pub base_size: f32,
     pub current_size: f32,
     pub growth_fraction: f64,
+    pub expires_at_ms: Option<i64>,
     pub state: PelletState,
 }
 
@@ -71,6 +72,8 @@ pub struct Player {
     pub last_seen: i64,
     pub respawn_at: Option<i64>,
     pub boost_floor_len: usize,
+    pub trail_color_cycle_cursor: usize,
+    pub next_boost_trail_pellet_at_ms: i64,
     pub snake: Vec<SnakeNode>,
     pub pellet_growth_fraction: f64,
     pub tail_extension: f64,

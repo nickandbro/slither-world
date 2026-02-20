@@ -205,7 +205,7 @@ function blendPellets(a: PelletSnapshot[], b: PelletSnapshot[], t: number) {
         x: lerp(pelletA.x, pelletB.x, t),
         y: lerp(pelletA.y, pelletB.y, t),
         z: lerp(pelletA.z, pelletB.z, t),
-        colorIndex: pelletB.colorIndex,
+        color: pelletB.color,
         size: Math.max(0, lerp(pelletA.size, pelletB.size, t)),
       })
     } else {

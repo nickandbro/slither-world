@@ -43,6 +43,8 @@ fn make_player(id: &str, snake: Vec<SnakeNode>) -> Player {
         last_seen: 0,
         respawn_at: None,
         boost_floor_len: snake.len().max(STARTING_LENGTH),
+        trail_color_cycle_cursor: 0,
+        next_boost_trail_pellet_at_ms: 0,
         snake,
         pellet_growth_fraction: 0.0,
         tail_extension: 0.0,
@@ -81,10 +83,11 @@ fn make_pellet(id: u32, normal: Point) -> Pellet {
     Pellet {
         id,
         normal,
-        color_index: 0,
+        color_rgb: [255, 255, 255],
         base_size: 1.0,
         current_size: 1.0,
         growth_fraction: SMALL_PELLET_GROWTH_FRACTION,
+        expires_at_ms: None,
         state: PelletState::Idle,
     }
 }
@@ -633,10 +636,11 @@ fn death_pellets_clamp_to_u16_max() {
                 y: 0.0,
                 z: 0.0,
             },
-            color_index: 0,
+            color_rgb: [255, 255, 255],
             base_size: SMALL_PELLET_SIZE_MIN,
             current_size: SMALL_PELLET_SIZE_MIN,
             growth_fraction: SMALL_PELLET_GROWTH_FRACTION,
+        expires_at_ms: None,
             state: PelletState::Idle,
         })
         .collect();
@@ -656,6 +660,63 @@ fn death_pellets_clamp_to_u16_max() {
         assert_eq!(pellet.normal.z, node.z);
         assert!(pellet.base_size > SMALL_PELLET_SIZE_MAX);
     }
+}
+
+#[test]
+fn boost_trail_pellets_spawn_on_interval_while_boosting() {
+    let mut state = make_state();
+    let player_id = "trail-spawn".to_string();
+    let mut player = make_player(&player_id, make_snake(6, 0.0));
+    player.is_boosting = true;
+    state.players.insert(player_id, player);
+
+    state.spawn_boost_trail_pellets(1_000);
+    assert_eq!(state.pellets.len(), 1);
+
+    state.spawn_boost_trail_pellets(1_050);
+    assert_eq!(state.pellets.len(), 1);
+
+    state.spawn_boost_trail_pellets(1_100);
+    assert_eq!(state.pellets.len(), 2);
+}
+
+#[test]
+fn boost_trail_pellets_cycle_player_skin_colors() {
+    let mut state = make_state();
+    let player_id = "trail-skin-cycle".to_string();
+    let mut player = make_player(&player_id, make_snake(6, 0.0));
+    player.is_boosting = true;
+    player.skin = Some(vec![[10, 20, 30], [40, 50, 60], [70, 80, 90]]);
+    state.players.insert(player_id, player);
+
+    state.spawn_boost_trail_pellets(2_000);
+    state.spawn_boost_trail_pellets(2_100);
+    state.spawn_boost_trail_pellets(2_200);
+    state.spawn_boost_trail_pellets(2_300);
+
+    let colors: Vec<[u8; 3]> = state.pellets.iter().map(|pellet| pellet.color_rgb).collect();
+    assert_eq!(colors, vec![[10, 20, 30], [40, 50, 60], [70, 80, 90], [10, 20, 30]]);
+}
+
+#[test]
+fn boost_trail_pellets_set_ttl_and_expire() {
+    let mut state = make_state();
+    let player_id = "trail-ttl".to_string();
+    let mut player = make_player(&player_id, make_snake(6, 0.0));
+    player.is_boosting = true;
+    state.players.insert(player_id, player);
+
+    let now_ms = RoomState::now_millis();
+    state.spawn_boost_trail_pellets(now_ms);
+    assert_eq!(state.pellets.len(), 1);
+    assert_eq!(
+        state.pellets[0].expires_at_ms,
+        Some(now_ms + BOOST_TRAIL_PELLET_TTL_MS)
+    );
+
+    state.pellets[0].expires_at_ms = Some(now_ms - 1);
+    state.update_small_pellets(TICK_MS as f64 / 1000.0);
+    assert!(state.pellets.is_empty());
 }
 
 #[test]
@@ -1358,10 +1419,11 @@ fn death_pellet_grants_big_pellet_growth_fraction() {
     state.pellets.push(Pellet {
         id: 700,
         normal: mouth,
-        color_index: 0,
+        color_rgb: [255, 255, 255],
         base_size: DEATH_PELLET_SIZE_MIN,
         current_size: DEATH_PELLET_SIZE_MIN,
         growth_fraction: BIG_PELLET_GROWTH_FRACTION,
+        expires_at_ms: None,
         state: PelletState::Idle,
     });
 
@@ -1587,10 +1649,11 @@ fn evasive_pellet_moves_away_from_owner() {
     state.pellets.push(Pellet {
         id: 880,
         normal: start,
-        color_index: 0,
+        color_rgb: [255, 255, 255],
         base_size: EVASIVE_PELLET_SIZE_MIN,
         current_size: EVASIVE_PELLET_SIZE_MIN,
         growth_fraction: BIG_PELLET_GROWTH_FRACTION,
+        expires_at_ms: None,
         state: PelletState::Evasive {
             owner_player_id: owner_id,
             expires_at_ms: i64::MAX,
@@ -1645,10 +1708,11 @@ fn evasive_pellet_motion_step_is_capped_for_smoothness() {
             y: 0.2,
             z: 0.0,
         }),
-        color_index: 0,
+        color_rgb: [255, 255, 255],
         base_size: EVASIVE_PELLET_SIZE_MIN,
         current_size: EVASIVE_PELLET_SIZE_MIN,
         growth_fraction: BIG_PELLET_GROWTH_FRACTION,
+        expires_at_ms: None,
         state: PelletState::Evasive {
             owner_player_id: owner_id,
             expires_at_ms: i64::MAX,
@@ -1697,10 +1761,11 @@ fn evasive_pellet_stays_put_when_owner_is_not_chasing() {
     state.pellets.push(Pellet {
         id: 884,
         normal: behind_owner,
-        color_index: 0,
+        color_rgb: [255, 255, 255],
         base_size: EVASIVE_PELLET_SIZE_MIN,
         current_size: EVASIVE_PELLET_SIZE_MIN,
         growth_fraction: BIG_PELLET_GROWTH_FRACTION,
+        expires_at_ms: None,
         state: PelletState::Evasive {
             owner_player_id: owner_id,
             expires_at_ms: i64::MAX,
@@ -1767,10 +1832,11 @@ fn evasive_pellet_suction_allows_non_owner_capture() {
     state.pellets.push(Pellet {
         id: 885,
         normal: start,
-        color_index: 0,
+        color_rgb: [255, 255, 255],
         base_size: EVASIVE_PELLET_SIZE_MIN,
         current_size: EVASIVE_PELLET_SIZE_MIN,
         growth_fraction: BIG_PELLET_GROWTH_FRACTION,
+        expires_at_ms: None,
         state: PelletState::Evasive {
             owner_player_id: owner_id,
             expires_at_ms: i64::MAX,
@@ -1816,10 +1882,11 @@ fn evasive_pellet_expires_and_is_consumable_by_non_owner() {
             y: 0.0,
             z: 0.0,
         },
-        color_index: 0,
+        color_rgb: [255, 255, 255],
         base_size: EVASIVE_PELLET_SIZE_MIN,
         current_size: EVASIVE_PELLET_SIZE_MIN,
         growth_fraction: BIG_PELLET_GROWTH_FRACTION,
+        expires_at_ms: None,
         state: PelletState::Evasive {
             owner_player_id: owner_id.clone(),
             expires_at_ms: 0,
@@ -1850,10 +1917,11 @@ fn evasive_pellet_expires_and_is_consumable_by_non_owner() {
     state.pellets.push(Pellet {
         id: 882,
         normal: rival_head,
-        color_index: 0,
+        color_rgb: [255, 255, 255],
         base_size: EVASIVE_PELLET_SIZE_MIN,
         current_size: EVASIVE_PELLET_SIZE_MIN,
         growth_fraction: BIG_PELLET_GROWTH_FRACTION,
+        expires_at_ms: None,
         state: PelletState::Evasive {
             owner_player_id: owner_id,
             expires_at_ms: i64::MAX,

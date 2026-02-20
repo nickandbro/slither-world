@@ -16,7 +16,10 @@ export type PelletVisualState = {
   renderSize: number
   targetSize: number
   lastServerAt: number
-  colorIndex: number
+  color: string
+  colorR: number
+  colorG: number
+  colorB: number
 }
 
 export type CreatePelletMotionHelpersParams = {
@@ -76,6 +79,31 @@ export const createPelletMotionHelpers = ({
   const tempB = new THREE.Vector3()
   const wobbleTangent = new THREE.Vector3()
   const wobbleBitangent = new THREE.Vector3()
+  const parsedColorTemp = new THREE.Color()
+  const pelletColorIntensity = 0.84
+
+  const parsePelletColor = (color: string): [number, number, number] => {
+    if (typeof color !== 'string') {
+      return [1, 1, 1]
+    }
+    try {
+      parsedColorTemp.set(color)
+    } catch {
+      return [1, 1, 1]
+    }
+    if (
+      !Number.isFinite(parsedColorTemp.r) ||
+      !Number.isFinite(parsedColorTemp.g) ||
+      !Number.isFinite(parsedColorTemp.b)
+    ) {
+      return [1, 1, 1]
+    }
+    return [
+      clamp(parsedColorTemp.r * pelletColorIntensity, 0, 1),
+      clamp(parsedColorTemp.g * pelletColorIntensity, 0, 1),
+      clamp(parsedColorTemp.b * pelletColorIntensity, 0, 1),
+    ]
+  }
 
   const getPelletMotionState = (pellet: PelletSnapshot) => {
     let state = pelletMotionStates.get(pellet.id)
@@ -109,6 +137,7 @@ export const createPelletMotionHelpers = ({
       tempA.normalize()
     }
 
+    const [colorR, colorG, colorB] = parsePelletColor(pellet.color)
     let state = pelletVisualStates.get(pellet.id)
     if (!state) {
       state = {
@@ -119,7 +148,10 @@ export const createPelletMotionHelpers = ({
         renderSize: safeSize,
         targetSize: safeSize,
         lastServerAt: timeSeconds,
-        colorIndex: pellet.colorIndex,
+        color: pellet.color,
+        colorR,
+        colorG,
+        colorB,
       }
       pelletVisualStates.set(pellet.id, state)
       return state
@@ -146,7 +178,10 @@ export const createPelletMotionHelpers = ({
     }
 
     state.targetSize = safeSize
-    state.colorIndex = pellet.colorIndex
+    state.color = pellet.color
+    state.colorR = colorR
+    state.colorG = colorG
+    state.colorB = colorB
     state.velocity.multiplyScalar(Math.exp(-4 * Math.max(0, deltaSeconds)))
     const horizon = clamp(
       timeSeconds - state.lastServerAt,

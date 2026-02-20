@@ -292,6 +292,8 @@ mod tests {
             last_seen: 0,
             respawn_at: None,
             boost_floor_len: 4,
+            trail_color_cycle_cursor: 0,
+            next_boost_trail_pellet_at_ms: 0,
             snake: make_snake(4),
             pellet_growth_fraction: 0.0,
             tail_extension: 0.0,

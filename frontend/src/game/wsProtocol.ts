@@ -6,7 +6,7 @@ import type {
   PlayerSnapshot,
   Point,
 } from './types'
-import { parseHexColor } from '@shared/color/hex'
+import { bytesToHexColor, parseHexColor } from '@shared/color/hex'
 import { Reader, readSkinColors } from './wsProtocol/reader'
 import { readEnvironment } from './wsProtocol/environment'
 
@@ -16,7 +16,7 @@ export type PlayerMeta = {
   skinColors?: string[]
 }
 
-const VERSION = 20
+const VERSION = 21
 
 const TYPE_JOIN = 0x01
 const TYPE_INPUT = 0x02
@@ -897,9 +897,11 @@ function readPellets(reader: Reader, count: number): PelletSnapshot[] | null {
     const id = reader.readU32()
     const ox = reader.readI16()
     const oy = reader.readI16()
-    const colorIndex = reader.readU8()
+    const r = reader.readU8()
+    const g = reader.readU8()
+    const b = reader.readU8()
     const sizeQ = reader.readU8()
-    if (id === null || ox === null || oy === null || colorIndex === null || sizeQ === null) {
+    if (id === null || ox === null || oy === null || r === null || g === null || b === null || sizeQ === null) {
       return null
     }
     const point = decodeOctI16ToPoint(ox, oy)
@@ -909,7 +911,7 @@ function readPellets(reader: Reader, count: number): PelletSnapshot[] | null {
       x: point.x,
       y: point.y,
       z: point.z,
-      colorIndex,
+      color: bytesToHexColor(r, g, b),
       size: PELLET_SIZE_MIN + (PELLET_SIZE_MAX - PELLET_SIZE_MIN) * sizeT,
     })
   }

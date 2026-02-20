@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import type { PelletSnapshot } from '../../../../game/types'
-import type { PelletMotionState, PelletVisualState } from './motion'
+import { pelletSeedUnit, type PelletMotionState, type PelletVisualState } from './motion'
 import type { PelletGroundCacheEntry } from './surface'
 import type { PelletConsumeGhost } from './consumeGhosts'
 import type { PelletSpriteBucket } from './buckets'
@@ -45,8 +45,9 @@ type CreatePelletRuntimeUpdaterOptions = {
   pelletBucketOffsets: number[]
   pelletBucketPositionArrays: Array<Float32Array | null>
   pelletBucketOpacityArrays: Array<Float32Array | null>
+  pelletBucketColorArrays: Array<Float32Array | null>
   pelletBuckets: Array<PelletSpriteBucket | null>
-  pelletBucketIndex: (colorIndex: number, size: number) => number
+  pelletBucketIndex: (size: number) => number
   ensurePelletBucketCapacity: (bucketIndex: number, requiredCount: number) => PelletSpriteBucket
   resolvePelletRenderSize: (state: PelletVisualState) => number
   tempVector: THREE.Vector3
@@ -91,6 +92,7 @@ export const createPelletRuntimeUpdater = (
     pelletBucketOffsets,
     pelletBucketPositionArrays,
     pelletBucketOpacityArrays,
+    pelletBucketColorArrays,
     pelletBuckets,
     pelletBucketIndex,
     ensurePelletBucketCapacity,
@@ -101,6 +103,12 @@ export const createPelletRuntimeUpdater = (
     pelletGroundCache,
     pelletMotionStates,
   } = options
+
+  const pelletGlowOpacityFactor = (id: number, timeSeconds: number) => {
+    const phaseOffset = pelletSeedUnit(id, 0x517cc1b7) * Math.PI * 2
+    const pulse = 0.5 + 0.5 * Math.cos(timeSeconds * PELLET_GLOW_PULSE_SPEED + phaseOffset)
+    return clamp(0.66 + 0.34 * pulse, 0.52, 1)
+  }
 
   const updatePellets = (
     pellets: PelletSnapshot[],
@@ -139,6 +147,7 @@ export const createPelletRuntimeUpdater = (
       pelletBucketOffsets[i] = 0
       pelletBucketPositionArrays[i] = null
       pelletBucketOpacityArrays[i] = null
+      pelletBucketColorArrays[i] = null
     }
 
     // Keep large glow points stable near the horizon while culling the far hemisphere.
@@ -162,7 +171,7 @@ export const createPelletRuntimeUpdater = (
         continue
       }
       const renderPelletSize = resolvePelletRenderSize(state)
-      const bucketIndex = pelletBucketIndex(state.colorIndex, renderPelletSize)
+      const bucketIndex = pelletBucketIndex(renderPelletSize)
       pelletBucketCounts[bucketIndex] += 1
       visibleCount += 1
     }
@@ -179,7 +188,7 @@ export const createPelletRuntimeUpdater = (
       ) {
         continue
       }
-      const bucketIndex = pelletBucketIndex(ghost.colorIndex, ghost.size)
+      const bucketIndex = pelletBucketIndex(ghost.size)
       pelletBucketCounts[bucketIndex] += 1
       visibleCount += 1
     }
@@ -205,6 +214,7 @@ export const createPelletRuntimeUpdater = (
       nextBucket.corePoints.geometry.setDrawRange(0, required)
       pelletBucketPositionArrays[bucketIndex] = nextBucket.positionAttribute.array as Float32Array
       pelletBucketOpacityArrays[bucketIndex] = nextBucket.opacityAttribute.array as Float32Array
+      pelletBucketColorArrays[bucketIndex] = nextBucket.colorAttribute.array as Float32Array
     }
     for (let i = 0; i < pellets.length; i += 1) {
       const pellet = pellets[i]
@@ -222,10 +232,11 @@ export const createPelletRuntimeUpdater = (
         continue
       }
       const renderPelletSize = resolvePelletRenderSize(state)
-      const bucketIndex = pelletBucketIndex(state.colorIndex, renderPelletSize)
+      const bucketIndex = pelletBucketIndex(renderPelletSize)
       const positions = pelletBucketPositionArrays[bucketIndex]
       const opacities = pelletBucketOpacityArrays[bucketIndex]
-      if (!positions || !opacities) continue
+      const colors = pelletBucketColorArrays[bucketIndex]
+      if (!positions || !opacities || !colors) continue
 
       getPelletSurfacePositionFromNormal(
         pellet.id,
@@ -243,7 +254,10 @@ export const createPelletRuntimeUpdater = (
       positions[pOffset] = tempVector.x
       positions[pOffset + 1] = tempVector.y
       positions[pOffset + 2] = tempVector.z
-      opacities[itemIndex] = 1
+      opacities[itemIndex] = pelletGlowOpacityFactor(pellet.id, timeSeconds)
+      colors[pOffset] = state.colorR
+      colors[pOffset + 1] = state.colorG
+      colors[pOffset + 2] = state.colorB
     }
     for (let i = 0; i < pelletConsumeGhosts.length; i += 1) {
       const ghost = pelletConsumeGhosts[i]!
@@ -258,10 +272,11 @@ export const createPelletRuntimeUpdater = (
       ) {
         continue
       }
-      const bucketIndex = pelletBucketIndex(ghost.colorIndex, ghost.size)
+      const bucketIndex = pelletBucketIndex(ghost.size)
       const positions = pelletBucketPositionArrays[bucketIndex]
       const opacities = pelletBucketOpacityArrays[bucketIndex]
-      if (!positions || !opacities) continue
+      const colors = pelletBucketColorArrays[bucketIndex]
+      if (!positions || !opacities || !colors) continue
       tempVector.copy(ghost.position)
       const itemIndex = pelletBucketOffsets[bucketIndex]
       pelletBucketOffsets[bucketIndex] += 1
@@ -274,7 +289,10 @@ export const createPelletRuntimeUpdater = (
         1 - smoothstep(PELLET_CONSUME_GHOST_OPACITY_FADE_START, 1, ageT),
         0,
         1,
-      )
+      ) * pelletGlowOpacityFactor(ghost.pelletId, timeSeconds)
+      colors[pOffset] = ghost.colorR
+      colors[pOffset + 1] = ghost.colorG
+      colors[pOffset + 2] = ghost.colorB
     }
 
     for (let bucketIndex = 0; bucketIndex < pelletBucketCount; bucketIndex += 1) {
@@ -283,6 +301,7 @@ export const createPelletRuntimeUpdater = (
       if (!bucket) continue
       bucket.positionAttribute.needsUpdate = true
       bucket.opacityAttribute.needsUpdate = true
+      bucket.colorAttribute.needsUpdate = true
     }
 
     for (const id of pelletGroundCache.keys()) {
@@ -304,7 +323,7 @@ export const createPelletRuntimeUpdater = (
       if (!bucket) continue
       const phase =
         timeSeconds * PELLET_GLOW_PULSE_SPEED +
-        bucket.colorBucketIndex * PELLET_GLOW_PHASE_STEP +
+        bucket.bucketIndex * PELLET_GLOW_PHASE_STEP +
         bucket.sizeTierIndex * 0.91
       const pulse = 0.5 + 0.5 * Math.cos(phase)
       const centered = (pulse - 0.5) * 2

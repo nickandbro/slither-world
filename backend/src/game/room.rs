@@ -1,7 +1,9 @@
 use super::constants::{
     BASE_PELLET_COUNT, BASE_SPEED, BIG_PELLET_GROWTH_FRACTION, BOOST_MULTIPLIER,
-    BOOST_NODE_DRAIN_PER_SEC, BOOST_SCORE_DRAIN_PER_SEC, BOT_BOOST_DISTANCE, BOT_COUNT, COLOR_POOL,
-    DEATH_PELLET_SIZE_MAX, DEATH_PELLET_SIZE_MIN, EVASIVE_PELLET_CHASE_CONE_ANGLE,
+    BOOST_NODE_DRAIN_PER_SEC, BOOST_SCORE_DRAIN_PER_SEC, BOOST_TRAIL_PELLET_GROWTH_FRACTION,
+    BOOST_TRAIL_PELLET_INTERVAL_MS, BOOST_TRAIL_PELLET_SIZE_MAX, BOOST_TRAIL_PELLET_SIZE_MIN,
+    BOOST_TRAIL_PELLET_TTL_MS, BOT_BOOST_DISTANCE, BOT_COUNT, COLOR_POOL, DEATH_PELLET_SIZE_MAX,
+    DEATH_PELLET_SIZE_MIN, EVASIVE_PELLET_CHASE_CONE_ANGLE,
     EVASIVE_PELLET_CHASE_MAX_ANGLE_RATIO, EVASIVE_PELLET_COOLDOWN_JITTER_MS,
     EVASIVE_PELLET_COOLDOWN_MS, EVASIVE_PELLET_EVADE_FADE_RADIUS_RATIO,
     EVASIVE_PELLET_EVADE_FULL_RADIUS_RATIO, EVASIVE_PELLET_EVADE_MIN_FACTOR,
@@ -17,8 +19,9 @@ use super::constants::{
     PLAYER_TIMEOUT_MS, RESPAWN_COOLDOWN_MS, RESPAWN_RETRY_MS, SMALL_PELLET_ATTRACT_RADIUS,
     SMALL_PELLET_ATTRACT_SPEED, SMALL_PELLET_ATTRACT_STEP_MAX_RATIO, SMALL_PELLET_CONSUME_ANGLE,
     SMALL_PELLET_DIGESTION_STRENGTH, SMALL_PELLET_DIGESTION_STRENGTH_MAX,
-    SMALL_PELLET_GROWTH_FRACTION, SMALL_PELLET_LOCK_CONE_ANGLE, SMALL_PELLET_MOUTH_FORWARD,
-    SMALL_PELLET_SHRINK_MIN_RATIO, SMALL_PELLET_SIZE_MAX, SMALL_PELLET_SIZE_MIN,
+    SMALL_PELLET_COLOR_PALETTE, SMALL_PELLET_GROWTH_FRACTION, SMALL_PELLET_LOCK_CONE_ANGLE,
+    SMALL_PELLET_MOUTH_FORWARD, SMALL_PELLET_SHRINK_MIN_RATIO, SMALL_PELLET_SIZE_MAX,
+    SMALL_PELLET_SIZE_MIN,
     SMALL_PELLET_SPAWN_HEAD_EXCLUSION_ANGLE, SMALL_PELLET_VIEW_MARGIN_MAX,
     SMALL_PELLET_VIEW_MARGIN_MIN, SMALL_PELLET_VISIBLE_MAX, SMALL_PELLET_VISIBLE_MIN,
     SMALL_PELLET_ZOOM_MAX_CAMERA_DISTANCE, SMALL_PELLET_ZOOM_MIN_CAMERA_DISTANCE,
@@ -252,7 +255,6 @@ struct PlayerCollisionSnapshot {
     body_angular_radius: f64,
 }
 
-const SMALL_PELLET_COLOR_COUNT: u8 = 12;
 const PELLET_SPAWN_COLLIDER_MARGIN_ANGLE: f64 = 0.0055;
 const PELLET_DEATH_LOCAL_RESPAWN_ATTEMPTS: usize = 14;
 const PELLET_DEATH_GLOBAL_RESPAWN_ATTEMPTS: usize = 40;
@@ -624,6 +626,8 @@ impl RoomState {
                 if let Some(first) = stored.as_ref().and_then(|v| v.first()) {
                     player.color = format!("#{:02x}{:02x}{:02x}", first[0], first[1], first[2]);
                 }
+                player.trail_color_cycle_cursor = 0;
+                player.next_boost_trail_pellet_at_ms = 0;
             }
         }
 
@@ -659,6 +663,8 @@ impl RoomState {
         player.alive = false;
         player.respawn_at = None;
         player.boost_floor_len = STARTING_LENGTH;
+        player.trail_color_cycle_cursor = 0;
+        player.next_boost_trail_pellet_at_ms = 0;
         player.snake.clear();
         player.pellet_growth_fraction = 0.0;
         player.tail_extension = 0.0;
@@ -1053,6 +1059,8 @@ impl RoomState {
             last_seen: Self::now_millis(),
             respawn_at,
             boost_floor_len: snake.len().max(STARTING_LENGTH),
+            trail_color_cycle_cursor: 0,
+            next_boost_trail_pellet_at_ms: 0,
             snake,
             pellet_growth_fraction: 0.0,
             tail_extension: 0.0,
@@ -1177,15 +1185,45 @@ impl RoomState {
         point_from_spherical(theta, phi)
     }
 
+    fn random_pellet_color_rgb(rng: &mut impl Rng) -> [u8; 3] {
+        let index = rng.gen_range(0..SMALL_PELLET_COLOR_PALETTE.len());
+        SMALL_PELLET_COLOR_PALETTE[index]
+    }
+
+    fn parse_hex_rgb(value: &str) -> Option<[u8; 3]> {
+        let hex = value.strip_prefix('#')?;
+        if hex.len() != 6 {
+            return None;
+        }
+        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+        Some([r, g, b])
+    }
+
+    fn player_skin_cycle_color(player: &mut Player) -> [u8; 3] {
+        if let Some(skin) = player.skin.as_ref() {
+            if !skin.is_empty() {
+                let index = player.trail_color_cycle_cursor % skin.len();
+                player.trail_color_cycle_cursor = player.trail_color_cycle_cursor.wrapping_add(1);
+                return skin[index];
+            }
+        }
+        let fallback = Self::parse_hex_rgb(player.color.as_str()).unwrap_or([255, 255, 255]);
+        player.trail_color_cycle_cursor = player.trail_color_cycle_cursor.wrapping_add(1);
+        fallback
+    }
+
     fn make_small_pellet(&mut self, normal: Point, rng: &mut impl Rng) -> Pellet {
         let size = rng.gen_range(SMALL_PELLET_SIZE_MIN..=SMALL_PELLET_SIZE_MAX);
         Pellet {
             id: self.next_small_pellet_id(),
             normal,
-            color_index: rng.gen_range(0..SMALL_PELLET_COLOR_COUNT),
+            color_rgb: Self::random_pellet_color_rgb(rng),
             base_size: size,
             current_size: size,
             growth_fraction: SMALL_PELLET_GROWTH_FRACTION,
+            expires_at_ms: None,
             state: PelletState::Idle,
         }
     }
@@ -1512,10 +1550,11 @@ impl RoomState {
             self.pellets.push(Pellet {
                 id: pellet_id,
                 normal: spawn_point,
-                color_index: rng.gen_range(0..SMALL_PELLET_COLOR_COUNT),
+                color_rgb: Self::random_pellet_color_rgb(&mut rng),
                 base_size: size,
                 current_size: size,
                 growth_fraction: BIG_PELLET_GROWTH_FRACTION,
+                expires_at_ms: None,
                 state: PelletState::Evasive {
                     owner_player_id: owner_player_id.clone(),
                     expires_at_ms: now_ms + EVASIVE_PELLET_LIFETIME_MS,
@@ -1550,6 +1589,71 @@ impl RoomState {
                 self.pellets.push(pellet);
             }
             attempts += 1;
+        }
+    }
+
+    fn spawn_boost_trail_pellets(&mut self, now_ms: i64) {
+        if BOOST_TRAIL_PELLET_INTERVAL_MS <= 0 {
+            return;
+        }
+
+        let mut pending_spawns: Vec<(Point, [u8; 3])> = Vec::new();
+        let player_ids: Vec<String> = self.players.keys().cloned().collect();
+        for player_id in player_ids {
+            let Some(player) = self.players.get_mut(&player_id) else {
+                continue;
+            };
+            if !player.alive || !player.is_boosting {
+                player.next_boost_trail_pellet_at_ms = now_ms;
+                continue;
+            }
+            if player.next_boost_trail_pellet_at_ms <= 0 {
+                player.next_boost_trail_pellet_at_ms = now_ms;
+            }
+            if now_ms < player.next_boost_trail_pellet_at_ms {
+                continue;
+            }
+            let Some(tail_node) = player.snake.last() else {
+                player.next_boost_trail_pellet_at_ms = now_ms + BOOST_TRAIL_PELLET_INTERVAL_MS;
+                continue;
+            };
+            let tail_normal = normalize(Point {
+                x: tail_node.x,
+                y: tail_node.y,
+                z: tail_node.z,
+            });
+            if length(tail_normal) <= 1e-8 {
+                player.next_boost_trail_pellet_at_ms = now_ms + BOOST_TRAIL_PELLET_INTERVAL_MS;
+                continue;
+            }
+            let color_rgb = Self::player_skin_cycle_color(player);
+            pending_spawns.push((tail_normal, color_rgb));
+            player.next_boost_trail_pellet_at_ms = now_ms + BOOST_TRAIL_PELLET_INTERVAL_MS;
+        }
+
+        if pending_spawns.is_empty() {
+            return;
+        }
+
+        let mut rng = rand::thread_rng();
+        for (normal, color_rgb) in pending_spawns {
+            let size = rng.gen_range(BOOST_TRAIL_PELLET_SIZE_MIN..=BOOST_TRAIL_PELLET_SIZE_MAX);
+            let pellet_id = self.next_small_pellet_id();
+            self.pellets.push(Pellet {
+                id: pellet_id,
+                normal,
+                color_rgb,
+                base_size: size,
+                current_size: size,
+                growth_fraction: BOOST_TRAIL_PELLET_GROWTH_FRACTION,
+                expires_at_ms: Some(now_ms + BOOST_TRAIL_PELLET_TTL_MS),
+                state: PelletState::Idle,
+            });
+        }
+
+        if self.pellets.len() > MAX_PELLETS {
+            let excess = self.pellets.len() - MAX_PELLETS;
+            self.pellets.drain(0..excess);
         }
     }
 
@@ -1871,6 +1975,13 @@ impl RoomState {
         let mut consumed_events: Vec<(u32, String)> = Vec::new();
         let mut i = 0usize;
         while i < self.pellets.len() {
+            if self.pellets[i]
+                .expires_at_ms
+                .is_some_and(|expires_at_ms| expires_at_ms <= now_ms)
+            {
+                self.pellets.swap_remove(i);
+                continue;
+            }
             let pellet_state = self.pellets[i].state.clone();
 
             if let PelletState::Evasive {
@@ -2419,6 +2530,8 @@ impl RoomState {
             player.is_boosting = player.boost && boost_active_after;
         }
 
+        self.spawn_boost_trail_pellets(now);
+
         // Advance existing digestions before applying newly swallowed pellets so new bulges
         // always begin from the same head-relative start regardless of boost step count.
         self.update_small_pellets(dt_seconds);
@@ -2449,6 +2562,7 @@ impl RoomState {
             player.tail_extension = 0.0;
             player.oxygen_damage_accumulator = 0.0;
             player.score = 0;
+            player.next_boost_trail_pellet_at_ms = 0;
             let dropped_points = player
                 .snake
                 .iter()
@@ -2469,15 +2583,15 @@ impl RoomState {
                 continue;
             };
             let size = rng.gen_range(DEATH_PELLET_SIZE_MIN..=DEATH_PELLET_SIZE_MAX);
-            let color_index = rng.gen_range(0..SMALL_PELLET_COLOR_COUNT);
             let pellet_id = self.next_small_pellet_id();
             self.pellets.push(Pellet {
                 id: pellet_id,
                 normal: spawn_point,
-                color_index,
+                color_rgb: Self::random_pellet_color_rgb(&mut rng),
                 base_size: size,
                 current_size: size,
                 growth_fraction: BIG_PELLET_GROWTH_FRACTION,
+                expires_at_ms: None,
                 state: PelletState::Idle,
             });
         }
@@ -2509,6 +2623,8 @@ impl RoomState {
         player.snake = spawned.snake;
         player.score = player.snake.len() as i64;
         player.boost_floor_len = player.snake.len().max(STARTING_LENGTH);
+        player.trail_color_cycle_cursor = 0;
+        player.next_boost_trail_pellet_at_ms = 0;
         player.pellet_growth_fraction = 0.0;
         player.tail_extension = 0.0;
         player.digestions.clear();
@@ -2965,11 +3081,9 @@ impl RoomState {
         let (ox, oy) = Self::encode_unit_vec_oct_i16(pellet.normal);
         encoder.write_i16(ox);
         encoder.write_i16(oy);
-        encoder.write_u8(
-            pellet
-                .color_index
-                .min(SMALL_PELLET_COLOR_COUNT.saturating_sub(1)),
-        );
+        encoder.write_u8(pellet.color_rgb[0]);
+        encoder.write_u8(pellet.color_rgb[1]);
+        encoder.write_u8(pellet.color_rgb[2]);
         encoder.write_u8(Self::quantize_pellet_size(pellet.current_size));
     }
 
@@ -3157,7 +3271,7 @@ impl RoomState {
         indices: &[usize],
     ) -> Vec<u8> {
         let pellet_count = indices.len().min(u16::MAX as usize);
-        let capacity = 4 + 8 + 4 + 2 + pellet_count * 10;
+        let capacity = 4 + 8 + 4 + 2 + pellet_count * 12;
         let mut encoder = protocol::Encoder::with_capacity(capacity);
         encoder.write_header(protocol::TYPE_PELLET_RESET, 0);
         encoder.write_i64(now);
@@ -3183,7 +3297,7 @@ impl RoomState {
         let update_count = updates.len().min(u16::MAX as usize);
         let remove_count = removes.len().min(u16::MAX as usize);
         let capacity =
-            4 + 8 + 4 + 2 + add_count * 10 + 2 + update_count * 10 + 2 + remove_count * 4;
+            4 + 8 + 4 + 2 + add_count * 12 + 2 + update_count * 12 + 2 + remove_count * 4;
         let mut encoder = protocol::Encoder::with_capacity(capacity);
         encoder.write_header(protocol::TYPE_PELLET_DELTA, 0);
         encoder.write_i64(now);
